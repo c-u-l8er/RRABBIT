@@ -246,11 +246,7 @@ These are named now so that no milestone can quietly claim them.
 
 ## 8. Milestones
 
-**M0 — the occlusion proof.** One real Wayland client (`weston-terminal` or
-`foot`), one billboard, the shared-context texture path of §2.2. Proof: a
-screenshot where **the road passes in front of a live, updating application
-window**, plus a readback showing the texture changing between frames. Nothing
-else. If this fails, stop.
+**M0 — the occlusion proof. PASSED (2026-08-08).** See §10.
 
 **M1 — many windows, one road.** `surfaceCreated`/`surfaceDestroyed` →
 billboards. Milepost addressing (invariant 6). Titles from
@@ -279,3 +275,76 @@ never be a surprise later.
 
 three.js r160 is MIT and already vendored by RAVIO with sha256 provenance in
 `world/assets/PROVENANCE.json`. That convention carries over.
+
+---
+
+## 10. M0 — the occlusion proof, and what it cost
+
+**Passed 2026-08-08.** `m0/` — evidence in `docs/m0-occlusion.png`.
+
+A pure-TypeScript Wayland client (Greenfield's `simple-shm`, vendored to
+`m0/client/`) connects to a Greenfield session; its output canvas is used as a
+three.js `CanvasTexture` on a billboard at z −600; an amber pylon at z −300 and
+a gantry at z −330 stand between it and the camera.
+
+**Measured, not merely seen:**
+
+| | |
+|---|---|
+| surfaces | 1 (a real `wl_surface`) |
+| scene refreshes | 827 → 1005 → 1048 → 1091, climbing |
+| board sweep, 12×12 | 44–46 of 144 samples amber — the occluders **cut the live surface** |
+| liveness digest | 3949704467 → 1972077845 → 472223074, changing every read |
+
+A changing digest with steady occlusion is the whole claim: the surface is live,
+and geometry is in front of it. This is what `CSS3DRenderer` cannot do and why
+RAVIO §9 ruled the equivalent out for web pages. **§2.3 stands.**
+
+M0 deliberately used the scene-canvas `CanvasTexture` shortcut, **not** the
+shared-context path of §2.2 — the gate is occlusion, and one window does not
+need per-surface textures. M1 does.
+
+### 10.1 Findings that would cost a day if re-derived
+
+- **The debug preview's CSS size silently became the Wayland output
+  resolution.** `Scene.ensureResolution` installs a `ResizeObserver` that sets
+  `canvas.width/height` from `clientWidth/clientHeight`. Styling the corner
+  control view `width:256px` made the compositor's screen 256×150. Shrink it
+  with **`transform: scale()`**, which scales what is painted and does not touch
+  `clientWidth`. *A debug affordance decided a product dimension.*
+- **A `CanvasTexture` does not re-allocate when its source canvas is resized.**
+  It stays at the size of its first upload, and the new smaller content lands in
+  a corner of the old allocation with the rest black. Reads as a broken texture;
+  is a wrong-shaped one. Watch the size and dispose+rebuild. RAVIO already had
+  this rule for `VideoTexture` (§9.1) — **it is a `CanvasTexture` rule too.**
+- **Sampling one point is not an instrument.** The first run reported the board
+  black because the probe point was aimed where the surface was not — which is
+  indistinguishable from a dead pipeline, and sent the diagnosis to
+  `preserveDrawingBuffer` (wrong: `toDataURL` returned 12,370 bytes vs 2,118 for
+  a blank canvas, which is what disproved it). Sweep the face and report
+  coverage. *A hole in the arithmetic looks exactly like a hole in the data* —
+  the same lesson RAVIO's milepost tape recorded, in a new costume.
+- **Greenfield takes seconds to begin compositing.** Read at 6 s:
+  `sceneRefreshes: 1`, and it looks dead. Read at ~15 s: 827. **A too-early read
+  is a false negative**, the same class as RAVIO's "measurements must outlast a
+  frame".
+- **The control view earned its place on the first run.** Corner alive +
+  billboard black localised the fault to the texture upload immediately. Without
+  it, "compositor broken" and "texture broken" are the same screenshot.
+
+### 10.2 Harness findings (`agent-browser`)
+
+- **The shared default session produced no frames at all** — raw
+  `requestAnimationFrame` fired **exactly once** and stopped, with
+  `visibilityState: "visible"`. Greenfield's render loop is also rAF, so both
+  stalled and it read as two bugs. Use an isolated `--session` plus software GL:
+
+  ```
+  --args --use-angle=swiftshader,--enable-unsafe-swiftshader,--disable-gpu-vsync,--disable-frame-rate-limit
+  ```
+
+- **`--args` is IGNORED once the daemon is running** (`⚠ --args ignored: daemon
+  already running`) — `agent-browser close` first, or the flags silently do
+  nothing and the failure looks like the page.
+- **`eval` keeps globals between calls**, so `const t = …` twice throws
+  `Identifier 't' has already been declared` mid-run. Wrap each eval in an IIFE.

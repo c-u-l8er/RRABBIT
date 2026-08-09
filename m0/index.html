@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RRABBIT M0 — the occlusion proof</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #03040a;
+        color: #f3ead4;
+        font: 12px/1.5 ui-monospace, monospace;
+      }
+      #gl {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      /* Greenfield's own scene canvas. Kept VISIBLE in the corner on purpose:
+         it is the control view. If the corner is alive and the billboard is
+         not, the fault is the texture upload; if neither is alive, the fault is
+         the compositor. Two failure modes that look identical without it -- and
+         this is not hypothetical, it is what told M0 apart on the first run.
+
+         THE SIZE HERE IS THE WAYLAND OUTPUT RESOLUTION. Greenfield's
+         Scene.ensureResolution() syncs the canvas backing store to its CLIENT
+         size, so styling this box `width:256px` silently made the compositor's
+         screen 256x150. It must stay 1024x600 -- RAVIO's SIGN_W/SIGN_H -- and
+         be shrunk with a TRANSFORM, which scales what is painted without
+         touching clientWidth/clientHeight. */
+      #gf {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        width: 1024px;
+        height: 600px;
+        transform: scale(0.25);
+        transform-origin: 100% 100%;
+        border: 1px solid #2de2e6;
+        z-index: 3;
+        background: #000;
+      }
+      #status {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        z-index: 4;
+        padding: 6px 10px;
+        background: rgba(3, 4, 10, 0.85);
+        border: 1px solid #c8862a;
+        color: #f2c14e;
+      }
+      #cap {
+        position: fixed;
+        right: 12px;
+        bottom: 168px;
+        z-index: 4;
+        color: #2de2e6;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <canvas id="gf" width="1024" height="600"></canvas>
+    <div id="cap">compositor output (control)</div>
+    <div id="status">booting</div>
+    <script type="module" src="./probe.js"></script>
+  </body>
+</html>

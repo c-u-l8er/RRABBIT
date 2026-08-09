@@ -3,3 +3,4 @@ dist/
 .rrabbit/
 __pycache__/
 world/assets/three.module.js
+m0-attempt*.png
