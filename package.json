@@ -7,8 +7,9 @@
   "license": "AGPL-3.0",
   "scripts": {
     "m0": "vite dev",
-    "proxy": "node proxy/proxy-cli.js --applications=./proxy/applications.json --allow-origin=http://127.0.0.1:8911 --bind-ip=127.0.0.1 --bind-port=8912 --base-url=ws://127.0.0.1:8912 --encoder=x264",
-    "postinstall": "node tools/patch-compositor.mjs",
+    "addons": "./tools/build-addons.sh",
+    "proxy": "./tools/proxy.sh",
+    "postinstall": "node tools/patch-compositor.mjs && node tools/check-addons.mjs --warn",
     "build": "node tools/patch-compositor.mjs && vite build"
   },
   "dependencies": {

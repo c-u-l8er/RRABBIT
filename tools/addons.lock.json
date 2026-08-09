@@ -1,0 +1,16 @@
+{
+  "comment": "Written by tools/build-addons.sh. Identifies the locally built addons; see docs/spec/README.md §18.1.",
+  "ref": "6c578f4db7ec027eb1d8a5f7ec6e09f7646dbb57",
+  "commit": "6c578f4db7ec027eb1d8a5f7ec6e09f7646dbb57",
+  "gstreamer": "1.28.6",
+  "compiler": "GCC: (GNU) 16.1.1 20260728",
+  "files": {
+    "proxy-encoding-addon.node": "f2d180d390b68ae33d50fec9d4783436031e387342e3feb74befbd0a6abcd14a",
+    "proxy-poll-addon.node": "0067a19338648d13bffbb93d048986d3c9153d2f7ae3da923953281cf7139c08",
+    "wayland-server-addon.node": "ab41eeb14a0d9cc6c0c5bf9147ea9bd1b038732e5991fdfa9770e3e30427e52f",
+    "shared/libproxy-encoding.so": "837ff00a933ee7cf04a597249062c2c68138a6ab895cfb679132382c09b4e99e",
+    "shared/libwayland-server.so": "db145c01848659042b23813bb54abe1962bcd4c76138f5609e98b39e145a80c4",
+    "shared/libwayland-server.so.0": "db145c01848659042b23813bb54abe1962bcd4c76138f5609e98b39e145a80c4",
+    "shared/libwestfield.so": "afcced817f6535e1fc17651c99cf59358a08dfa8f080deb09e0e062f3d328957"
+  }
+}

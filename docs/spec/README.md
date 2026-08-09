@@ -1053,3 +1053,100 @@ that every feature still worked in it.
 - The per-window encode cost is **still unmeasured** — one window is not a cost
   model.
 - The addon build is not automated and lives outside this repo.
+  *(Closed in §19.)*
+
+## 19. The addon build, made reproducible
+
+§18 left the fix for §13 living in a scratch clone under `/tmp`, which is a
+tmpfs on this machine and lost it at the next reboot. It is now
+`tools/build-addons.sh`: clone at a pinned commit, `cmake -G Ninja`,
+`ninja install`, replace `node_modules/@gfld/compositor-proxy/dist/addons`, and
+record a hash manifest at `tools/addons.lock.json`. The source tree lives in
+`~/.cache/rrabbit`, deliberately not `/tmp`. `npm run addons` is the entry point.
+
+The install **replaces** the addons directory rather than copying over it.
+Overlaying left behind a `libwayland-server.so` symlink that one build produced
+and the next did not, and the manifest then recorded it as if it belonged.
+
+### 19.1 The check has to be an identity check
+
+The failure it guards against emits no error at all, so there is nothing to
+catch at runtime — the question "is the installed addon the one built here?" has
+to be asked before anything starts. `tools/check-addons.mjs` compares sha256
+against the manifest and fails on two conditions:
+
+- **the files differ.** If they match `dist/addons.prebuilt-backup`, it says so
+  in those words — that is what an `npm install` does.
+- **the system gstreamer moved since the build.** An Arch upgrade re-creates
+  §18.1 exactly, and silently.
+
+Wired in at both ends: `postinstall` runs it with `--warn` (an `npm install`
+legitimately restores the prebuilts, and should say so rather than fail), and
+`npm run proxy` runs it as a hard gate.
+
+**All three branches were made to fire before being trusted**, because §18.3 was
+a detector that could never have fired: prebuilts restored → named as prebuilts,
+exit 1; manifest gstreamer edited to 1.20.0 → named as drift, exit 1; `--warn` →
+exit 0. `.comment` in the binary is a readable corroborator — the npm prebuilt
+says `GCC: (Ubuntu 13.2.0-4ubuntu3)`, a local build says `GCC: (GNU) 16.1.1` —
+but the hash is what decides.
+
+### 19.2 The run recipe was prose, so `npm run proxy` did not work
+
+The render device and the `GST_GL_*` triple existed only in §13.5 and §18.1 as
+sentences. The script had neither, so the documented-working configuration was
+not the one the repo could actually run. Both now live in `tools/proxy.sh`, and
+the render node is chosen by **PCI vendor id** (`0x1002`) rather than by number:
+the numbering has been stable because it follows PCI order, but picking the
+NVIDIA node aborts inside GLib, so the choice is worth naming.
+
+### 19.3 npm's `1.0.0-rc1` is not the `1.0.0-rc1` tag
+
+Building the git tag `1.0.0-rc1` (`240c494`) produces addons that install,
+load, start, and then deliver a window that **has no size and never gets a
+buffer**: `mapped: true`, `rect: [0,0,0,0]`, `hasBuffer: false`, so no sign is
+built and nothing is ever encoded. Building `6c578f4` (master at the time)
+gives `rect: [0,0,960,653]`, `hasBuffer: true`. Reproduced twice each way.
+
+So the addon must be built from the commit npm actually published, which is not
+the commit the tag names. `build-addons.sh` pins the sha rather than tracking
+`master`, because "whatever master is today" is not reproducible either.
+
+**I first read this as the tag giving zero surfaces, and that was wrong** — it
+was §19.4 happening to land on the tag's first run. The tag's real defect is
+one layer up and only visible in `__views()`, not in the surface count.
+
+### 19.4 The XWayland session start is flaky, on every build
+
+Roughly one start in three delivers no surface at all. The signature is exact
+and readable in the proxy log:
+
+| | XWM connections | channels | surfaces |
+|---|---|---|---|
+| good | 1 | 4 | 1 |
+| bad | 2 | 2 | 0 |
+
+The bad case logs `XWayland started.` twice within 3 ms and the second
+`upsertXWMConnection` throws `open EEXIST` from `new Socket({fd})` — the
+displayfd read fires twice and the second attempt re-wraps a live fd. It is not
+caught into a retry; the session just proceeds without a working window manager.
+
+Measured 1-of-3 on `6c578f4` and 1-of-3 on the tag, so it is upstream and not
+something this repo introduced. Until it is fixed, **a single failed start
+proves nothing** — restart the proxy and check `XWM=` in the log before drawing
+any conclusion from `surfaces: 0`.
+
+### 19.5 `decodes` is a counter that can never move
+
+`state.decodes` is declared at `m2/shell.js:96` and incremented nowhere. It
+reads as a hard "no frames were decoded" signal and means nothing. Left in place
+here only because removing it is a separate change; do not use it as evidence.
+
+### 19.6 Still not clean
+
+The tear is worse than §18.4 described. Flattened to 1:1 (`scale: 1.0000`, edges
+equal) the prompt `[travis@PX13 RRABBIT]$` is legible and upright, so orientation
+and geometry are right — but a large diagonal region of the frame is filled with
+flat cyan and green that are not xterm's colours at all. That is not a blur or a
+damage-region seam; most of the surface is never written. Unmeasured, and it is
+the next thing to look at in the h264 path.
