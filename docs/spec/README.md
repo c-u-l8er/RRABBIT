@@ -512,7 +512,8 @@ flat output itself if it ever wants position-based routing.
 
 ## 13. Native applications — how far they get, and where they stop
 
-**Attempted 2026-08-08. NOT working. No native application has reached the road.**
+**WORKING as of 2026-08-08 — see §18. The sections below record how it failed
+first, and are kept because the diagnosis is what led to the fix.**
 
 This was run before M3 on purpose: it is the one remaining thing that could
 invalidate the architecture, and every later milestone gets more expensive to
@@ -974,3 +975,81 @@ every reason to work — but "has every reason to work" is what §13 said too.
   time-dependent. The first beacon run returned nothing for exactly this reason.
 - **Wait for an ANSWER, not for a port** — PARKVPS learned this against SLIRP,
   and a session script handing a URL to a browser has the same failure.
+
+---
+
+## 18. Native applications — working
+
+**2026-08-08.** A real `xterm` runs on the road: X11 → XWayland → nested
+compositor → h264 → browser → GPU texture → sign. Evidence in
+`docs/m7-native-xterm.png`.
+
+| claim | measurement |
+|---|---|
+| a native client is on the road | `surfaces: 1`, `signs: 1`, size **960×653** |
+| frames arrive | `hasBuffer: true`, sweep `26/64`, non-zero digest |
+| the flatten is pixel-exact | 960×653 surface → **960.00 × 960.00 edges**, `scale 1.0000` |
+| it is legible | the prompt reads `[travis@PX13 RRABBIT]$` |
+
+### 18.1 The prebuilt addon was built against a different gstreamer
+
+§13 exhausted the environment and never found the cause because it was not in
+the environment. The official build (`docker/compositor-proxy-cli-build.sh`)
+**compiles its own gstreamer at branch 1.20**, with `gl_winsys=egl` and
+`gl_api=opengl`. This machine has **1.28.6** — eight minor versions on. The
+shipped `libproxy-encoding.so` links a gstreamer GL that is not the one
+installed, which is why the pipeline connected, negotiated, logged nothing, and
+emitted nothing.
+
+Building the addon from source against the system gstreamer fixes it. It
+compiled clean — 29 targets, GCC 16.1.1, no warnings — and needed only `cmake`
+and `ninja`; every library was already present.
+
+**So `ldd` resolving is not evidence that a native module matches its
+dependencies.** Every symbol resolved the whole time §13 was failing.
+
+### 18.2 The two buffer paths disagree about which way is up
+
+A web client's shm buffer is uploaded straight to the texture and arrives
+bottom-up, so it needs the uv flip. A native client's frame is h264 and is
+decoded **through a shader that renders into** the texture, which flips it once
+already — flipping again turns it upside down.
+
+Measured on the xterm: `[travis@PX13 RRABBIT]` came out as
+`[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]` at the bottom of the window. The axis was read off one
+glyph: **`P` → `b` is a vertical mirror**; a horizontal one would have given `ꟼ`.
+The flip is now chosen per `bufferContents.mimeType`.
+
+### 18.3 THE BUILT BUNDLE WAS NOT THE SHELL I HAD BEEN TESTING
+
+Found while inspecting the native client: **minification mangles class names.**
+The production bundle reports constructor names of `ko`, `ro`, `mQ`, so every
+`impl.constructor.name === 'Surface'` check was dead in the shipped artifact.
+
+Consequences, none of which produced an error:
+
+- **popups did not render at all in the built shell** — `popupsByParentKey()`
+  keyed on the mangled name, so §16 worked only in the dev server;
+- the detector written to catch exactly that (`checkPopupsMapped`) was **also**
+  keyed on names, so it could never have fired.
+
+**Property** names survive esbuild, so identification is by shape now
+(`isSurface`, `isPopupRole` — `positionerState` is unique to `XdgPopup`).
+Verified in the *built* bundle: `popupQuads: 1`, `stranded: 0`, popup click
+resolves to `[197, 86]`.
+
+A type check that depends on a name the build tool may rewrite is a check that
+works until you ship it. §17 tested that the built bundle *ran*; it did not test
+that every feature still worked in it.
+
+### 18.4 Not clean yet
+
+- **Frames tear.** The screenshot shows a diagonal split and heavily blurred
+  glyphs — damage-region or keyframe artifacts in the h264 path, unmeasured.
+- **Reloading the shell orphans the remote client.** The proxy session outlives
+  the page and is keyed by `compositorSessionId`, so a reload joins a session
+  whose client is bound to a browser connection that is gone: `app: open`,
+  `surfaces: 0`, and an `xterm` still running. Restart the proxy between runs.
+- The per-window encode cost is **still unmeasured** — one window is not a cost
+  model.
+- The addon build is not automated and lives outside this repo.

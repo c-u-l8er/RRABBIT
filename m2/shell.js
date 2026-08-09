@@ -268,7 +268,21 @@ function resize() {
 //
 // The flip is at SAMPLE time (repeat/offset) because `flipY` is an UPLOAD-time
 // flag and adoption does no upload.
-function adoptSurfaceTexture(rs) {
+//
+// THE TWO BUFFER PATHS DISAGREE ABOUT WHICH WAY IS UP, and the fix is not one
+// constant. A web client's shm buffer is uploaded straight to the texture, so
+// it arrives bottom-up and needs the flip. A NATIVE client's frame is h264 and
+// is decoded through a shader that RENDERS INTO the texture, which flips it
+// once already -- flipping again turns it upside down.
+//
+// Measured on a real xterm: `[travis@PX13 RRABBIT]` came out as
+// `[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]` at the bottom of the window. The giveaway is `P` → `b`,
+// which is a VERTICAL mirror; a horizontal one would have given `ꟼ`. Choosing
+// the axis by reading the glyph beat guessing at it.
+//
+// `mimeType` is a property, so it survives minification -- unlike the class
+// names that broke in the built bundle (see isSurface above).
+function adoptSurfaceTexture(rs, view) {
   const { width, height } = rs.size
   const rt = new THREE.WebGLRenderTarget(width, height)
   rt.depthTexture = new THREE.DepthTexture(width, height)
@@ -276,8 +290,12 @@ function adoptSurfaceTexture(rs) {
   const tex = rt.texture
   tex.colorSpace = THREE.SRGBColorSpace
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
-  tex.repeat.set(1, -1)
-  tex.offset.set(0, 1)
+  const mime = view?.surface?.state?.bufferContents?.mimeType
+  const alreadyUpright = mime === 'video/h264' || mime === 'image/png'
+  if (!alreadyUpright) {
+    tex.repeat.set(1, -1)
+    tex.offset.set(0, 1)
+  }
   return { rt, tex }
 }
 
@@ -287,7 +305,7 @@ function makeSign(view, milepost, district) {
   const { width, height } = rs.size
   if (!width || !height) return null
 
-  const { rt, tex } = adoptSurfaceTexture(rs)
+  const { rt, tex } = adoptSurfaceTexture(rs, view)
 
   // One sign is sized to ITS OWN surface. M0's board was a fixed rectangle and
   // a 250x250 client filled a corner of it -- correct behaviour, wrong framing.
@@ -398,6 +416,20 @@ function dropSign(k, forget = false) {
   if (forget) signs.delete(k)
 }
 
+// MINIFICATION EATS CLASS NAMES. `impl.constructor.name === 'Surface'` works in
+// the dev server and is DEAD in the built bundle -- measured: the shipped shell
+// reports constructor names of `ko`, `ro`, `mQ`. Everything keyed on those names
+// silently stopped: popups did not render at all in the production build, and
+// the detector that exists to catch exactly that was dead too.
+//
+// PROPERTY names survive (esbuild does not mangle them by default), so identify
+// by SHAPE. `positionerState` is unique to XdgPopup among surface roles.
+//
+// The lesson generalises past this file: a type check that depends on a name
+// the build tool is free to rewrite is a check that works until you ship it.
+const isSurface = (impl) => !!impl && !!impl.resource && !!impl.state && 'mapped' in impl
+const isPopupRole = (role) => !!role && role.positionerState !== undefined
+
 // ----------------------------------------------------------------- popups
 //
 // AN xdg_popup COULD NOT MAP IN GREENFIELD 1.0.0-rc1 (and still cannot on
@@ -421,8 +453,8 @@ function checkPopupsMapped() {
   for (const client of Object.values(clients)) {
     for (const o of Object.values(client.connection?.wlObjects ?? {})) {
       const impl = o?.implementation
-      if (impl?.constructor?.name !== 'Surface') continue
-      if (impl.role?.constructor?.name !== 'XdgPopup') continue
+      if (!isSurface(impl)) continue
+      if (!isPopupRole(impl.role)) continue
       if (!impl.mapped && impl.state?.bufferContents) stranded++
     }
   }
@@ -453,8 +485,8 @@ function popupsByParentKey() {
   for (const client of Object.values(clients)) {
     for (const o of Object.values(client.connection?.wlObjects ?? {})) {
       const impl = o?.implementation
-      if (!impl || impl.constructor?.name !== 'Surface') continue
-      if (impl.role?.constructor?.name !== 'XdgPopup') continue
+      if (!isSurface(impl)) continue
+      if (!isPopupRole(impl.role)) continue
       if (!impl.mapped) continue
       const view = impl.role.view
       const rs = view?.renderStates?.[SCENE_ID]
@@ -497,7 +529,7 @@ function syncPopups() {
         q = undefined
       }
       if (!q) {
-        const { rt, tex } = adoptSurfaceTexture(rs)
+        const { rt, tex } = adoptSurfaceTexture(rs, view)
         const mesh = new THREE.Mesh(
           new THREE.PlaneGeometry(1, 1),
           new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
