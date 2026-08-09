@@ -47,6 +47,17 @@ a `dist/` missing three of its four modules.
 
 Also not done: `xdg_popup` is untouched, and signs carry no titles yet.
 
+## Local patches — do not lose these
+
+RRABBIT carries a **required** one-line fix to `@gfld/compositor`: without it an
+`xdg_popup` can never map, so **no client can show a menu, dropdown or tooltip**.
+`node_modules/` is gitignored, so the fix lives in [`patches/`](patches/) and is
+re-applied by `postinstall` and by `build`. A runtime detector warns if it is
+ever missing rather than silently repairing it.
+
+Read [`patches/README.md`](patches/README.md) before touching `package.json`
+scripts or upgrading `@gfld/compositor`.
+
 ## Lineage
 
 - [RAVIO](../RAVIO) — the world this forks, and the source of every measured
