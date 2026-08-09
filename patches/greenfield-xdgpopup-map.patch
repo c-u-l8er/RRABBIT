@@ -1,0 +1,36 @@
+Subject: [PATCH] fix(compositor): map xdg_popup surfaces
+
+An xdg_popup can never become mapped. `Surface.mapped` is only ever set by
+`FloatingDesktopSurface.commit()`, which is reached through
+`DesktopSurface.commit()`. XdgToplevel, ShellSurface and XWaylandShellSurface
+all call it; XdgPopup does not -- it acks the configure, schedules a render, and
+returns.
+
+The result is that a popup surface is created with the correct role, receives
+its buffer, and then sits at `mapped: false` forever. It never enters the view
+stack and never appears. Observed on 1.0.0-rc1 and still present on master:
+
+    role: XdgPopup, hasBuffer: true, mapped: false, view: not in viewStack
+
+This means no menu, dropdown, combobox or tooltip can be shown by any client,
+native or web -- it is hit the first time a user right-clicks.
+
+The fix mirrors XdgToplevel.onCommit: call `this.desktopSurface.commit()`.
+`FloatingDesktopSurface.commit()` already returns early while
+`surface.size === undefined`, so the bufferless first commit is unaffected.
+
+Verified with a client that opens an xdg_popup with a real XdgPositioner: after
+the change the popup maps, enters the view stack, receives a render state and a
+texture, and the compositor's computed position matches the positioner's anchor
+rect exactly.
+
+--- a/packages/compositor/src/XdgPopup.ts
++++ b/packages/compositor/src/XdgPopup.ts
+@@ -71,6 +71,7 @@ export default class XdgPopup implements XdgPopupRequests, SurfaceRole, DesktopS
+       this.xdgSurface.scheduleConfigure(false, () => this.sendConfigure())
+     }
+     this.committed = true
++    this.desktopSurface.commit()
+     surface.session.renderer.render()
+   }
+ 

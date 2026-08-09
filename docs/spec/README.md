@@ -831,11 +831,41 @@ Measured directly: a surface with role `XdgPopup`, `hasBuffer: true`,
 tooltip can appear in this compositor at all, for any client, native or web.
 Anyone building on rc1 will hit it the first time a user right-clicks.
 
-Worked around by finishing the job from the shell: at 10 Hz, any popup surface
-that has a buffer and is not mapped gets the `desktopSurface.commit()` it never
-received. **This is a patch over an upstream defect, not a design** — it belongs
-in a bug report, and it is listed in §13.6's "ask upstream" alongside the
-packaging defects.
+**FIXED AT THE SOURCE (2026-08-08), not worked around.** The first version of
+this section described a 10 Hz scan in the shell that finished the map itself.
+That is gone. The fix mirrors `XdgToplevel.onCommit` exactly:
+
+```diff
+   this.committed = true
++  this.desktopSurface.commit()
+   surface.session.renderer.render()
+```
+
+`FloatingDesktopSurface.commit()` already returns early while
+`surface.size === undefined`, so the bufferless first commit is unaffected.
+
+- `patches/greenfield-xdgpopup-map.patch` — the upstream-ready source diff,
+  written against `packages/compositor/src/XdgPopup.ts`.
+- `tools/patch-compositor.mjs` — applies the same change to the compiled dist
+  that npm ships, since no released build carries it. It matches an exact string
+  and **fails loudly** rather than applying to the wrong place, and runs from
+  `postinstall` and `build`.
+
+Verified with the shell-side workaround entirely removed: `stranded: 0`, popup
+`mapped: true`, in the view stack, with a texture, composited onto its sign, and
+a click resolving to the popup's own surface.
+
+What remains in the shell is a **detector, not a fix** (`checkPopupsMapped`). A
+shell that silently repaired this would hide a missing patch until someone
+wondered where the menus went; instead it counts stranded popups and names the
+command that fixes them. *(Caveat on how that was tested: reverting the patch did
+produce the warning, but vite's in-memory module cache made that particular run
+not cleanly isolated. The positive case — patch applied, workaround removed,
+popups working — was verified on a freshly started server.)*
+
+**rc1 and master are identical here**, so this is a live upstream bug, not
+something already fixed in a newer build. It belongs in a report alongside
+§13.3's packaging defects.
 
 ### 16.2 The billboard has no rectangle. The ledger does.
 

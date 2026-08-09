@@ -108,7 +108,8 @@ export const state = {
   overview: false,
   placed: 0,
   ledgerDistinct: null,
-  popupsMapped: 0,
+  strandedPopups: 0,
+  strandedWarned: false,
   popupQuads: 0,
   lastWasPopup: null,
   popupError: null,
@@ -399,41 +400,39 @@ function dropSign(k, forget = false) {
 
 // ----------------------------------------------------------------- popups
 //
-// AN xdg_popup CANNOT MAP IN GREENFIELD 1.0.0-rc1. `surface.mapped = true`
-// happens in exactly one place -- `FloatingDesktopSurface.commit()` -- and that
-// is called by XdgToplevel, ShellSurface and XWaylandShellSurface. XdgPopup's
-// own `onCommit` acks the configure, schedules a render, and never calls it.
+// AN xdg_popup COULD NOT MAP IN GREENFIELD 1.0.0-rc1 (and still cannot on
+// master). `surface.mapped = true` happens in exactly one place --
+// `FloatingDesktopSurface.commit()`, reached via `DesktopSurface.commit()` --
+// and XdgToplevel, ShellSurface and XWaylandShellSurface all call it while
+// XdgPopup does not. So a popup got its role, got its buffer, and sat at
+// `mapped: false` forever: no menus, dropdowns or tooltips for ANY client.
 //
-// So the popup surface is created with the right role, receives its buffer, and
-// then sits at `mapped: false` forever. Measured exactly that: role XdgPopup,
-// hasBuffer true, mapped false, and no view anywhere.
+// That is now FIXED AT THE SOURCE, not worked around:
+//   patches/greenfield-xdgpopup-map.patch  -- the upstream-ready diff
+//   tools/patch-compositor.mjs             -- applies it to the installed dist
 //
-// This is not a 3D problem. It is the reason no menu, dropdown, combobox or
-// tooltip can appear in this compositor AT ALL, for any client. Spec §7 worried
-// about placing a popup on a curved billboard; that worry was one layer too
-// high.
-//
-// Until upstream fixes it, the shell finishes the job: a popup that has a buffer
-// and is not mapped gets the `desktopSurface.commit()` it never received.
-function mapStrandedPopups() {
+// What remains here is a DETECTOR, not a fix. A shell that silently repaired
+// this would hide a missing patch until someone wondered where the menus went.
+// If this ever counts above zero, the patch did not apply.
+function checkPopupsMapped() {
   const clients = session?.display?.clients
   if (!clients) return
+  let stranded = 0
   for (const client of Object.values(clients)) {
-    const objs = client.connection?.wlObjects
-    if (!objs) continue
-    for (const o of Object.values(objs)) {
+    for (const o of Object.values(client.connection?.wlObjects ?? {})) {
       const impl = o?.implementation
-      if (!impl || impl.constructor?.name !== 'Surface') continue
-      const role = impl.role
-      if (!role || role.constructor?.name !== 'XdgPopup') continue
-      if (impl.mapped || !impl.state?.bufferContents) continue
-      try {
-        role.desktopSurface?.commit()
-        state.popupsMapped++
-      } catch (e) {
-        if (!state.popupError) state.popupError = String(e)
-      }
+      if (impl?.constructor?.name !== 'Surface') continue
+      if (impl.role?.constructor?.name !== 'XdgPopup') continue
+      if (!impl.mapped && impl.state?.bufferContents) stranded++
     }
+  }
+  state.strandedPopups = stranded
+  if (stranded && !state.strandedWarned) {
+    state.strandedWarned = true
+    console.warn(
+      `RRABBIT: ${stranded} popup(s) have a buffer and are not mapped. ` +
+        'The @gfld/compositor patch is missing -- run: node tools/patch-compositor.mjs',
+    )
   }
 }
 
@@ -1342,9 +1341,8 @@ async function main() {
 
     session.globals.register()
     installInput()
-    // 10Hz: scanning every client object per frame is not free, and a popup
-    // appearing 100ms late is invisible to a person.
-    setInterval(mapStrandedPopups, 100)
+    // A detector, not a fix -- see checkPopupsMapped. Slow on purpose.
+    setInterval(checkPopupsMapped, 1000)
     pollTubes()
     setInterval(pollTubes, 2000)
     state.compositor = 'up'
