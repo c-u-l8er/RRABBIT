@@ -108,7 +108,7 @@ a real window, every section below is void.
 |---|---|
 | signs = amp journal rows | signs = **windows** (one surface, one sign) |
 | 7 tubes = lane ratings | tubes = **CPU, RAM, swap, disk, net, temp, load** |
-| districts = amp workspaces | districts = **workspaces** (one Wayland output each) |
+| districts = amp workspaces | districts = **workspaces** (a stretch of road each; NOT an output — §15.1) |
 | `bridge.py` → amp API | `bridge.py` → compositor state + sysinfo |
 | milepost = journal position | milepost = **a window's address** |
 | P / R / C / D | kept, re-missioned — §5 |
@@ -256,7 +256,7 @@ signs carry no caption yet.
 
 **M3 — the tubes. PASSED (2026-08-08).** See §14. The FreeBSD reader is written but UNVERIFIED (§14.3).
 
-**M4 — districts.** Workspaces as Wayland outputs. R shows all of them.
+**M4 — districts. PASSED (2026-08-08).** See §15. NOT as Wayland outputs — §15.1 records why that shape does not work.
 
 **M5 — the session.** An xsession entry in T&R's `overlay-desktop`, beside
 icewm, never instead of it.
@@ -715,3 +715,82 @@ POSIX.
 Known risk on FreeBSD: `dev.cpu.0.temperature` requires `coretemp` or `amdtemp`
 to be loaded, so TEMP will report unknown on a stock image — which the rack
 draws as unknown rather than as cold, per §14.1.
+
+---
+
+## 15. M4 — districts
+
+**Passed 2026-08-08.** Evidence in `docs/m4-district.png`, `docs/m4-overview.png`.
+
+Three workspaces, each a road of its own, windows opening into whichever one you
+are standing in, and an overview that holds all of them at once.
+
+| claim | measurement |
+|---|---|
+| windows open in the district you are in | `home:1 home:2 build:1 build:2 watch:1` |
+| mileposts restart per district | yes — two `:1`s and two `:2`s across three roads |
+| addresses survive switching | identical list after `0 → 2 → overview` |
+| the camera really travels | district 0 `x −2600`, district 2 `x +2600`, overview `[0,1150,4600]` |
+| **ledger rects are distinct** | 5 windows, **5 distinct rects** |
+| **routing resolves by POSITION** | every window's centre resolves to itself, **with no flatten** |
+| flatten still pixel-exact | district 1 milepost 2 → `scale 1.0000`, edges `250 / 250` |
+| release returns to YOUR district | released in district 1 → camera back at district 1 |
+
+### 15.1 Districts are a partition of the road, not of outputs
+
+Spec §3 said "one Wayland output each". That is the wrong shape, and §11.2 and
+§12.3 are why:
+
+- every scene renders every view, so extra outputs do not partition anything
+- a view only gets a texture where it **intersects** a scene's region
+- and a scene's region is its canvas — the visible one
+
+So there is **one** flat output, the ledger, and every window lives in it at its
+own slot. The road is a *view* of the ledger; a district is a stretch of road.
+§3's table is updated accordingly.
+
+### 15.2 The ledger fix — §12.3 closed
+
+§12.3 recorded that every window sat at the identical rect `[0,0,250,250]`, so
+`pickView` could only tell windows apart by stacking order, and pointer routing
+was correct *only* because the flatten raised its target first.
+
+`view.positionOffset` — the same lever Greenfield's own `FloatingDesktopSurface`
+uses to drag a window — places each window in its own grid cell. Measured: five
+windows, five distinct rects, and **each one's centre resolves to itself with no
+flatten and no raising**. The ledger is addressable by position now, which is
+what a window manager is supposed to be. Invariant 7 remains a good rule; it is
+no longer the only thing standing between a click and the wrong application.
+
+### 15.3 Invariant 6, widened
+
+A window's address is now **(district, milepost)**, and the **ledger slot** is a
+third thing assigned once and never recomputed — a window that moved in the
+ledger would change where its input lands.
+
+Consequence worth stating: **a milepost alone no longer names a window.**
+Mileposts restart in every district, so every lookup takes the district too, and
+`flattenTo` defaults it to the one you are standing in.
+
+### 15.4 "Too far to see" has two independent causes
+
+The first overview rendered **black**. Fog was the obvious suspect — driving fog
+is `far 4200` and the outer roads are 5000+ units away — but widening the fog
+alone changed nothing, because **the camera's far plane is 6000** and the roads
+sit 6000–12000 out. They were clipped before fog was ever consulted.
+
+Both budgets have to move together (`setRange(fog, far)`), and the two failures
+are pixel-for-pixel identical. Worth remembering as a class: an empty render has
+a near-plane/far-plane explanation *and* a fog explanation, and checking one
+proves nothing about the other.
+
+Also: **frame where the windows are, not where the road goes.** Mileposts start
+at 1, so the occupied stretch is the first few hundred units; framing all 6000
+put every sign in a thin band at the horizon.
+
+### 15.5 A key that must not reach the application
+
+District keys (`1`..`3`, `O`) are deliberately **dead while flat**. A digit typed
+into a focused application has to reach the application, not move you to another
+workspace. Same family as invariant 7 and the `Ctrl+Alt+Shift+Esc` chord: the
+shell may only take input the application would not have wanted.

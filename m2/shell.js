@@ -61,6 +61,29 @@ const BG = 0x03040a
 // RAVIO's S and must not be assumed to transfer (spec §7).
 const MILE = 260
 const SCENE_ID = 'road'
+
+// ---- M4: districts -------------------------------------------------------
+//
+// A district is a workspace. Spec §3 originally said "one Wayland output each";
+// §11.2 and §12.3 measured why that is the wrong shape:
+//
+//   - every scene renders every view, so extra outputs do not partition windows
+//   - a view only gets a texture where it INTERSECTS a scene's region
+//   - and a scene's region is its canvas, which is the visible one
+//
+// So districts are a partition of the ROAD, not of the output. There is one
+// flat output -- the ledger -- and every window lives in it at its own slot.
+// The road is a view of the ledger; a district is a stretch of road.
+//
+// THE LEDGER SLOT IS NOT COSMETIC. §12.3 found every window stacked at the same
+// rect, which left `pickView` able to tell windows apart only by stacking order
+// -- so routing was correct only because the flatten raises its target first.
+// Distinct slots make the ledger addressable by position, which is what a
+// window manager is supposed to be.
+const DISTRICTS = ['home', 'build', 'watch']
+const DISTRICT_X = 2600 // how far apart the roads are laid
+const LEDGER_PITCH = 264 // slot spacing in the flat output
+const LEDGER_COLS = 4
 // The tube bridge (bridge.py). Its own port so a shell without one still runs.
 const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? 'http://127.0.0.1:8913'
 
@@ -75,11 +98,16 @@ export const state = {
   // M2
   mode: 'driving', // driving | flying | flat
   flatMilepost: null,
+  flatDistrict: null,
   pointerSent: 0,
   buttonSent: 0,
   lastScenePoint: null,
   lastPickMatched: null,
   released: 0,
+  district: 0,
+  overview: false,
+  placed: 0,
+  ledgerDistinct: null,
   tubeReader: null,
   tubePolls: 0,
   tubeError: null,
@@ -88,14 +116,28 @@ export const state = {
 }
 
 let renderer, gl, scene, camera, session, rack
-let nextMilepost = 1
+// Mileposts are PER DISTRICT -- each workspace numbers its own road.
+const nextMilepost = DISTRICTS.map(() => 1)
+let nextSlot = 0
 // surface key -> { milepost, mesh, tex, rt, size, view }
 const signs = new Map()
 
 // Camera flight. `from`/`to` are poses; t runs 0..1.
 let flight = null
+let flatTargetDistrict = 0
 const DRIVE_POSE = { pos: new THREE.Vector3(0, 105, 260), look: new THREE.Vector3(0, 105, -640) }
 const raycaster = new THREE.Raycaster()
+const districtArches = []
+
+const districtX = (d) => (d - (DISTRICTS.length - 1) / 2) * DISTRICT_X
+
+// A slot in the flat output. The ledger is a grid, one cell per window, so no
+// two windows share a rect and `pickView` can resolve a point to a window on
+// position alone.
+const ledgerSlot = (i) => ({
+  x: (i % LEDGER_COLS) * LEDGER_PITCH,
+  y: Math.floor(i / LEDGER_COLS) * LEDGER_PITCH,
+})
 
 const keyOf = (view) => `${view.surface.resource.client.id}:${view.surface.resource.id}`
 
@@ -128,13 +170,28 @@ function buildWorld(canvas) {
   key.position.set(-200, 400, 300)
   scene.add(key)
 
-  const road = new THREE.Mesh(
-    new THREE.PlaneGeometry(320, 6000),
-    new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
-  )
-  road.rotation.x = -Math.PI / 2
-  road.position.set(0, -30, -2600)
-  scene.add(road)
+  // One road per district, laid side by side. A workspace you can SEE from a
+  // neighbouring workspace is the difference between switching and teleporting.
+  DISTRICTS.forEach((name, d) => {
+    const road = new THREE.Mesh(
+      new THREE.PlaneGeometry(320, 6000),
+      new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
+    )
+    road.rotation.x = -Math.PI / 2
+    road.position.set(districtX(d), -30, -2600)
+    scene.add(road)
+
+    // A gateway arch at the head of each road, so a district is identifiable
+    // from the overview without reading anything.
+    const arch = new THREE.Mesh(
+      new THREE.BoxGeometry(360, 14, 14),
+      new THREE.MeshStandardMaterial({ color: d === 0 ? COOL : ACC, roughness: 0.5 }),
+    )
+    arch.position.set(districtX(d), 300, 60)
+    arch.userData.district = d
+    scene.add(arch)
+    districtArches.push(arch)
+  })
 
   // The rack is parented to the camera, and a camera's children are only
   // rendered if the camera is itself in the scene graph. Without this line the
@@ -195,7 +252,7 @@ function resize() {
 
 // ------------------------------------------------------------------- signs
 
-function makeSign(view, milepost) {
+function makeSign(view, milepost, district) {
   const rs = view.renderStates[SCENE_ID]
   if (!rs || !rs.texture || !rs.texture.texture) return null
   const { width, height } = rs.size
@@ -231,9 +288,10 @@ function makeSign(view, milepost) {
     new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
   )
 
-  // Alternate sides of the road, like RAVIO's billboards.
+  // Alternate sides of the road, like RAVIO's billboards -- on THIS district's
+  // road.
   const side = milepost % 2 === 0 ? 1 : -1
-  mesh.position.set(side * 260, 40 + sh / 2, -milepost * MILE)
+  mesh.position.set(districtX(district) + side * 260, 40 + sh / 2, -milepost * MILE)
   mesh.rotation.y = -side * 0.42
   scene.add(mesh)
 
@@ -282,16 +340,23 @@ function adoptPending() {
         // A resized surface is a new texture allocation. Rebuild the sign in
         // place, at the SAME milepost.
         dropSign(k)
-        signs.set(k, { milepost: existing.milepost })
+        signs.set(k, { milepost: existing.milepost, district: existing.district, slot: existing.slot })
       }
       continue
     }
-    const milepost = existing?.milepost ?? nextMilepost++
-    const built = makeSign(view, milepost)
+    // Invariant 6, widened by M4: a window's address is now (district,
+    // milepost) and neither half is ever recomputed. The ledger slot is
+    // assigned once for the same reason -- a window that moved in the ledger
+    // would change where its input lands.
+    const district = existing?.district ?? state.district
+    const milepost = existing?.milepost ?? nextMilepost[district]++
+    const slot = existing?.slot ?? nextSlot++
+    placeInLedger(view, slot)
+    const built = makeSign(view, milepost, district)
     // The view is kept so input can be mapped back into the flat output. It is
     // re-read every frame rather than cached at build time: a view object is
     // replaced when a surface is remapped.
-    signs.set(k, built ? { milepost, view, ...built } : { milepost, view })
+    signs.set(k, built ? { milepost, district, slot, view, ...built } : { milepost, district, slot, view })
     if (built) built.mesh.userData.signKey = k
   }
   for (const [k, s] of signs) {
@@ -321,6 +386,79 @@ function dropSign(k, forget = false) {
   for (const o of [s.mesh, s.frame, s.post]) if (o) scene.remove(o)
   if (s.rt) s.rt.dispose()
   if (forget) signs.delete(k)
+}
+
+// ---------------------------------------------------------------- the ledger
+
+// Put a window at its own rect in the flat output. `positionOffset` is the same
+// lever Greenfield's own FloatingDesktopSurface uses to drag a window, so this
+// is placement rather than a trick.
+function placeInLedger(view, slot) {
+  const p = ledgerSlot(slot)
+  const cur = view.positionOffset
+  if (cur && cur.x === p.x && cur.y === p.y) return
+  view.positionOffset = p
+  state.placed++
+}
+
+// ------------------------------------------------------------- the district
+
+function districtPose(d) {
+  return {
+    pos: new THREE.Vector3(districtX(d), 105, 260),
+    look: new THREE.Vector3(districtX(d), 105, -640),
+  }
+}
+
+// The overview -- spec §5's R gear, re-missioned: all workspaces at once rather
+// than one.
+//
+// FOG IS A DISTANCE BUDGET, AND THE OVERVIEW BLOWS IT. Driving fog (far 4200)
+// suits a road you are on; from above, the outer districts are 5000+ units away
+// and the first overview rendered them as black. The pose and the fog have to
+// move together or the shot is of nothing.
+// AND FOG IS ONLY ONE OF TWO DISTANCE BUDGETS. Widening the fog alone still
+// rendered an empty overview, because the CAMERA'S FAR PLANE is 6000 and the
+// outer roads sit 6000-12000 away -- clipped before fog was ever consulted.
+// A "too far to see" bug has two independent causes and they look identical.
+const FOG_DRIVE = 4200
+const FOG_OVERVIEW = 16000
+const FAR_DRIVE = 6000
+const FAR_OVERVIEW = 20000
+
+function setRange(fog, far) {
+  scene.fog.far = fog
+  camera.far = far
+  camera.updateProjectionMatrix()
+}
+
+function overviewPose() {
+  // Frame WHERE THE WINDOWS ARE, not the whole road. Mileposts start at 1, so
+  // the occupied stretch is the first few hundred units of each road; framing
+  // all 6000 put every sign in a thin band at the horizon.
+  const span = DISTRICT_X * (DISTRICTS.length - 1)
+  return {
+    pos: new THREE.Vector3(0, 1150, span * 0.5 + 1300),
+    look: new THREE.Vector3(0, 0, -520),
+  }
+}
+
+function goDistrict(d) {
+  if (d < 0 || d >= DISTRICTS.length) return null
+  state.district = d
+  state.overview = false
+  setRange(FOG_DRIVE, FAR_DRIVE)
+  flight = { from: currentPose(), to: districtPose(d), t: 0, target: null }
+  state.mode = 'flying'
+  return DISTRICTS[d]
+}
+
+function goOverview() {
+  state.overview = true
+  setRange(FOG_OVERVIEW, FAR_OVERVIEW)
+  flight = { from: currentPose(), to: overviewPose(), t: 0, target: null }
+  state.mode = 'flying'
+  return true
 }
 
 // ------------------------------------------------------------- the flatten
@@ -354,9 +492,13 @@ function poseFor(s) {
   }
 }
 
-function flattenTo(milepost) {
-  const s = [...signs.values()].find((x) => x.milepost === milepost && x.mesh)
+// Mileposts restart in every district, so a milepost ALONE no longer names a
+// window -- (district, milepost) does. Defaulting the district to the one you
+// are standing in is what makes `__flatten(2)` still mean what it used to.
+function flattenTo(milepost, district = state.district) {
+  const s = [...signs.values()].find((x) => x.milepost === milepost && x.district === district && x.mesh)
   if (!s) return null
+  flatTargetDistrict = district
   flight = { from: currentPose(), to: poseFor(s), t: 0, target: milepost }
   state.mode = 'flying'
   return milepost
@@ -365,9 +507,12 @@ function flattenTo(milepost) {
 // Invariant 8: there is always a way out that does not depend on the 3D scene.
 function release() {
   if (state.mode === 'driving') return false
-  flight = { from: currentPose(), to: DRIVE_POSE, t: 0, target: null }
+  // Back to the district you were in, not to district 0 -- releasing must
+  // not silently move you between workspaces.
+  flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
   state.mode = 'flying'
   state.flatMilepost = null
+  state.flatDistrict = null
   state.released++
   return true
 }
@@ -394,13 +539,14 @@ function stepFlight(dt) {
     } else {
       state.mode = 'flat'
       state.flatMilepost = target
+      state.flatDistrict = flatTargetDistrict
       // Invariant 7: focus follows the FLATTEN, never the drive-by.
       //
       // activateSurface RAISES the view, and that is load-bearing far beyond
       // focus: every window sits at the same rect in the flat output, so
       // pickView can only tell them apart by stacking order. Raising the
       // flattened window is what makes pointer routing hit the right surface.
-      const s = [...signs.values()].find((x) => x.milepost === target)
+      const s = [...signs.values()].find((x) => x.milepost === target && x.district === flatTargetDistrict)
       if (s?.view) {
         session.userShell.actions.activateSurface({
           id: s.view.surface.resource.id,
@@ -527,6 +673,16 @@ function installInput() {
   //
   // NOT Esc+CapsLock: CapsLock is a lock, not a modifier, so it would steal Esc
   // from vi whenever the light is on, and the page cannot see the light.
+  // District keys. Deliberately NOT live while flat: a digit typed into a
+  // focused application must reach the application, not move you to another
+  // workspace.
+  window.addEventListener('keydown', (ev) => {
+    if (state.mode === 'flat' || ev.ctrlKey || ev.altKey || ev.metaKey) return
+    const n = Number(ev.key)
+    if (Number.isInteger(n) && n >= 1 && n <= DISTRICTS.length) goDistrict(n - 1)
+    else if (ev.key === 'o' || ev.key === 'O') goOverview()
+  })
+
   window.addEventListener(
     'keydown',
     (ev) => {
@@ -771,9 +927,20 @@ window.__orient = () => {
 window.__m1 = () => {
   const out = { ...state, mileposts: [], sweeps: [] }
   for (const [k, s] of signs) {
-    out.mileposts.push({ key: k, milepost: s.milepost, built: !!s.mesh, size: s.size ?? null })
-    if (s.mesh) out.sweeps.push({ milepost: s.milepost, ...sweepSign(s) })
+    out.mileposts.push({
+      key: k,
+      district: s.district,
+      districtName: DISTRICTS[s.district],
+      milepost: s.milepost,
+      slot: s.slot,
+      built: !!s.mesh,
+      size: s.size ?? null,
+    })
+    if (s.mesh) out.sweeps.push({ milepost: s.milepost, district: s.district, ...sweepSign(s) })
   }
+  out.camera = [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)]
+  out.districtNames = DISTRICTS
+  out.districtX = DISTRICTS.map((_, d) => districtX(d))
   return out
 }
 
@@ -797,6 +964,35 @@ window.__tubes = () => ({
   why: document.getElementById('why')?.textContent ?? null,
 })
 
+window.__district = (d) => goDistrict(d)
+window.__overview = () => goOverview()
+
+// THE M4 PROOF. Every window must occupy its OWN rect in the ledger, and
+// pickView must resolve each one's centre to that window -- WITHOUT relying on
+// the flatten having raised it (§12.3). If this passes, the ledger is
+// addressable by position and routing no longer depends on stacking order.
+window.__ledger = () => {
+  const rows = []
+  for (const s of signs.values()) {
+    if (!s.view) continue
+    const r = s.view.regionRect
+    const cx = (r.x0 + r.x1) / 2
+    const cy = (r.y0 + r.y1) / 2
+    const picked = session.renderer.pickView({ x: cx, y: cy })
+    rows.push({
+      district: s.district,
+      milepost: s.milepost,
+      slot: s.slot,
+      rect: [r.x0, r.y0, r.x1, r.y1],
+      centre: [cx, cy],
+      resolvesToSelf: picked ? keyOf(picked) === keyOf(s.view) : false,
+    })
+  }
+  const keys = new Set(rows.map((r) => r.rect.join(',')))
+  state.ledgerDistinct = keys.size === rows.length
+  return { distinctRects: keys.size === rows.length, rows }
+}
+
 window.__flatten = (m) => flattenTo(m)
 window.__release = () => release()
 
@@ -805,7 +1001,9 @@ window.__release = () => release()
 // than admired. Measured off the mesh's own corners, not off the formula that
 // positioned the camera, or it would be testing the arithmetic against itself.
 window.__flatMetrics = () => {
-  const s = [...signs.values()].find((x) => x.milepost === state.flatMilepost && x.mesh)
+  const s = [...signs.values()].find(
+    (x) => x.milepost === state.flatMilepost && x.district === state.flatDistrict && x.mesh,
+  )
   if (!s) return { flat: false, mode: state.mode }
   const g = s.mesh.geometry.parameters
   const corner = (sx, sy) => {
@@ -836,7 +1034,9 @@ window.__flatMetrics = () => {
 // resolved it. Synthetic events do not always reach a real listener (PARKVPS
 // found that with noVNC), so this calls the same path the listener calls.
 window.__pointAt = (u, v) => {
-  const s = [...signs.values()].find((x) => x.milepost === state.flatMilepost && x.mesh)
+  const s = [...signs.values()].find(
+    (x) => x.milepost === state.flatMilepost && x.district === state.flatDistrict && x.mesh,
+  )
   if (!s) return null
   const g = s.mesh.geometry.parameters
   const world = s.mesh.localToWorld(new THREE.Vector3(g.width * (u - 0.5), g.height * (0.5 - v), 0))
@@ -925,15 +1125,29 @@ async function main() {
       }
       say(`compositor up -- launching remote ${remote}`)
     } else {
-      // Many windows. Three separate clients, so three separate wl_clients.
+      // Windows open in the district you are STANDING IN -- assignment reads
+      // `state.district` at adoption time, exactly as it would if you were
+      // driving around opening things. `?windows=2,2,1` is per-district counts.
       const launcher = createAppLauncher(session, 'web')
-      for (let i = 0; i < 3; i++) {
-        const app = launcher.launch(new URL(`${location.origin}/clients/simple-shm/app.html`), () => {})
-        app.onError = (e) => {
-          state.error = String(e)
+      const plan = (params.get('windows') ?? '2,2,1').split(',').map((n) => parseInt(n, 10) || 0)
+      ;(async () => {
+        for (let d = 0; d < Math.min(plan.length, DISTRICTS.length); d++) {
+          state.district = d
+          for (let i = 0; i < plan[d]; i++) {
+            const app = launcher.launch(new URL(`${location.origin}/clients/simple-shm/app.html`), () => {})
+            app.onError = (e) => {
+              state.error = String(e)
+            }
+            // Let the surface arrive and be adopted before moving on, or every
+            // window would be assigned to whichever district we ended on.
+            await new Promise((r) => setTimeout(r, 2500))
+          }
         }
-      }
-      say('compositor up -- launching 3 clients')
+        state.district = 0
+        goDistrict(0)
+        say(`${DISTRICTS.length} districts -- keys 1..${DISTRICTS.length}, O for overview`)
+      })()
+      say('compositor up -- opening windows across districts')
     }
   } catch (e) {
     state.error = String(e && e.stack ? e.stack : e)

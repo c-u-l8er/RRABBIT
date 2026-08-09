@@ -19,8 +19,8 @@ which records what does *not* work about the obvious integration and why.
 
 ## Status
 
-**M0–M3 pass** (2026-08-08), each with measurements rather than
-screenshots alone — spec §10–§12 and §14.
+**M0–M4 pass** (2026-08-08), each with measurements rather than
+screenshots alone — spec §10–§12, §14 and §15.
 
 - **M0** — the road occludes a live Wayland surface. This was the gate.
 - **M1** — many windows ride the road as signs, one adopted GPU texture each,
@@ -29,6 +29,8 @@ screenshots alone — spec §10–§12 and §14.
   can be pointed at, typed into, and left with a chord no client can swallow.
 - **M3** — seven tubes reading the real machine, and a rack that is not allowed
   to show a number it cannot explain.
+- **M4** — three districts as workspaces, each a road of its own, and a ledger
+  where every window has its own rect so input resolves by position (§15.2).
 
 **Native applications do not work yet** — attempted and written up in spec §13.
 The control path is fine (nested compositor, XWayland, the app launches and
