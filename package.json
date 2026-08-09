@@ -6,7 +6,8 @@
   "description": "The road as a windowing system",
   "license": "AGPL-3.0",
   "scripts": {
-    "m0": "vite dev"
+    "m0": "vite dev",
+    "proxy": "node proxy/proxy-cli.js --applications=./proxy/applications.json --allow-origin=http://127.0.0.1:8911 --bind-ip=127.0.0.1 --bind-port=8912 --base-url=ws://127.0.0.1:8912 --encoder=x264"
   },
   "dependencies": {
     "@gfld/client-protocol": "1.0.0-rc1",
@@ -15,6 +16,7 @@
     "three": "0.160.1"
   },
   "devDependencies": {
+    "@gfld/compositor-proxy-cli": "^1.0.0-rc1",
     "typescript": "^5.5.2",
     "vite": "^5.4.0"
   }

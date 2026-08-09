@@ -1,0 +1,30 @@
+{
+  "/text-editor": {
+    "name": "Text Editor",
+    "executable": "gnome-text-editor",
+    "args": [],
+    "env": {
+      "GDK_BACKEND": "wayland"
+    }
+  },
+  "/xterm": {
+    "name": "XTerm",
+    "executable": "xterm",
+    "args": ["-fa", "Monospace", "-fs", "12"],
+    "env": {}
+  },
+  "/firefox": {
+    "name": "Firefox",
+    "executable": "firefox",
+    "args": ["--new-instance", "--no-remote"],
+    "env": {
+      "MOZ_ENABLE_WAYLAND": "1"
+    }
+  },
+  "/glxgears": {
+    "name": "glxgears",
+    "executable": "glxgears",
+    "args": [],
+    "env": {}
+  }
+}

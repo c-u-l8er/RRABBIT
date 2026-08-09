@@ -839,15 +839,36 @@ async function main() {
     installInput()
     state.compositor = 'up'
 
-    // Many windows. Three separate clients, so three separate wl_clients.
-    const launcher = createAppLauncher(session, 'web')
-    for (let i = 0; i < 3; i++) {
-      const app = launcher.launch(new URL(`${location.origin}/clients/simple-shm/app.html`), () => {})
-      app.onError = (e) => {
-        state.error = String(e)
+    // `?remote=/text-editor,/xterm` launches NATIVE applications through
+    // compositor-proxy (npm run proxy) instead of in-browser clients. Native is
+    // the case that decides whether §7's per-window encode cost is affordable,
+    // and nothing before this exercised gstreamer at all.
+    const params = new URLSearchParams(location.search)
+    const remote = params.get('remote')
+    if (remote) {
+      const base = params.get('proxy') ?? 'http://127.0.0.1:8912'
+      const launcher = createAppLauncher(session, 'remote')
+      for (const path of remote.split(',')) {
+        const app = launcher.launch(new URL(`${base}${path}`), () => {})
+        app.onStateChange = (s) => {
+          state.appStates = { ...(state.appStates ?? {}), [path]: s }
+        }
+        app.onError = (e) => {
+          state.error = `${path}: ${e}`
+        }
       }
+      say(`compositor up -- launching remote ${remote}`)
+    } else {
+      // Many windows. Three separate clients, so three separate wl_clients.
+      const launcher = createAppLauncher(session, 'web')
+      for (let i = 0; i < 3; i++) {
+        const app = launcher.launch(new URL(`${location.origin}/clients/simple-shm/app.html`), () => {})
+        app.onError = (e) => {
+          state.error = String(e)
+        }
+      }
+      say('compositor up -- launching 3 clients')
     }
-    say('compositor up -- launching 3 clients')
   } catch (e) {
     state.error = String(e && e.stack ? e.stack : e)
     say(`FAILED: ${e}`)

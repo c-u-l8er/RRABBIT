@@ -505,3 +505,105 @@ flat output itself if it ever wants position-based routing.
   where §7's per-window cost stops being theoretical.
 - `xdg_popup` (§7) is untouched, and a popup is the first thing a real menu does.
 - Pointer *hover* on the road is deliberately not routed — see §12.3.
+
+---
+
+## 13. Native applications — how far they get, and where they stop
+
+**Attempted 2026-08-08. NOT working. No native application has reached the road.**
+
+This was run before M3 on purpose: it is the one remaining thing that could
+invalidate the architecture, and every later milestone gets more expensive to
+redo. The architecture survives — the browser half is proved by M0–M2 — but
+`@gfld/compositor-proxy@1.0.0-rc1` does not deliver frames on this machine.
+
+### 13.1 How far it gets
+
+| step | result |
+|---|---|
+| prebuilt native addons load (`libwestfield.so`, `libproxy-encoding.so`, 3 `.node`) | ✅ all deps resolve, no build needed |
+| proxy listens | ✅ 127.0.0.1:8912 |
+| nested Wayland compositor spawns | ✅ `WAYLAND_DISPLAY=wayland-1` |
+| XWayland starts | ✅ display `:2`, XWM connection handled |
+| native app launches and **stays running** | ✅ `xterm` pid alive |
+| client connects, 4 data channels open | ✅ |
+| browser compositor sees the surface | ✅ `surfaces: 1`, `mapped: true` |
+| **a buffer arrives** | ❌ `hasBuffer: false`, `renderStates: []`, rect `[0,0,0,0]` |
+| a sign is built | ❌ |
+
+So the whole control path works and the **content path never starts**. No frame
+is ever encoded or delivered, so §7's per-window encode cost is **still
+unpriced** — nothing has exercised it.
+
+### 13.2 The two-GPU crash, which is the finding worth keeping
+
+The session process died with **`SIGTRAP`** on every attempt. The cause, only
+visible at `LOG_LEVEL=trace`:
+
+```
+[EGL] eglCreateContext error: EGL_BAD_CONTEXT: Failure in argument parsing
+ERROR: Failed to create GstGLContext: EGL_BAD_CONTEXT
+Proxy session exited: SIGTRAP
+```
+
+GStreamer's GL element cannot create an EGL context against the **NVIDIA**
+driver, and GLib's `ERROR` level calls `abort()` — which is why a GL
+configuration problem presents as a signal rather than a message.
+
+This machine has **two GPUs** — `renderD128` is `nvidia`, `renderD129` is
+`amdgpu` — and the proxy defaults to `renderD128`. Passing
+`--render-device=/dev/dri/renderD129` **removes the crash entirely**: the session
+survives and the app reports `open`. Frames still do not flow, so this is a
+necessary fix and not a sufficient one.
+
+**A single-GPU NVIDIA machine would have had no way out of this**, which matters
+for T&R: the target is a QEMU guest with bochs `std` VGA and no DRM kmod at all.
+That gate (spec §"the VGA/DRM experiment") is now more suspect, not less.
+
+### 13.3 Packaging defects in `@gfld/compositor-proxy-cli@1.0.0-rc1`
+
+All four had to be worked around before the proxy would start at all:
+
+- **The published `dist/` is incomplete** — it contains only `main.js`;
+  `main-controller.js`, `main-args.js` and `SessionProcess.js` were never
+  published, so the CLI cannot run as installed (`Cannot find module
+  './main-controller.js'`). The package *does* ship its `src/`, and the CLI has
+  no native code of its own, so it can be rebuilt: bundle `src/main.ts` and
+  `src/SessionProcess.ts` with esbuild, `--external:@gfld/compositor-proxy`.
+- **The bin has no shebang**, so npm's wrapper hands JavaScript to the shell
+  (`line 1: use strict: command not found`).
+- **`SessionProcess` is `fork()`ed as a sibling file**
+  (`fork(path.join(__dirname, './SessionProcess'))`), so a single-file bundle can
+  never work — and in a `"type": "module"` package the output directory needs its
+  own `{"type":"commonjs"}` or the fork is parsed as ESM.
+- **`--allow-origin` cannot take the comma-separated list its own help
+  advertises.** The value is written raw into `Access-Control-Allow-Origin`, and
+  a list is invalid CORS — with `credentials: 'include'` it must be exactly one
+  origin. The symptom is a preflight that returns **204** followed by a `GET`
+  that fails as `TypeError: Failed to fetch`, with **nothing at all in the proxy
+  log**, which reads like the proxy being down.
+
+### 13.4 A launcher finding that is not Greenfield's fault
+
+**A GApplication single-instance app cannot be launched into a nested
+compositor.** `gnome-text-editor` was the first choice — GTK4, Wayland-native,
+real glyphs, real menus. Launching it handed off over D-Bus to the copy already
+running in the user's own session (`--gapplication-service`, pid alive since the
+previous day) and the new process exited immediately. The proxy reports this as
+a launch error with no explanation.
+
+Applies to most modern GTK/GNOME apps. `xterm` was used instead; `firefox` needs
+`--new-instance --no-remote` for the same reason, which the app config sets.
+
+### 13.5 What to try next
+
+In rough order of cost:
+
+1. Run the proxy in the project's **Docker image**, which pins the gstreamer/GL
+   stack the addons were built against.
+2. Force the software GL path (`LIBGL_ALWAYS_SOFTWARE=1`) so gstgl stops
+   negotiating with a vendor driver at all — the encode is h264 either way.
+3. Build `@gfld/compositor-proxy` from source against this system's gstreamer
+   rather than using the prebuilt addons.
+4. Ask upstream. The rc1 packaging defects in §13.3 are worth reporting whatever
+   happens to the frame path.
