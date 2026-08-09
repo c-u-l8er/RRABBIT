@@ -5,7 +5,7 @@ import { defineConfig } from 'vite'
 // that is not cross-origin isolated. Without these headers the compositor comes
 // up fine and the client silently never connects.
 export default defineConfig({
-  root: 'm0',
+  // Repo root, so /m0/ and /m1/ are both served and share /clients/.
   base: './',
   server: {
     host: '127.0.0.1',

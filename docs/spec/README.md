@@ -348,3 +348,82 @@ need per-surface textures. M1 does.
   nothing and the failure looks like the page.
 - **`eval` keeps globals between calls**, so `const t = …` twice throws
   `Identifier 't' has already been declared` mid-run. Wrap each eval in an IIFE.
+
+---
+
+## 11. M1 — many windows, one road
+
+**Passed 2026-08-08.** `m1/` — evidence in `docs/m1-many-windows.png` and
+`docs/m1-driving.png`.
+
+Three separate `wl_client`s, three surfaces, three signs, each sized to its own
+surface and carrying its own adopted texture. The shared-context path of §2.2,
+built.
+
+| | |
+|---|---|
+| surfaces / signs / adopted | 3 / 3 / 3 |
+| per-sign sweep | **64 of 64** samples carry content, on every sign |
+| digests | three distinct, all changing every read |
+| mileposts | 1, 2, 3 — unchanged after driving to z −420 (**invariant 6**) |
+| orientation | `upright: true`, by calibration (§11.2) |
+| Greenfield patches | **none** |
+
+M0's board was one fixed rectangle with a 250×250 client in the corner. M1's
+signs are 64/64 because **one surface is one sign, sized to the surface.**
+
+### 11.1 The shared context needs no patch
+
+§2.2 called for patching `setupCanvasGLContext`. It does not need patching:
+**`canvas.getContext('webgl')` on a canvas that already has a context returns
+that same context.** Hand Greenfield three.js's canvas and the context is shared.
+
+The condition is that three must be on a **WebGL1** context — `'webgl'` will not
+return an existing `'webgl2'` context, they are distinct types and the request
+returns `null`, which surfaces as Greenfield throwing *"This browser doesn't
+support WebGL!"*. That reads as a browser problem and is a context-type
+mismatch. So create the context yourself and pass it to `WebGLRenderer`.
+
+Suppressing the paint is a one-line runtime override of `scene.render`, and it
+is safe because **render states are created in `View.applyTransformations()`,
+not in `Scene.render()`** — the decode still runs, the textures still fill.
+Frame callbacks also still fire, so clients keep drawing.
+
+This is monkey-patching a published `1.0.0-rc1`, not a supported API.
+`session.renderer` and `view.renderStates` are internals. **Recorded as a real
+risk:** an rc bump can move them, and the failure would be at runtime.
+
+### 11.2 Findings
+
+- **A view only gets a renderState if it INTERSECTS the scene region.** A window
+  outside the output has no texture at all — not a black one, none.
+  `ensureRenderStatesForMatchingScenes` filters on `notEmpty(visibleRegion)`.
+  Consequence for the design: **the Wayland output is the window ledger and must
+  be big enough to hold every window; the road is a view of it, not a
+  replacement for it.** This constrains M4's districts.
+- **`setRenderTargetTextures` dereferences `renderTarget.depthTexture`
+  unconditionally.** `properties.get(renderTarget.depthTexture)` on a plain
+  render target puts `null` into a `WeakMap` and throws *"Invalid value used as
+  weak map key"* — three lines above the branch that handles
+  `depthTexture === undefined`. Give the target a `DepthTexture` it will never
+  use. (three r160.)
+- **`flipY` is an UPLOAD-time flag and adoption does no upload**, so it does
+  nothing here. A Wayland surface is top-left origin and a GL texture is
+  bottom-left, so the correction must happen at SAMPLE time:
+  `repeat.y = -1, offset.y = 1`.
+- **A symmetric test pattern cannot verify orientation.** `simple-shm` draws
+  concentric circles in a square, which are mirror-symmetric about the midline,
+  so *no* sample pair of it can ever decide the flip. The first version of the
+  test compared two white margin rows, got a distance of 0, and returned
+  `upright: false` from `0 < 0`. **An inconclusive test that returns a boolean is
+  worse than one that returns nothing** — it now reports `inconclusive`. The
+  answer came from `__calibrate()`, which tests OUR path with a texture that is
+  asymmetric by construction (first rows red, last rows blue) and reads back
+  red-at-top.
+- **Furniture that crosses the picture is an instrument that lies about the
+  picture.** The sign post ran through the lower face, so a readback sample came
+  out amber and read as the window being upside down. The post now stops at the
+  sign's bottom edge.
+- A sweep of a sign that has gone behind the camera reports `0/0`, not a
+  failure. **Refusing to answer has to work in both directions** — the same rule
+  RAVIO's soak report had to learn about slopes.

@@ -291,13 +291,18 @@ async function main() {
       state.sceneRefreshes++
     }
 
+    // Exposed for M1's introspection: the public CompositorSession type hides
+    // `renderer`/`display`, but the object returned IS the Session instance, and
+    // M1 needs per-surface textures that no public API offers.
+    window.__session = session
+
     session.userShell.actions.initScene('road', gfCanvas)
     session.globals.register()
     state.compositor = 'up'
     say('compositor up -- launching client')
 
     const app = createAppLauncher(session, 'web').launch(
-      new URL(`${location.origin}/client/app.html`),
+      new URL(`${location.origin}/clients/simple-shm/app.html`),
       () => {},
     )
     app.onStateChange = (s) => {
