@@ -108,6 +108,10 @@ export const state = {
   overview: false,
   placed: 0,
   ledgerDistinct: null,
+  popupsMapped: 0,
+  popupQuads: 0,
+  lastWasPopup: null,
+  popupError: null,
   tubeReader: null,
   tubePolls: 0,
   tubeError: null,
@@ -252,32 +256,37 @@ function resize() {
 
 // ------------------------------------------------------------------- signs
 
+// Adopt a Greenfield surface texture as a three.js map. Shared by signs and by
+// popups so the two can never drift on colour space or the flip.
+// three r160 has no ExternalTexture class; setRenderTargetTextures is the
+// supported way in at this revision. It dereferences
+// `renderTarget.depthTexture` UNCONDITIONALLY, and a plain render target has
+// none, so the call dies with "Invalid value used as weak map key" three lines
+// before the branch that handles `depthTexture === undefined` -- hence a depth
+// texture that is never used.
+//
+// The flip is at SAMPLE time (repeat/offset) because `flipY` is an UPLOAD-time
+// flag and adoption does no upload.
+function adoptSurfaceTexture(rs) {
+  const { width, height } = rs.size
+  const rt = new THREE.WebGLRenderTarget(width, height)
+  rt.depthTexture = new THREE.DepthTexture(width, height)
+  renderer.setRenderTargetTextures(rt, rs.texture.texture)
+  const tex = rt.texture
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
+  tex.repeat.set(1, -1)
+  tex.offset.set(0, 1)
+  return { rt, tex }
+}
+
 function makeSign(view, milepost, district) {
   const rs = view.renderStates[SCENE_ID]
   if (!rs || !rs.texture || !rs.texture.texture) return null
   const { width, height } = rs.size
   if (!width || !height) return null
 
-  // Adopt Greenfield's WebGLTexture. three r160 has no ExternalTexture class;
-  // setRenderTargetTextures is the supported way in at this revision.
-  //
-  // It dereferences `renderTarget.depthTexture` UNCONDITIONALLY --
-  // `properties.get(renderTarget.depthTexture)` -- and a plain render target
-  // has none, so the call dies with "Invalid value used as weak map key" three
-  // lines before the branch that handles `depthTexture === undefined`. Giving
-  // the target a depth texture it will never use is the cost of staying on the
-  // public API rather than writing __webglTexture ourselves.
-  const rt = new THREE.WebGLRenderTarget(width, height)
-  rt.depthTexture = new THREE.DepthTexture(width, height)
-  renderer.setRenderTargetTextures(rt, rs.texture.texture)
-  const tex = rt.texture
-  tex.colorSpace = THREE.SRGBColorSpace
-  // A Wayland surface is top-left origin; a GL texture is bottom-left. flipY is
-  // an UPLOAD-time flag and we are not uploading, so it does nothing here --
-  // the flip has to happen at SAMPLE time, via the uv transform.
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
-  tex.repeat.set(1, -1)
-  tex.offset.set(0, 1)
+  const { rt, tex } = adoptSurfaceTexture(rs)
 
   // One sign is sized to ITS OWN surface. M0's board was a fixed rectangle and
   // a 250x250 client filled a corner of it -- correct behaviour, wrong framing.
@@ -386,6 +395,143 @@ function dropSign(k, forget = false) {
   for (const o of [s.mesh, s.frame, s.post]) if (o) scene.remove(o)
   if (s.rt) s.rt.dispose()
   if (forget) signs.delete(k)
+}
+
+// ----------------------------------------------------------------- popups
+//
+// AN xdg_popup CANNOT MAP IN GREENFIELD 1.0.0-rc1. `surface.mapped = true`
+// happens in exactly one place -- `FloatingDesktopSurface.commit()` -- and that
+// is called by XdgToplevel, ShellSurface and XWaylandShellSurface. XdgPopup's
+// own `onCommit` acks the configure, schedules a render, and never calls it.
+//
+// So the popup surface is created with the right role, receives its buffer, and
+// then sits at `mapped: false` forever. Measured exactly that: role XdgPopup,
+// hasBuffer true, mapped false, and no view anywhere.
+//
+// This is not a 3D problem. It is the reason no menu, dropdown, combobox or
+// tooltip can appear in this compositor AT ALL, for any client. Spec §7 worried
+// about placing a popup on a curved billboard; that worry was one layer too
+// high.
+//
+// Until upstream fixes it, the shell finishes the job: a popup that has a buffer
+// and is not mapped gets the `desktopSurface.commit()` it never received.
+function mapStrandedPopups() {
+  const clients = session?.display?.clients
+  if (!clients) return
+  for (const client of Object.values(clients)) {
+    const objs = client.connection?.wlObjects
+    if (!objs) continue
+    for (const o of Object.values(objs)) {
+      const impl = o?.implementation
+      if (!impl || impl.constructor?.name !== 'Surface') continue
+      const role = impl.role
+      if (!role || role.constructor?.name !== 'XdgPopup') continue
+      if (impl.mapped || !impl.state?.bufferContents) continue
+      try {
+        role.desktopSurface?.commit()
+        state.popupsMapped++
+      } catch (e) {
+        if (!state.popupError) state.popupError = String(e)
+      }
+    }
+  }
+}
+
+// A popup is drawn ON ITS PARENT'S SIGN, at the position the COMPOSITOR
+// computed from the client's XdgPositioner. The shell does not invent a
+// position -- spec §7 feared there was no rectangle to anchor to on a receding
+// billboard, but the ledger has one: both surfaces have a rect there, and the
+// difference between them is the offset in parent-surface pixels.
+//
+//   local x = (dx + popupW/2 - parentW/2) * scale
+//   local y = -(dy + popupH/2 - parentH/2) * scale     (y is up in the plane)
+//
+// A menu that overhangs its window overhangs its sign too, which is correct.
+function popupsByParentKey() {
+  const out = new Map()
+  const clients = session?.display?.clients
+  if (!clients) return out
+  for (const client of Object.values(clients)) {
+    for (const o of Object.values(client.connection?.wlObjects ?? {})) {
+      const impl = o?.implementation
+      if (!impl || impl.constructor?.name !== 'Surface') continue
+      if (impl.role?.constructor?.name !== 'XdgPopup') continue
+      if (!impl.mapped) continue
+      const view = impl.role.view
+      const rs = view?.renderStates?.[SCENE_ID]
+      if (!rs?.texture?.texture || !rs.size.width) continue
+      // Walk up: a submenu's parent is another popup, and it still belongs to
+      // the toplevel's sign.
+      let p = impl.parent
+      let guard = 0
+      while (p && guard++ < 8) {
+        const pv = p.role?.view
+        if (pv && signs.has(keyOf(pv))) {
+          const k = keyOf(pv)
+          if (!out.has(k)) out.set(k, [])
+          out.get(k).push({ view, rs })
+          break
+        }
+        p = p.parent
+      }
+    }
+  }
+  return out
+}
+
+function syncPopups() {
+  const byParent = popupsByParentKey()
+  for (const [k, sign] of signs) {
+    if (!sign.mesh) continue
+    sign.popups = sign.popups ?? new Map()
+    const live = byParent.get(k) ?? []
+    const liveKeys = new Set(live.map((p) => keyOf(p.view)))
+
+    for (const { view, rs } of live) {
+      const pk = keyOf(view)
+      let q = sign.popups.get(pk)
+      const size = { w: rs.size.width, h: rs.size.height }
+      if (q && (q.size.w !== size.w || q.size.h !== size.h)) {
+        sign.mesh.remove(q.mesh)
+        q.rt.dispose()
+        sign.popups.delete(pk)
+        q = undefined
+      }
+      if (!q) {
+        const { rt, tex } = adoptSurfaceTexture(rs)
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(1, 1),
+          new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+        )
+        // A child of the sign, so it inherits the sign's pose for free and
+        // stays glued to the window through the flatten.
+        mesh.userData.popupView = view
+        sign.mesh.add(mesh)
+        q = { mesh, rt, size }
+        sign.popups.set(pk, q)
+        state.popupQuads++
+      }
+      const g = sign.mesh.geometry.parameters
+      const scale = g.width / sign.size.width
+      const pr = view.regionRect
+      const sr = sign.view.regionRect
+      const dx = pr.x0 - sr.x0
+      const dy = pr.y0 - sr.y0
+      q.mesh.scale.set(size.w * scale, size.h * scale, 1)
+      q.mesh.position.set(
+        (dx + size.w / 2 - sign.size.width / 2) * scale,
+        -(dy + size.h / 2 - sign.size.height / 2) * scale,
+        1.5, // just proud of the sign face, so it never z-fights the window
+      )
+    }
+
+    for (const [pk, q] of [...sign.popups]) {
+      if (liveKeys.has(pk)) continue
+      sign.mesh.remove(q.mesh)
+      q.rt.dispose()
+      sign.popups.delete(pk)
+    }
+  }
 }
 
 // ---------------------------------------------------------------- the ledger
@@ -573,21 +719,32 @@ function scenePointFromEvent(ev) {
     -((ev.clientY - rect.top) / rect.height) * 2 + 1,
   )
   raycaster.setFromCamera(ndc, camera)
+  // RECURSIVE: popup quads are children of their sign, and a menu is the thing
+  // you most need to be able to click. A non-recursive pick made every popup
+  // decorative.
   const meshes = [...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)
-  const hit = raycaster.intersectObjects(meshes, false)[0]
-  if (!hit || !hit.uv) return null
-  const s = signs.get(hit.object.userData.signKey)
-  if (!s || !s.view) return null
+  const hits = raycaster.intersectObjects(meshes, true)
+  const hit = hits.find((h) => h.uv)
+  if (!hit) return null
+
+  // A popup carries its OWN view, and therefore its own rect in the ledger. Its
+  // surface coordinates start at ITS top-left, not the parent's -- routing a
+  // menu click through the parent's rect would land somewhere in the window
+  // behind it.
+  const popupView = hit.object.userData.popupView
+  const target = popupView ?? signs.get(hit.object.userData.signKey)?.view
+  if (!target) return null
 
   // The plane's v runs 0 at the BOTTOM; the surface's y runs 0 at the TOP, and
   // the sign is upright (verified by __calibrate). So vTop = 1 - uv.y.
   const u = hit.uv.x
   const vTop = 1 - hit.uv.y
-  const r = s.view.regionRect
+  const r = target.regionRect
   return {
     x: r.x0 + u * (r.x1 - r.x0),
     y: r.y0 + vTop * (r.y1 - r.y0),
-    sign: s,
+    sign: { view: target },
+    isPopup: !!popupView,
   }
 }
 
@@ -595,6 +752,7 @@ function sendMotion(ev) {
   const p = scenePointFromEvent(ev)
   if (!p) return
   state.lastScenePoint = [Math.round(p.x), Math.round(p.y)]
+  state.lastWasPopup = !!p.isPopup
   // Did Greenfield resolve this point to the surface we aimed at? If not, the
   // remap is wrong and every click is landing somewhere else -- which would
   // otherwise only show up as an application behaving strangely.
@@ -708,6 +866,7 @@ function frame(now = 0) {
     const dt = Math.min(0.05, lastT ? (now - lastT) / 1000 : 0.016)
     lastT = now
     adoptPending()
+    syncPopups()
     stepFlight(dt)
     // Greenfield decoded into OUR context and left its own bindings behind.
     // three caches GL state and would otherwise trust a cache that is no longer
@@ -964,6 +1123,50 @@ window.__tubes = () => ({
   why: document.getElementById('why')?.textContent ?? null,
 })
 
+// Raw view tree, for looking at what the compositor actually did with a popup
+// before deciding how to draw it.
+window.__views = () =>
+  session.renderer.topLevelViews.map((v) => ({
+    key: keyOf(v),
+    role: v.surface.role?.constructor?.name ?? null,
+    hasParent: !!v.surface.parent,
+    parentKey: v.surface.parent?.role?.view ? keyOf(v.surface.parent.role.view) : null,
+    rect: [v.regionRect.x0, v.regionRect.y0, v.regionRect.x1, v.regionRect.y1],
+    mapped: v.mapped,
+    hasBuffer: !!v.surface.state.bufferContents,
+    knownAsSign: signs.has(keyOf(v)),
+  }))
+
+// Aim at a POPUP's centre and report where Greenfield resolved it. The proof
+// that a menu is clickable, not decorative.
+window.__pointAtPopup = () => {
+  for (const sign of signs.values()) {
+    if (!sign.mesh || !sign.popups?.size) continue
+    const [q] = [...sign.popups.values()]
+    const world = q.mesh.getWorldPosition(new THREE.Vector3())
+    const v = world.project(camera)
+    const ev = {
+      clientX: ((v.x + 1) / 2) * renderer.domElement.width,
+      clientY: ((1 - v.y) / 2) * renderer.domElement.height,
+      timeStamp: performance.now(),
+      buttons: 0,
+      button: 0,
+    }
+    sendMotion(ev)
+    const pv = q.mesh.userData.popupView
+    const picked = session.renderer.pickView({ x: state.lastScenePoint[0], y: state.lastScenePoint[1] })
+    return {
+      popupRect: [pv.regionRect.x0, pv.regionRect.y0, pv.regionRect.x1, pv.regionRect.y1],
+      parentRect: [sign.view.regionRect.x0, sign.view.regionRect.y0, sign.view.regionRect.x1, sign.view.regionRect.y1],
+      scenePoint: state.lastScenePoint,
+      hitPopupQuad: state.lastWasPopup,
+      resolvedToPopup: picked ? keyOf(picked) === keyOf(pv) : false,
+      resolvedTo: picked ? keyOf(picked) : null,
+    }
+  }
+  return null
+}
+
 window.__district = (d) => goDistrict(d)
 window.__overview = () => goOverview()
 
@@ -1101,6 +1304,9 @@ async function main() {
 
     session.globals.register()
     installInput()
+    // 10Hz: scanning every client object per frame is not free, and a popup
+    // appearing 100ms late is invisible to a person.
+    setInterval(mapStrandedPopups, 100)
     pollTubes()
     setInterval(pollTubes, 2000)
     state.compositor = 'up'
@@ -1129,12 +1335,13 @@ async function main() {
       // `state.district` at adoption time, exactly as it would if you were
       // driving around opening things. `?windows=2,2,1` is per-district counts.
       const launcher = createAppLauncher(session, 'web')
+      const clientName = params.get('client') ?? 'simple-shm'
       const plan = (params.get('windows') ?? '2,2,1').split(',').map((n) => parseInt(n, 10) || 0)
       ;(async () => {
         for (let d = 0; d < Math.min(plan.length, DISTRICTS.length); d++) {
           state.district = d
           for (let i = 0; i < plan[d]; i++) {
-            const app = launcher.launch(new URL(`${location.origin}/clients/simple-shm/app.html`), () => {})
+            const app = launcher.launch(new URL(`${location.origin}/clients/${clientName}/app.html`), () => {})
             app.onError = (e) => {
               state.error = String(e)
             }

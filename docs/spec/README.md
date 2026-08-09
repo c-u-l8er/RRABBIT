@@ -225,10 +225,12 @@ otherwise be re-found here:
 
 These are named now so that no milestone can quietly claim them.
 
-- **`xdg_popup` positioning.** A popup is placed relative to a rectangle on its
-  parent surface. On a receding, curved billboard there is no such rectangle.
-  Every right-click menu, combobox and tooltip in every application is this
-  problem. **Working assumption: a popup forces the flatten.** Unproven.
+- ~~**`xdg_popup` positioning.**~~ **CLOSED — see §16.** The billboard has no
+  rectangle, but the ledger does, and the compositor computes the position from
+  the client's own positioner. The working assumption ("a popup forces the
+  flatten") turned out to be unnecessary: a popup is a child quad on the sign
+  and works while driving. Separately, §16.1 found that popups cannot map at all
+  in rc1 — a defect one layer below this entry.
 - **Drag and drop, clipboard, XWayland.** Greenfield implements core + xdg-shell.
   Everything else is ours to answer.
 - **Keyboard routing across a moving scene** — see invariant 7.
@@ -794,3 +796,85 @@ District keys (`1`..`3`, `O`) are deliberately **dead while flat**. A digit type
 into a focused application has to reach the application, not move you to another
 workspace. Same family as invariant 7 and the `Ctrl+Alt+Shift+Esc` chord: the
 shell may only take input the application would not have wanted.
+
+---
+
+## 16. Popups — §7's open problem, closed
+
+**Passed 2026-08-08.** `clients/menu-shm/` + `syncPopups()` in `m2/shell.js`.
+Evidence in `docs/m6-popup.png` and `docs/m6-popup-closed.png`.
+
+§7 listed `xdg_popup` as the thing with no known answer, and called it the first
+thing a real menu does. It is now working, and the reason it took a detour is
+that **the problem was one layer below where §7 was looking.**
+
+| claim | measurement |
+|---|---|
+| a real `xdg_popup` exists | client `menu-shm`, positioner anchored to a 120×26 bar at (12,12) |
+| the compositor computes its position | popup rect `[132, 38, 262, 134]` = `BAR.x+BAR.width`, `BAR.y+BAR.height` |
+| it renders on its parent's sign | overhanging the window's right edge, as a menu should |
+| **input reaches the menu** | aimed at popup centre → scene point `[197, 86]` = the rect's exact centre |
+| **and resolves to the POPUP** | `pickView` → the popup's own surface, not the window behind it |
+| closing removes it | quad gone, `popupSurfaces: 0`, sign clean |
+
+### 16.1 An xdg_popup cannot map in Greenfield 1.0.0-rc1
+
+`surface.mapped = true` happens in exactly one place —
+`FloatingDesktopSurface.commit()` — and that is reached from `XdgToplevel`,
+`ShellSurface` and `XWaylandShellSurface`. **`XdgPopup.onCommit` never calls
+it.** It acks the configure, schedules a render, and stops.
+
+Measured directly: a surface with role `XdgPopup`, `hasBuffer: true`,
+`mapped: false`, and no view anywhere. The client believed it had drawn a menu.
+
+**This is not a 3D problem.** It is the reason no menu, dropdown, combobox or
+tooltip can appear in this compositor at all, for any client, native or web.
+Anyone building on rc1 will hit it the first time a user right-clicks.
+
+Worked around by finishing the job from the shell: at 10 Hz, any popup surface
+that has a buffer and is not mapped gets the `desktopSurface.commit()` it never
+received. **This is a patch over an upstream defect, not a design** — it belongs
+in a bug report, and it is listed in §13.6's "ask upstream" alongside the
+packaging defects.
+
+### 16.2 The billboard has no rectangle. The ledger does.
+
+§7's worry was exact as far as it went: *"a popup is positioned relative to a
+rectangle on its parent surface, and on a receding, curved billboard there is no
+such rectangle."*
+
+But the shell never needed to invent one. Once mapped, the popup has its own
+rect in the flat output, its parent has one, and **the difference between them
+is the offset in parent-surface pixels** — computed by the compositor from the
+client's own `XdgPositioner`. The sign already knows how many world units it
+spends per surface pixel, so:
+
+```
+local x =  (dx + popupW/2 - parentW/2) * scale
+local y = -(dy + popupH/2 - parentH/2) * scale
+```
+
+M4's ledger (§15.2) is what makes this available. Placing windows at distinct
+rects was done to fix input routing; it turned out to be the thing that makes
+popups possible too.
+
+The quad is a **child of the sign mesh**, so it inherits the sign's pose for
+free and stays glued to the window through the flatten and the drive.
+
+### 16.3 Findings
+
+- **The raycast has to be recursive.** Popup quads are children of their sign,
+  and `intersectObjects(meshes, false)` skipped them — which made every popup
+  decorative: visible, and impossible to click.
+- **A popup carries its own ledger rect, and routing must use it.** Mapping a
+  menu click through the *parent's* rect would land somewhere in the window
+  behind the menu — a bug that would look like "the menu does nothing" while
+  quietly clicking whatever is underneath.
+- **Nothing in this project could produce a popup**, which is why the problem sat
+  open. `simple-shm` draws a toplevel and stops, and every native app is blocked
+  behind §13. `menu-shm` was written to make the case exist.
+- `menu-shm` is deliberately **vertically asymmetric** (cyan top half, dark
+  bottom), which re-confirms upright orientation by eye — something §11.2 proved
+  `simple-shm` structurally cannot do.
+- A submenu's parent is another popup, so the walk up to the owning sign is a
+  loop, not one hop.
