@@ -23,6 +23,21 @@
         height: 100%;
         display: block;
       }
+      #why {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 10px;
+        z-index: 4;
+        max-width: 92vw;
+        text-align: center;
+        color: #ff5a3c;
+        text-shadow: 0 0 6px #03040a, 0 0 12px #03040a;
+        pointer-events: none;
+      }
+      #why[data-state='stale'] {
+        color: #8f8fa0;
+      }
       #status {
         position: fixed;
         left: 12px;
@@ -38,6 +53,9 @@
   <body>
     <canvas id="gl"></canvas>
     <div id="status">booting</div>
+    <!-- Invariant 1 lives here: whatever is over its redline, and WHY. Empty
+         when nothing is, so it is a signal rather than furniture. -->
+    <div id="why"></div>
     <script type="module" src="./shell.js"></script>
   </body>
 </html>

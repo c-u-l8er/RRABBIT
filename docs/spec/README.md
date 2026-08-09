@@ -643,3 +643,75 @@ In rough order of cost:
    rather than using the prebuilt addons.
 4. Ask upstream. The rc1 packaging defects in §13.3 are worth reporting whatever
    happens to the frame path.
+
+---
+
+## 14. M3 — the tubes
+
+**Passed 2026-08-08.** `bridge.py` + `m2/tubes.js` — evidence in
+`docs/m3-tubes.png`.
+
+Seven gauges reading the real machine, in RAVIO's unchanged rating shape
+`{value, n, why, bar}`. Measured on this box:
+
+| tube | value | n | bar | why |
+|---|---|---|---|---|
+| CPU | 0.74 | 74% | 1.0 | busiest process, named |
+| RAM | 0.73 | 22597 MB of 31192 | 0.9 | `largest: claude-desktop at 1055 MB` |
+| **SWAP** | **0.49** | 16761 MB of 34312 | **0.25** | `swapping is a fault, not a level` |
+| DISK | 0.45 | 409 GB of 902 | 0.9 | `/ -- 493 GB free` |
+| NET | 0.25 | 0.13 MB/s | — | `wlan0 -- scaled against the busiest 1.64 MB/s seen` |
+| TEMP | 0.72 | 71.8 C | 0.85 | `hottest: k10temp` |
+| LOAD | 0.58 | 21.23 | 1.0 | `14.83 / 13.35 / 13.28 over 24 cpus` |
+
+Geometry checked against data rather than admired: `fillY == value × TUBE_H` on
+every tube, SWAP is the only red one, and NET is the only one with no redline
+ring because it is the only one with `bar: null`.
+
+**Invariant 1, working end to end**: SWAP is over its redline and the strip
+reads *"SWAP 49% over 25% — swapping is a fault, not a level"*. The rack is not
+permitted to show a number it cannot explain.
+
+### 14.1 Two states that must never collapse into one
+
+- **Unknown is not zero.** `value: null` (no sensor, or no interval sampled yet)
+  renders dim, empty, and captioned `?`. Drawing it as an empty tube would claim
+  the machine is idle. Same distinction RAVIO's milepost tape needed between
+  *quiet* and *not held*.
+- **A bridge that is down is not a machine that is idle.** Verified by killing
+  `bridge.py`: the last values stay on the rack and the strip turns grey with
+  *"tube bridge unreachable — showing last known values"*. Blanking the rack
+  would have been a claim about the machine.
+
+### 14.2 Findings
+
+- **A gauge scaled against a peak that includes its own sample always reads
+  100%.** NET has no knowable ceiling — we never interrogated the link speed —
+  so it scales against the busiest second ever observed. Folding the current
+  rate in *before* dividing made every new maximum read exactly full: measured
+  `value: 1.0` at `0.00 MB/s`, i.e. the first byte transferred pinned the
+  needle. Scale against the **prior** peak, and report `null` until there is a
+  prior peak to scale against. *Refusing to answer has to work in both
+  directions* — the rule RAVIO's soak report learned about slopes.
+- **A camera's children are only rendered if the camera is itself in the scene
+  graph.** `scene.add(camera)`. Without it the rack exists, updates correctly,
+  and is invisible — nothing errors.
+- **A 128px label canvas clipped `72.0 C` to `72.0 (`** — a temperature that
+  reads as a typo rather than as a truncation.
+- **The per-tube exception guard earned its place immediately.** A `None`-seeded
+  peak threw `'>' not supported between float and NoneType`; the rack stayed up
+  and printed the error in that tube's own `why` instead of taking the other six
+  down with it.
+
+### 14.3 The FreeBSD reader is UNVERIFIED
+
+`bridge.py` selects `FreeBSDReader` on `platform.system() == 'FreeBSD'`. It is
+written from documented sysctl names (`kern.cp_time`, `vm.stats.vm.*`,
+`hw.ncpu`, `dev.cpu.0.temperature`) plus `swapctl -sk` and `netstat -ibn`, and
+**has never been run** — there is no FreeBSD host in this loop yet. Only the
+Linux reader is measured. `disk` is shared between them because `statvfs` is
+POSIX.
+
+Known risk on FreeBSD: `dev.cpu.0.temperature` requires `coretemp` or `amdtemp`
+to be loaded, so TEMP will report unknown on a stock image — which the rack
+draws as unknown rather than as cold, per §14.1.

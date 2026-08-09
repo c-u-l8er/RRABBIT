@@ -49,6 +49,7 @@
 
 import * as THREE from 'three'
 import { createAppLauncher, createCompositorSession, initWasm } from '@gfld/compositor'
+import { createRack } from './tubes.js'
 
 const ACC = 0xf2c14e
 const COOL = 0x2de2e6
@@ -60,6 +61,8 @@ const BG = 0x03040a
 // RAVIO's S and must not be assumed to transfer (spec §7).
 const MILE = 260
 const SCENE_ID = 'road'
+// The tube bridge (bridge.py). Its own port so a shell without one still runs.
+const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? 'http://127.0.0.1:8913'
 
 export const state = {
   compositor: 'idle',
@@ -77,11 +80,14 @@ export const state = {
   lastScenePoint: null,
   lastPickMatched: null,
   released: 0,
+  tubeReader: null,
+  tubePolls: 0,
+  tubeError: null,
   error: null,
   frameError: null,
 }
 
-let renderer, gl, scene, camera, session
+let renderer, gl, scene, camera, session, rack
 let nextMilepost = 1
 // surface key -> { milepost, mesh, tex, rt, size, view }
 const signs = new Map()
@@ -130,8 +136,53 @@ function buildWorld(canvas) {
   road.position.set(0, -30, -2600)
   scene.add(road)
 
+  // The rack is parented to the camera, and a camera's children are only
+  // rendered if the camera is itself in the scene graph. Without this line the
+  // tubes exist, update correctly, and are invisible.
+  scene.add(camera)
+  rack = createRack(camera)
+
   resize()
   window.addEventListener('resize', resize)
+}
+
+// ---------------------------------------------------------------- the tubes
+
+async function pollTubes() {
+  try {
+    const r = await fetch(`${TUBE_BRIDGE}/api/tubes`, { cache: 'no-store' })
+    const payload = await r.json()
+    rack.apply(payload)
+    state.tubeReader = payload.reader
+    state.tubePolls++
+    state.tubeError = null
+  } catch (e) {
+    // A bridge that is down must not read as a machine that is idle: leave the
+    // last values alone and say so. Blanking the rack would be a claim.
+    state.tubeError = String(e)
+  }
+  renderWhy()
+}
+
+// Invariant 1: a tube over its redline has to say what is doing it.
+function renderWhy() {
+  const el = document.getElementById('why')
+  if (!el) return
+  const over = rack.overRedline()
+  if (state.tubeError) {
+    el.textContent = `tube bridge unreachable — showing last known values (${state.tubeError})`
+    el.dataset.state = 'stale'
+    return
+  }
+  if (over.length === 0) {
+    el.textContent = ''
+    el.dataset.state = 'ok'
+    return
+  }
+  el.dataset.state = 'over'
+  el.textContent = over
+    .map((o) => `${o.name.toUpperCase()} ${Math.round(o.value * 100)}% over ${Math.round(o.bar * 100)}% — ${o.why}`)
+    .join('   ·   ')
 }
 
 function resize() {
@@ -733,6 +784,19 @@ window.__drive = (z) => {
   return camera.position.z
 }
 
+window.__tubes = () => ({
+  reader: state.tubeReader,
+  polls: state.tubePolls,
+  error: state.tubeError,
+  over: rack ? rack.overRedline() : null,
+  read: rack ? Object.fromEntries(Object.entries(rack.tubes).map(([k, t]) => [k, t.data && {
+    value: t.data.value, n: t.data.n, bar: t.data.bar,
+    fillY: +t.fill.scale.y.toFixed(5), barShown: t.bar.visible,
+    color: '#' + t.fill.material.color.getHexString(),
+  }])) : null,
+  why: document.getElementById('why')?.textContent ?? null,
+})
+
 window.__flatten = (m) => flattenTo(m)
 window.__release = () => release()
 
@@ -837,6 +901,8 @@ async function main() {
 
     session.globals.register()
     installInput()
+    pollTubes()
+    setInterval(pollTubes, 2000)
     state.compositor = 'up'
 
     // `?remote=/text-editor,/xterm` launches NATIVE applications through
