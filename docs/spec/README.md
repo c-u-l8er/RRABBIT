@@ -248,11 +248,13 @@ These are named now so that no milestone can quietly claim them.
 
 **M0 — the occlusion proof. PASSED (2026-08-08).** See §10.
 
-**M1 — many windows, one road.** `surfaceCreated`/`surfaceDestroyed` →
+**M1 — many windows, one road. PASSED (2026-08-08).** See §11.
+
+OLD:**M1 — many windows, one road.** `surfaceCreated`/`surfaceDestroyed` →
 billboards. Milepost addressing (invariant 6). Titles from
 `surfaceTitleUpdated`, app ids from `surfaceAppIdUpdated`.
 
-**M2 — the flatten.** Fly into a window; it goes fronto-parallel and 1:1; input
+**M2 — the flatten. PASSED (2026-08-08).** See §12. Originally: Fly into a window; it goes fronto-parallel and 1:1; input
 routes (§6); focus follows (invariant 7); `Ctrl+Alt+Shift+Esc` gets you out.
 This is the milestone where it becomes usable rather than a demo.
 
@@ -427,3 +429,83 @@ risk:** an rc bump can move them, and the failure would be at runtime.
 - A sweep of a sign that has gone behind the camera reports `0/0`, not a
   failure. **Refusing to answer has to work in both directions** — the same rule
   RAVIO's soak report had to learn about slopes.
+
+---
+
+## 12. M2 — the flatten
+
+**Passed 2026-08-08.** `m2/` — evidence in `docs/m2-flat.png`. `m1/` is frozen.
+
+Fly into a sign; arrive fronto-parallel and pixel-exact; point and type into the
+real client; leave with a chord that no application can swallow.
+
+| claim | measurement |
+|---|---|
+| pixel-exact | surface 250×250 → screen **250.00 × 250.00**, `scale: 1.0000` |
+| fronto-parallel | top edge **250.00**, bottom edge **250.00** (equal ⇒ no foreshortening) |
+| pointer maps | UV (0.5,0.5)→(125,125), (0.1,0.1)→(25,25), (0.9,0.9)→(225,225), (0.25,0.75)→(62,188) |
+| routing resolves | `pickView` returned the aimed surface for **every** milepost |
+| keyboard arrives | plain ESC while flat → the client **exited** → 3 surfaces became 2 |
+| escape chord | Ctrl+Alt+Shift+Esc → `flat` → `driving`, by a real key press |
+| placement | mileposts unchanged by flying, and by a neighbour being destroyed |
+
+The camera flies to the window; **the window never moves** (invariant 6).
+
+### 12.1 Pixel-exact, and why it is checkable
+
+A world length L at distance d covers `L / (2·d·tan(fov/2))` of the viewport
+height, so `d = signWorldHeight · viewportPx / (surfacePx · 2·tan(fov/2))`.
+
+`__flatMetrics` measures the sign's **projected corners**, not the formula that
+placed the camera — checking the formula against its own prediction would be
+testing the arithmetic against itself, which RAVIO already had to learn on the
+yoke and the dials.
+
+### 12.2 Input needs no synthetic DOM events
+
+`ButtonEvent` is a plain object `{x, y, timestamp, buttonCode, released,
+buttons, sceneId}` in **canvas-pixel space**, and `session.inputQueue` takes it.
+So: raycast the sign → hit UV → the surface's rect in the flat output → queue.
+That is exactly what Greenfield's own listeners do, one step further down.
+
+Greenfield's listeners are silenced with a **capture-phase `stopPropagation` on
+`window`** — capture at window runs before target-phase listeners on the canvas.
+
+### 12.3 The finding that makes invariant 7 a SAFETY property
+
+**Every window occupies the identical rect `[0,0,250,250]` in the flat output.**
+Greenfield stacks them all at the origin. So the flat output *cannot tell windows
+apart by position*, and `pickView` can only separate them by stacking order.
+
+Pointer routing is correct **only because the flatten calls `activateSurface`,
+which raises the view**, making the flattened window topmost before any event is
+routed. Invariant 7 was written as a UX rule — *focus follows the flatten, never
+the drive-by* — and it turns out to be the thing that keeps input from landing in
+the wrong application. Routing input to a non-flat window (a hover preview on the
+road, say) would hit whichever window happened to be on top.
+
+Consequence for **M4**: §11.2 said the output must be big enough to hold every
+window. It now also has to *place* them — RRABBIT must lay windows out in the
+flat output itself if it ever wants position-based routing.
+
+### 12.4 Three more
+
+- **`activateSurface` is not enough for keyboard.** Greenfield's keydown listener
+  is on the canvas and its `focus` handler is what calls
+  `notifyKeyboardFocusIn()`. Without an explicit `canvas.focus()` the surface is
+  activated, looks focused, and receives **no keys at all**.
+- **A window can close while you are inside it.** The client exits, the surface
+  is destroyed, and the shell sat flat against an empty milepost with input
+  routed to a surface that no longer existed. Found by pressing ESC in a client
+  that exits on ESC — i.e. by the keyboard test succeeding. Now releases.
+- **1:1 on a small surface is a small picture**: a 250×250 client fills 250×250
+  of a 1280×720 viewport. The tunable is **integer** scale only (2×, 3×) —
+  non-integer resampling is the exact thing pixel-exactness was protecting.
+
+### 12.5 Still not proved
+
+- **No native application has been through any of this.** Every window so far is
+  an in-browser WASM/JS client. `compositor-proxy` + the gstreamer encode is
+  where §7's per-window cost stops being theoretical.
+- `xdg_popup` (§7) is untouched, and a popup is the first thing a real menu does.
+- Pointer *hover* on the road is deliberately not routed — see §12.3.
