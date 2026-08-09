@@ -28,10 +28,16 @@ screenshots alone — spec §10–§12.
 - **M2** — flying into a sign arrives fronto-parallel at exactly 1:1, where it
   can be pointed at, typed into, and left with a chord no client can swallow.
 
-**Not done, and not implied:** no *native* application has been through this
-path — every window so far is an in-browser WASM/JS client, so §7's per-window
-encode cost is still untested. `xdg_popup` is untouched. Signs carry no title
-yet. Next is M3, the tubes.
+**Native applications do not work yet** — attempted and written up in spec §13.
+The control path is fine (nested compositor, XWayland, the app launches and
+stays alive, the browser sees its surface) but **no buffer ever arrives**, so
+nothing reaches the road and §7's per-window encode cost is still unpriced. Two
+things came out of it worth knowing before anyone repeats it: GStreamer's GL
+cannot make an EGL context on this box's NVIDIA node and GLib aborts, so the
+failure presents as `SIGTRAP`; and `@gfld/compositor-proxy-cli@1.0.0-rc1` ships
+a `dist/` missing three of its four modules.
+
+Also not done: `xdg_popup` is untouched, and signs carry no titles yet.
 
 ## Lineage
 
