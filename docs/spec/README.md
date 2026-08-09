@@ -254,7 +254,7 @@ signs carry no caption yet.
 
 **M2 — the flatten. PASSED (2026-08-08).** See §12.
 
-**M3 — the tubes.** `bridge.py` on FreeBSD sysctl. §3.1.
+**M3 — the tubes. PASSED (2026-08-08).** See §14. The FreeBSD reader is written but UNVERIFIED (§14.3).
 
 **M4 — districts.** Workspaces as Wayland outputs. R shows all of them.
 
