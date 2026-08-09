@@ -595,7 +595,43 @@ a launch error with no explanation.
 Applies to most modern GTK/GNOME apps. `xterm` was used instead; `firefox` needs
 `--new-instance --no-remote` for the same reason, which the app config sets.
 
-### 13.5 What to try next
+### 13.5 Narrowed further (same day)
+
+More was ruled out after the first write-up:
+
+- **The system's GStreamer GL is healthy.** `videotestsrc ! glupload !
+  glcolorconvert ! gldownload ! pngenc` succeeds on this box in all three of:
+  default, `GST_GL_WINDOW=surfaceless`, and `LIBGL_ALWAYS_SOFTWARE=1`. So the
+  fault is in **how the proxy sets up EGL** (it binds `EGL_PLATFORM_DEVICE_EXT`
+  to a chosen render node) and not in the machine.
+- **There is no non-GL encoder to fall back to.** Every pipeline in
+  `gst_frame_encoder.c` — including the `png` fallback that exists for surfaces
+  too small for x264 — begins with `glupload`. GL is not the fast path, it is the
+  *only* path.
+- `LIBGL_ALWAYS_SOFTWARE=1` makes it **worse**: `SIGSEGV` instead of `SIGTRAP`.
+- With `--render-device=renderD129` (AMD) plus
+  `GST_GL_WINDOW=surfaceless GST_GL_PLATFORM=egl GST_GL_API=gles2` the session is
+  **stable, with no GL errors at all** — 4 channels open and stay open, the app
+  runs, the surface exists — and still `bufferContents` is null. The encoder does
+  not error; it simply never emits.
+- Firefox fails differently and earlier (`Data connection closed. Code: 1006`,
+  one channel instead of four), so it is not a second data point for the same
+  fault. xterm is the better subject.
+- **The Docker image is not a usable test.** The only published tag of
+  `udevbe/compositor-proxy-cli` is **`20231106`** — November 2023, against
+  browser-side packages published in late 2025. It would pair an old proxy with a
+  new compositor.
+
+**The remaining route is to build `@gfld/compositor-proxy` from source against
+this system's gstreamer 1.26.10 rather than trusting the prebuilt addons.**
+Every library dependency is already present — libffi, libudev, gbm, libdrm, egl,
+gstreamer-1.0/app-1.0, graphene. Only the build *tools* are missing:
+
+```
+sudo pacman -S --needed cmake ninja
+```
+
+### 13.6 What to try next
 
 In rough order of cost:
 
