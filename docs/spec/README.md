@@ -248,15 +248,11 @@ These are named now so that no milestone can quietly claim them.
 
 **M0 — the occlusion proof. PASSED (2026-08-08).** See §10.
 
-**M1 — many windows, one road. PASSED (2026-08-08).** See §11.
+**M1 — many windows, one road. PASSED (2026-08-08).** See §11. Titles from
+`surfaceTitleUpdated` and app ids from `surfaceAppIdUpdated` are **not** done —
+signs carry no caption yet.
 
-OLD:**M1 — many windows, one road.** `surfaceCreated`/`surfaceDestroyed` →
-billboards. Milepost addressing (invariant 6). Titles from
-`surfaceTitleUpdated`, app ids from `surfaceAppIdUpdated`.
-
-**M2 — the flatten. PASSED (2026-08-08).** See §12. Originally: Fly into a window; it goes fronto-parallel and 1:1; input
-routes (§6); focus follows (invariant 7); `Ctrl+Alt+Shift+Esc` gets you out.
-This is the milestone where it becomes usable rather than a demo.
+**M2 — the flatten. PASSED (2026-08-08).** See §12.
 
 **M3 — the tubes.** `bridge.py` on FreeBSD sysctl. §3.1.
 

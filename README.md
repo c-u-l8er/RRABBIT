@@ -19,9 +19,19 @@ which records what does *not* work about the obvious integration and why.
 
 ## Status
 
-Spec written. **M0 (the occlusion proof) is unstarted and is the gate**: if the
-road cannot be made to pass in front of a live application window, the rest of
-the spec is void.
+**M0, M1 and M2 pass** (2026-08-08), each with measurements rather than
+screenshots alone — spec §10–§12.
+
+- **M0** — the road occludes a live Wayland surface. This was the gate.
+- **M1** — many windows ride the road as signs, one adopted GPU texture each,
+  at stable milepost addresses. No Greenfield patch was needed after all (§11.1).
+- **M2** — flying into a sign arrives fronto-parallel at exactly 1:1, where it
+  can be pointed at, typed into, and left with a chord no client can swallow.
+
+**Not done, and not implied:** no *native* application has been through this
+path — every window so far is an in-browser WASM/JS client, so §7's per-window
+encode cost is still untested. `xdg_popup` is untouched. Signs carry no title
+yet. Next is M3, the tubes.
 
 ## Lineage
 
