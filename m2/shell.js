@@ -1167,6 +1167,44 @@ window.__pointAtPopup = () => {
   return null
 }
 
+// Say what happened, once, for the benefit of a browser that cannot be asked.
+// `?report=15` posts state after 15 seconds.
+{
+  const secs = Number(new URLSearchParams(location.search).get('report'))
+  if (Number.isFinite(secs) && secs > 0) {
+    setTimeout(() => {
+      const t = window.__m1()
+      const tubes = window.__tubes()
+      fetch(`${TUBE_BRIDGE}/api/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ua: navigator.userAgent.slice(0, 60),
+          crossOriginIsolated: window.crossOriginIsolated,
+          sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
+          webglVendor: (() => {
+            try {
+              const d = gl.getExtension('WEBGL_debug_renderer_info')
+              return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+            } catch (e) {
+              return 'unavailable'
+            }
+          })(),
+          compositor: t.compositor,
+          surfaces: t.surfaces,
+          signs: t.signs,
+          frames: t.frames,
+          districts: t.districtNames,
+          tubeReader: tubes.reader,
+          tubePolls: tubes.polls,
+          error: t.error,
+          frameError: t.frameError,
+        }),
+      }).catch(() => {})
+    }, secs * 1000)
+  }
+}
+
 window.__district = (d) => goDistrict(d)
 window.__overview = () => goOverview()
 

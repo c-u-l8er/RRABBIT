@@ -19,8 +19,8 @@ which records what does *not* work about the obvious integration and why.
 
 ## Status
 
-**M0–M4 pass** (2026-08-08), each with measurements rather than
-screenshots alone — spec §10–§12, §14 and §15.
+**M0–M5 built, M0–M4 measured** (2026-08-08), each with measurements rather than
+screenshots alone — spec §10–§12 and §14–§17.
 
 - **M0** — the road occludes a live Wayland surface. This was the gate.
 - **M1** — many windows ride the road as signs, one adopted GPU texture each,
@@ -31,6 +31,10 @@ screenshots alone — spec §10–§12, §14 and §15.
   to show a number it cannot explain.
 - **M4** — three districts as workspaces, each a road of its own, and a ledger
   where every window has its own rect so input resolves by position (§15.2).
+- **popups** — §7's open problem, closed (§16). Also found that an `xdg_popup`
+  cannot map at all in Greenfield rc1.
+- **M5** — runs as a session: Python-only on the target, and Firefox runs the
+  whole shell. **Not yet booted on a T&R image** (§17.2).
 
 **Native applications do not work yet** — attempted and written up in spec §13.
 The control path is fine (nested compositor, XWayland, the app launches and

@@ -22,8 +22,10 @@ stdlib only, on purpose: this ships inside a distro image.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import platform
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -31,6 +33,24 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8913
+
+# The built shell. Serving it from here means the target needs PYTHON ONLY at
+# runtime -- no node, no vite. `npx vite build` produces this; the distro ships
+# the output, not the toolchain.
+DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
+
+# NOT OPTIONAL. Greenfield web clients run in same-origin iframes and need
+# SharedArrayBuffer, which the browser withholds unless the page is
+# cross-origin isolated. Without these two headers the shell loads, the
+# compositor starts, and no client can ever connect -- a failure that looks
+# like the clients being broken.
+# Reports posted by a running shell (see /api/report).
+REPORTS = []
+
+ISOLATION_HEADERS = {
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+}
 
 # The seven, in rack order.
 TUBES = ("cpu", "ram", "swap", "disk", "net", "temp", "load")
@@ -389,18 +409,82 @@ def read_all():
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.split("?")[0] not in ("/api/tubes", "/"):
-            self.send_error(404)
-            return
-        body = json.dumps(read_all()).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+    def _send(self, code, body, ctype, extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # The shell is served from vite on another port.
-        self.send_header("Access-Control-Allow-Origin", "*")
+        for k, v in ISOLATION_HEADERS.items():
+            self.send_header(k, v)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _resolve(self, url_path):
+        """Map a URL to a file under DIST, refusing anything outside it."""
+        path = posixpath.normpath(url_path.split("?")[0].split("#")[0])
+        parts = [p for p in path.split("/") if p and p not in (".", "..")]
+        target = os.path.join(DIST, *parts)
+        # normpath above drops "..", but resolve and re-check anyway: a path
+        # that escapes the root is the one bug in a static server that matters.
+        target = os.path.realpath(target)
+        if not target.startswith(os.path.realpath(DIST)):
+            return None
+        if os.path.isdir(target):
+            target = os.path.join(target, "index.html")
+        return target if os.path.isfile(target) else None
+
+    def do_GET(self):
+        route = self.path.split("?")[0]
+
+        if route == "/api/tubes":
+            body = json.dumps(read_all()).encode()
+            # Still permissive: during development the shell is served by vite
+            # on another port and polls this one.
+            self._send(200, body, "application/json", {"Access-Control-Allow-Origin": "*"})
+            return
+
+        if not os.path.isdir(DIST):
+            self._send(
+                503,
+                b"RRABBIT shell not built. Run: npx vite build\n",
+                "text/plain; charset=utf-8",
+            )
+            return
+
+        # The session opens "/", and the shell lives at /m2/.
+        if route == "/":
+            self.send_response(302)
+            self.send_header("Location", "/m2/")
+            self.end_headers()
+            return
+
+        target = self._resolve(route)
+        if target is None:
+            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            return
+        ctype, _ = mimetypes.guess_type(target)
+        with open(target, "rb") as f:
+            self._send(200, f.read(), ctype or "application/octet-stream")
+
+    def do_POST(self):
+        # A report endpoint, so a HEADLESS browser can say what it managed to
+        # do. Firefox has no way to hand back `window.__m1()`, and "the
+        # screenshot looked fine" is not a measurement.
+        if self.path.split("?")[0] != "/api/report":
+            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, OSError) as e:
+            payload = {"parse_error": str(e)}
+        REPORTS.append(payload)
+        print("REPORT " + json.dumps(payload), flush=True)
+        self._send(200, b"{}", "application/json", {"Access-Control-Allow-Origin": "*"})
+
+    do_HEAD = do_GET
 
     def log_message(self, *_):
         pass  # a gauge polled every 2s must not write a line every 2s
@@ -409,4 +493,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     print(f"rrabbit bridge: {READER.name} reader on 127.0.0.1:{port}", flush=True)
+    print(f"  shell: {'serving ' + DIST if os.path.isdir(DIST) else 'NOT BUILT (npx vite build)'}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

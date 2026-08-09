@@ -63,8 +63,15 @@ export function createRack(camera) {
     // a level rather than expanding from the middle like a bar chart.
     const fill = new THREE.Mesh(
       new THREE.CylinderGeometry(TUBE_R * 0.78, TUBE_R * 0.78, 1, 14),
-      new THREE.MeshBasicMaterial({ color: ACC, transparent: true, opacity: 0.9 }),
+      new THREE.MeshBasicMaterial({ color: DEAD, transparent: true, opacity: 0.9 }),
     )
+    // THE RACK STARTS UNKNOWN, NOT FULL. The fill geometry is 1 unit tall and
+    // scaled to the value, so an unscaled fill is ~5x the tube -- seven amber
+    // bars running off the top of the frame before a single reading exists.
+    // Chrome never showed it because the bridge answered within the first
+    // frames; Firefox, starting slower, drew it every time. §14.1 says a gauge
+    // with nothing to report shows nothing, and that has to hold at t=0 too.
+    fill.scale.y = 0.0001
     fill.position.y = -TUBE_H / 2
     g.add(fill)
 
@@ -92,7 +99,7 @@ export function createRack(camera) {
 
     // 256, not 128: "72.0 C" is ~144px at this face and a 128px canvas clipped
     // it to "72.0 (" -- a temperature that reads as a typo.
-    const value = makeLabel('--')
+    const value = makeLabel('?')
     value.position.set(0, TUBE_H / 2 + 0.028, 0)
     g.add(value)
 

@@ -260,8 +260,8 @@ signs carry no caption yet.
 
 **M4 — districts. PASSED (2026-08-08).** See §15. NOT as Wayland outputs — §15.1 records why that shape does not work.
 
-**M5 — the session.** An xsession entry in T&R's `overlay-desktop`, beside
-icewm, never instead of it.
+**M5 — the session. BUILT (2026-08-08), NOT BOOTED on T&R.** See §17. Verified
+off-target including in Firefox; the bochs-VGA/no-DRM gate is untested (§17.2).
 
 ---
 
@@ -878,3 +878,69 @@ free and stays glued to the window through the flatten and the drive.
   `simple-shm` structurally cannot do.
 - A submenu's parent is another popup, so the walk up to the owning sign is a
   loop, not one hop.
+
+---
+
+## 17. M5 — the session
+
+**Built and verified off-target 2026-08-08. NOT booted on T&R.** Evidence in
+`docs/m5-firefox-boot.png`.
+
+The shell now runs as a session: `npx vite build` on a workstation, and the
+image ships the output. **The target needs Python only** — `bridge.py` serves
+the built bundle *and* the seven gauges on one port, so there is no node and no
+build toolchain in the distro.
+
+| piece | where |
+|---|---|
+| built bundle (8.3 MB: 6.5 shell + 1.8 h264 worker) | `dist/`, gitignored |
+| server for both shell and gauges | `bridge.py` |
+| session script | `travel-and-rrabbit/overlay-desktop/usr/local/bin/rrabbit-session` |
+| session entry, BESIDE the cockpit | `.../xsessions/rrabbit.desktop` |
+| Firefox prefs (the gate — §17.2) | `.../share/rrabbit/user.js` |
+| install into the image | `build-image.sh`, from `RRABBIT_DIST` |
+| `python3` | added to `tandr-desktop.conf` |
+
+### 17.1 Verified
+
+- **The built bundle runs from `bridge.py` alone** — no vite, no node.
+- **Firefox runs the whole shell**, which had never been tested: everything up to
+  here was Chrome. Reported by the shell itself from headless Firefox 147:
+  `crossOriginIsolated: true`, `SharedArrayBuffer: true`, compositor up,
+  **5 surfaces → 5 signs**, 1132 frames, 3 districts, tubes polling, no errors.
+- COOP/COEP are served on every response; `/` redirects to `/m2/`; path
+  traversal is refused.
+- The session script **falls back to the T&R cockpit** when there is no bridge
+  or no python, waits for a real HTTP answer rather than an open port, and kills
+  its bridge on every exit path.
+
+### 17.2 NOT verified — the gate
+
+**No T&R image has been built or booted with this session.** The whole thing
+turns on WebGL surviving on a bochs `std` VGA adapter with Xorg `scfb` and no
+DRM kernel module. `user.js` forces the software path
+(`webgl.force-enabled`, `gfx.webrender.software`, `layers.acceleration.disabled`)
+and that is a **hypothesis**, not a measurement.
+
+§13.2 made this less comfortable, not more: GStreamer's GL could not create a
+context on this machine's NVIDIA node, and a QEMU guest has *no* GPU at all.
+The browser's software path is a different code path from gstreamer's and has
+every reason to work — but "has every reason to work" is what §13 said too.
+
+### 17.3 Findings
+
+- **The rack booted FULL, and only a second browser showed it.** The fill
+  geometry is 1 unit tall and scaled to the value, so an unscaled fill is ~5×
+  the tube: seven amber bars running off the top of the frame before a single
+  reading existed. Chrome never showed it because the bridge answered within the
+  first frames; Firefox, starting slower, drew it every time. §14.1 says a gauge
+  with nothing to report shows nothing — **that has to hold at t=0**, which is
+  exactly when it is easiest to forget. Now dim, empty, captioned `?`.
+- **A headless browser cannot be asked, so give it a way to speak.**
+  `POST /api/report` plus `?report=<seconds>`; the shell posts what it managed
+  to do. "The screenshot looked fine" is not a measurement, and the screenshot
+  in question was of the bug above.
+- **`firefox --screenshot` quits on load**, so it can never observe anything
+  time-dependent. The first beacon run returned nothing for exactly this reason.
+- **Wait for an ANSWER, not for a port** — PARKVPS learned this against SLIRP,
+  and a session script handing a URL to a browser has the same failure.

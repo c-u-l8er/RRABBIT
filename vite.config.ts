@@ -17,6 +17,19 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    rollupOptions: {
+      // m2 is the living shell; the clients ship with it because a shell with
+      // nothing to launch is not testable on the target.
+      input: {
+        shell: 'm2/index.html',
+        'simple-shm': 'clients/simple-shm/app.html',
+        'menu-shm': 'clients/menu-shm/app.html',
+      },
+    },
+  },
   optimizeDeps: {
     // The compositor ships wasm + workers; letting esbuild pre-bundle it
     // rewrites those URLs and they 404 at runtime.
