@@ -50,7 +50,21 @@
 import * as THREE from 'three'
 import { createAppLauncher, createCompositorSession, initWasm } from '@gfld/compositor'
 import { createRack } from './tubes.js'
-import { state, signs, ctx, keyOf, ACC, COOL, BG, MILE, SCENE_ID, LEDGER_PITCH, LEDGER_COLS } from './world.js'
+import {
+  state,
+  signs,
+  ctx,
+  hooks,
+  sideQueue,
+  keyOf,
+  ACC,
+  COOL,
+  BG,
+  MILE,
+  SCENE_ID,
+  LEDGER_PITCH,
+  LEDGER_COLS,
+} from './world.js'
 import * as ws from './workspaces.js'
 import {
   attachTravel,
@@ -83,6 +97,10 @@ const DRIVE_POSE = { pos: new THREE.Vector3(0, 105, 260), look: new THREE.Vector
 // closed and re-opened while the shell runs, and `syncRoads` reconciles the
 // scene with the graph every time that happens.
 const roads = new Map()
+let lastRoadCount = -1
+const forgetStatus = () => {
+  lastRoadCount = -1
+}
 
 // ---------------------------------------------------------------- the world
 
@@ -180,6 +198,19 @@ function syncRoads() {
     r.road.position.set(x, -30, -2600)
     r.arch.position.set(x, 300, 60)
   }
+  // The status line names the workspace keys, and creating a lane from an exit
+  // gate changes how many there are -- so a line written once at startup starts
+  // lying the first time you use the feature it is describing.
+  if (want.size !== lastRoadCount) {
+    lastRoadCount = want.size
+    const el = document.getElementById('status')
+    if (el) {
+      el.textContent =
+        `${want.size} workspaces -- keys 1..${want.size}, 0 for overview. ` +
+        'Scroll: open windows at the entrance, then the lanes out at the far end.'
+    }
+  }
+
   for (const [id, r] of [...roads]) {
     if (want.has(id)) continue
     scene.remove(r.road)
@@ -285,7 +316,13 @@ function frame(now = 0) {
     adoptPending()
     syncPopups()
     // After adoptPending, so a window that arrived this frame is already counted
-    // on the lane that advertises its road.
+    // on the lane that advertises its road, and the exit gate has already moved
+    // down to stand past it.
+    //
+    // Roads are reconciled here too, and not only at startup: a workspace can be
+    // created from the exit gate mid-flight, and the road has to exist by the
+    // time you land on it.
+    syncRoads()
     syncGantries()
     stepFlight(dt)
     // THE ARCH IS AN OVERVIEW LABEL, SO IT ONLY EXISTS IN THE OVERVIEW.
@@ -536,6 +573,12 @@ window.__m1 = () => {
       districtName: ws.get(s.district)?.name ?? null,
       milepost: s.milepost,
       slot: s.slot,
+      // The side is worth reporting because it is no longer implied by the
+      // milepost: a window opened from the enter gate stands where it was asked
+      // to, and parity only decides when nobody said.
+      side: s.side ?? null,
+      x: s.mesh ? Math.round(s.mesh.position.x) : null,
+      z: s.mesh ? Math.round(s.mesh.position.z) : null,
       built: !!s.mesh,
       size: s.size ?? null,
     })
@@ -891,10 +934,43 @@ async function main() {
     // and nothing before this exercised gstreamer at all.
     const params = new URLSearchParams(location.search)
     const remote = params.get('remote')
+
+    // WHAT THE ENTER GATE DOES. One function, defined for whichever kind of
+    // client this session is running, and published through `hooks` because
+    // travel.js cannot import this module back.
+    //
+    // It does NOT choose a workspace or a milepost. Both are claimed at adoption
+    // (`state.district`, `ws.takeMilepost`) because the surface does not exist
+    // yet when the click happens -- so a window opened from a gate arrives by
+    // exactly the same path as one the launch plan opened, and there is no
+    // second placement rule that could disagree with the first.
+    const publishSpawn = (open) => {
+      hooks.spawnWindow = (side) => {
+        try {
+          sideQueue.push(side)
+          const app = open()
+          if (app) {
+            app.onError = (e) => {
+              state.error = String(e)
+            }
+          }
+          state.spawned = (state.spawned ?? 0) + 1
+          return true
+        } catch (e) {
+          // A failed launch must not leave a side queued -- the next window to
+          // arrive for any other reason would take it.
+          sideQueue.pop()
+          state.error = String(e)
+          return false
+        }
+      }
+    }
+
     if (remote) {
       const base = params.get('proxy') ?? 'http://127.0.0.1:8912'
       const launcher = createAppLauncher(session, 'remote')
-      for (const path of remote.split(',')) {
+      const paths = remote.split(',')
+      for (const path of paths) {
         const app = launcher.launch(new URL(`${base}${path}`), () => {})
         app.onStateChange = (s) => {
           state.appStates = { ...(state.appStates ?? {}), [path]: s }
@@ -903,6 +979,9 @@ async function main() {
           state.error = `${path}: ${e}`
         }
       }
+      // "Open another one of these" -- the first remote path is the only thing a
+      // gate could mean here, since nothing on the sign names an application.
+      publishSpawn(() => launcher.launch(new URL(`${base}${paths[0]}`), () => {}))
       say(`compositor up -- launching remote ${remote}`)
     } else {
       // Windows open in the district you are STANDING IN -- assignment reads
@@ -912,6 +991,7 @@ async function main() {
       const clientName = params.get('client') ?? 'simple-shm'
       const plan = (params.get('windows') ?? '2,2,1').split(',').map((n) => parseInt(n, 10) || 0)
       const lanes = ws.openList()
+      publishSpawn(() => launcher.launch(new URL(`${location.origin}/clients/${clientName}/app.html`), () => {}))
       ;(async () => {
         for (let d = 0; d < Math.min(plan.length, lanes.length); d++) {
           state.district = lanes[d].id
@@ -927,7 +1007,10 @@ async function main() {
         }
         state.district = ws.root()
         goDistrict(ws.root())
-        say(`${lanes.length} workspaces -- keys 1..${lanes.length}, 0 for overview, or click a lane on the gantry`)
+        // Let the live status line reclaim the bar. `surfaceCreated` writes
+        // "N surface(s)" over it while the plan runs, so without this the key
+        // hint is only ever seen by someone who then adds a workspace.
+        forgetStatus()
       })()
       say('compositor up -- opening windows across districts')
     }

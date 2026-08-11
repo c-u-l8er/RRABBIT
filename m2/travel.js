@@ -16,9 +16,9 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, keyOf, SCENE_ID, MILE } from './world.js'
+import { state, signs, hooks, keyOf, SCENE_ID, exitZ, GANTRY_VIEW } from './world.js'
 import * as ws from './workspaces.js'
-import { gantryMeshes, exitOf, setHovered } from './gantry.js'
+import { gantryMeshes, actionOf, setHovered } from './gantry.js'
 
 let renderer, gl, scene, camera, session
 export function attachTravel(c) {
@@ -37,17 +37,25 @@ const raycaster = new THREE.Raycaster()
 // sideways into another workspace and you are still the same distance along.
 let roadZ = 0
 
-// The road only exists where the windows are. Past the last milepost there is
-// nothing to look at, and before the first you are staring at the back of your
-// own starting line, so the wheel stops at both.
-function roadBounds() {
-  // The district you are STANDING in, not every sign in the world: roads are
-  // different lengths, and borrowing another workspace's last milepost lets you
-  // drive off the end of a short one into nothing.
-  let far = 0
-  for (const s of signs.values()) if (s.mesh && s.district === state.district) far = Math.max(far, s.milepost)
-  return { near: 0, far: far ? -(far - 1) * MILE : 0 }
+// The road runs from the head to the EXIT GATE, and the wheel stops at both.
+//
+// It used to stop at the last window, which was right when the last window was
+// the last thing on the road. It no longer is: there is a gate past them, and a
+// road you cannot drive to the end of is a road with an unreachable exit. The
+// far stop leaves the exit gate GANTRY_VIEW ahead of you -- the same framing the
+// enter gate gets when you are parked at the head -- so you finish the road
+// looking at the sign rather than standing under it.
+function roadBoundsOf(id) {
+  // ONE workspace's own signs, not every sign in the world: roads are different
+  // lengths, and borrowing another workspace's last milepost lets you drive off
+  // the end of a short one into nothing.
+  let last = 0
+  for (const s of signs.values()) if (s.mesh && s.district === id) last = Math.max(last, s.milepost)
+  // camera z is 260 + roadZ, and we want (camera z - exitZ) === GANTRY_VIEW.
+  return { near: 0, far: exitZ(last) + GANTRY_VIEW - 260 }
 }
+
+const roadBounds = () => roadBoundsOf(state.district)
 
 function districtPose(id) {
   const x = ws.laneX(id)
@@ -98,9 +106,29 @@ function overviewPose() {
 
 // `id` is a workspace id. A CLOSED workspace is refused rather than flown to:
 // it has no road laid, so arriving would put you in the air over a gap.
-function goDistrict(id) {
+//
+// WHERE ALONG THE NEW ROAD YOU LAND depends on how you got there, and both
+// answers are right for their own gesture:
+//
+//   `atHead` -- you TOOK AN EXIT. The exit gate is a junction, and coming off a
+//   junction puts you at the start of the next road, which is also the only
+//   place a brand-new workspace makes sense to arrive at: its entrance, where
+//   windows are opened.
+//
+//   otherwise -- you pressed a workspace key, which is a step sideways, and
+//   `roadZ` is a property of the road rather than of a workspace: you are still
+//   the same distance along.
+//
+// Either way roadZ is CLAMPED to the destination's own bounds. Roads are
+// different lengths now that the exit gate stands past the last window, so
+// carrying a position from a long road onto a short one put the camera beyond
+// its exit gate, looking back up an empty road at nothing. Measured: arriving on
+// a fresh workspace at roadZ -2580 whose far bound was -1800.
+function goDistrict(id, { atHead = false } = {}) {
   const w = ws.get(id)
   if (!w || !w.open) return null
+  const b = roadBoundsOf(id)
+  roadZ = atHead ? b.near : Math.min(b.near, Math.max(b.far, roadZ))
   state.district = id
   state.overview = false
   setRange(FOG_DRIVE, FAR_DRIVE)
@@ -236,6 +264,45 @@ function release() {
   resetWheelGesture()
   state.released++
   return true
+}
+
+// What a panel on a gate does when you click it. The gate hangs the action; this
+// is the only place that carries it out, so there is one list of everything a
+// road lets you do from outside a window.
+function doGantryAction(a) {
+  if (a.kind === 'exit') {
+    // A lane to a CLOSED workspace is barred, and clicking it does nothing yet.
+    // Opening one from the sign is still to come; refusing is not a stub, it is
+    // the truthful answer until then -- goDistrict would otherwise fly you to a
+    // road that is not laid.
+    state.lastGantryClick = { kind: 'exit', to: a.to, open: !!ws.get(a.to)?.open }
+    return goDistrict(a.to, { atHead: true })
+  }
+  if (a.kind === 'open') {
+    // The enter gate opens onto THE ROAD IT STANDS ON, which is the road you are
+    // driving -- so there is no workspace to pass. rrabbit.js reads
+    // `state.district` when the surface finally arrives, exactly as it does for
+    // a window opened any other way, and sideQueue carries the side.
+    const ok = hooks.spawnWindow ? hooks.spawnWindow(a.side) : false
+    state.lastGantryClick = { kind: 'open', side: a.side, ok }
+    return ok
+  }
+  if (a.kind === 'newLane') {
+    // A new workspace is created CONNECTED, in both directions. A lane you can
+    // drive down and not back up is a road network a graph is allowed to have,
+    // but it is not what "make me another workspace" means -- you would arrive
+    // somewhere with no way home.
+    const from = state.district
+    const n = ws.list().length + 1
+    const made = ws.add({ name: `road ${n}` })
+    ws.connect(from, made.id)
+    ws.connect(made.id, from)
+    state.lastGantryClick = { kind: 'newLane', id: made.id, from }
+    // Roads are laid by shell.js, which reconciles them every frame -- so the
+    // new one exists by the time the flight lands.
+    return goDistrict(made.id, { atHead: true })
+  }
+  return null
 }
 
 function currentPose() {
@@ -563,16 +630,8 @@ function installInput() {
     if (state.mode !== 'driving') return
     const hit = aim(ev)
     if (!hit) return
-    const exit = exitOf(hit.object)
-    if (exit) {
-      // A lane to a CLOSED workspace is barred, and clicking it does nothing
-      // yet. Opening from the sign is increment 3; refusing is not a stub, it is
-      // the truthful answer until then -- goDistrict would otherwise fly you to
-      // a road that is not laid.
-      state.lastLaneClick = { to: exit.to, opened: !!ws.get(exit.to)?.open }
-      goDistrict(exit.to)
-      return
-    }
+    const action = actionOf(hit.object)
+    if (action) return doGantryAction(action)
     flattenTo(signs.get(hit.object.userData.signKey).milepost)
   })
 
@@ -583,7 +642,7 @@ function installInput() {
       return
     }
     const hit = aim(ev)
-    setHovered(hit && exitOf(hit.object) ? hit.object : null)
+    setHovered(hit && actionOf(hit.object) ? hit.object : null)
     canvas.style.cursor = hit ? 'pointer' : ''
   })
 

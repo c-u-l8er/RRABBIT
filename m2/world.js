@@ -29,6 +29,44 @@ export const BG = 0x03040a
 export const MILE = 260
 export const SCENE_ID = 'road'
 
+// ---- the shape of a road --------------------------------------------------
+//
+// A road is not just a line of windows any more. It has an ENTRANCE, a middle,
+// and an EXIT, in that order, and you drive through all three:
+//
+//   z=+260 you start here
+//   z=-180 ENTER gantry ... where windows are created onto this road
+//          (a long clear run, so the sign is read and passed, not glanced past)
+//   z=-1080 milepost 1, milepost 2, ... the windows
+//          (the same clear run again)
+//   z=...  EXIT gantry ... where the lanes to other workspaces are
+//
+// The clear run either side of the windows is the point. The first build put
+// the gantry 80 units in front of milepost 1 and it read as furniture standing
+// among the windows rather than as a gate you pass through -- reported twice,
+// once as "it gets in the way" and once as needing to be "way in front of the
+// windows so that we have to scroll through it fully and then we see them".
+//
+// GATE_GAP is that run. At the wheel's 0.6 units per delta and a 120-unit notch
+// it is about twelve notches of empty road, which is long enough to feel like
+// arriving somewhere and short enough not to be a chore.
+export const ENTER_Z = -180
+export const GATE_GAP = 900
+
+// A window's z from its milepost. Was `-milepost * MILE` inline in makeSign;
+// it is a property of the ROAD, so it lives with the road.
+export const windowZ = (milepost) => ENTER_Z - GATE_GAP - (milepost - 1) * MILE
+
+// The exit gantry stands one clear run past the LAST window. An empty road still
+// has one -- a workspace with nothing in it is still somewhere you can leave.
+export const exitZ = (lastMilepost) => windowZ(Math.max(1, lastMilepost)) - GATE_GAP
+
+// How far ahead of you a gantry sits when you stop in front of it. Measured, not
+// chosen: at 320 units the 58-degree frustum is only 355 units tall about y=105
+// and a beam at y=300 is clipped off the top of the frame; at 440 the frustum is
+// 488 tall and the whole structure is in shot.
+export const GANTRY_VIEW = 440
+
 // ---- M4: districts -------------------------------------------------------
 //
 // A district is a workspace. Spec §3 originally said "one Wayland output each";
@@ -116,6 +154,26 @@ export const ctx = {
   camera: null,
   session: null,
 }
+
+// What only shell.js can do, for the modules that must ask for it.
+//
+// Clicking "open window" on the enter gantry is Travel's click and the
+// compositor's action, and the compositor lives in shell.js -- which imports
+// travel.js, so travel.js cannot import it back. A mutable object READ AT CALL
+// TIME rather than copied at attach time, because shell.js only has a launcher
+// once the session is up, which is after the last attach() has run.
+export const hooks = {
+  spawnWindow: null, // () => boolean -- open a window on the road you are on
+}
+
+// Which side of the road the next adopted window stands on.
+//
+// A FIFO rather than a single slot: two clicks on "open window ‹ left" and then
+// "open window right" must not both land on the right because the second click
+// overwrote the first before either surface arrived. Adoption order is not
+// guaranteed to match launch order, so a burst can still cross them over -- what
+// this guarantees is that the SIDES REQUESTED are the sides used.
+export const sideQueue = []
 
 // A slot in the flat output. The ledger is a grid, one cell per window, so no
 // two windows share a rect and `pickView` can resolve a point to a window on

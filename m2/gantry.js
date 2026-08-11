@@ -1,31 +1,39 @@
-// THE GANTRY -- the overhead sign that spans the road, and the junction.
+// THE GATES -- the overhead signs that span the road, and everything you can do
+// to a road without being inside a window.
 //
-// A workspace's exits are the one thing about the road you could not see from
-// the road. M4 put a gateway arch at the head of each street "so a district is
-// identifiable from the overview without reading anything", which was true and
-// which made it useless at eye level: from the road it was a bare crossbar with
-// no uprights and nothing to say it was a gateway, so it got hidden (see the
-// frame loop). Hiding it did not restore what it was for.
+// A road has two of them, and they have different jobs:
 //
-// This is that purpose done properly. A motorway gantry spans YOUR road and
-// carries ONE LANE PANEL PER EXIT, each naming where it goes and how many
-// windows are waiting there. Clicking a lane drives you down it. It is a sign in
-// the world, not an overlay on the screen -- so it obeys the same rules as
-// everything else here: it stands somewhere, it is occluded by what is in front
-// of it, and you read it by looking at it.
+//   ENTER, at the head, before the windows -- where windows are CREATED onto
+//   this road, on the side you choose. You drive through it to reach the
+//   windows, so it is the first thing you meet and the last thing between you
+//   and an empty road.
+//
+//   EXIT, one clear run past the last window -- where the LANES are: one panel
+//   per exit naming the workspace it leads to and counting the windows waiting
+//   there, plus a panel that makes a new one. You arrive at it by finishing the
+//   road, which is when leaving is the thing you want.
+//
+// Putting both at the head, which is where the first build put the only one,
+// made the sign furniture standing among the windows. A gate you pass through is
+// a different object from a sign you look at, and the road is long enough to
+// have both.
+//
+// Blue for the entrance and green for the exits, because that is what those
+// colours mean on a motorway and neither needs explaining.
 //
 // The panels are canvas textures rather than geometry text. Text as geometry
 // needs a font loader, a typeface asset and a build step; a 2D canvas is already
 // in the page, redraws in microseconds, and is the only path that can show a
 // number that changes -- which the window count does, constantly.
 //
-// WHAT THIS MODULE DOES NOT DO: it never decides where you go. It reports which
-// exit a mesh belongs to and lets Travel fly, because navigating is Travel's
-// question and a sign that moved the camera itself would be a second answer to
-// it. See travel.js.
+// WHAT THIS MODULE DOES NOT DO: it never acts. It hangs an ACTION on each panel
+// and reports which one a mesh carries; Travel decides what a click means and
+// shell.js is the only thing that can talk to the compositor. A sign that moved
+// the camera or launched a process itself would be a second answer to a question
+// that already has an owner.
 
 import * as THREE from 'three'
-import { signs, ACC, COOL } from './world.js'
+import { signs, ACC, COOL, ENTER_Z, exitZ } from './world.js'
 import * as ws from './workspaces.js'
 
 let scene = null
@@ -33,20 +41,6 @@ export function attachGantry(c) {
   scene = c.scene
 }
 
-// Where the gantry stands on its road, and how big.
-//
-// z is AHEAD of the driving pose (camera at z = 260 + roadZ, looking to -640) so
-// that you drive under it, and it stands BEFORE the first window (milepost 1 is
-// at z = -260) because a direction sign you reach after the junction is a sign
-// you did not need.
-//
-// The distance is measured, not chosen for looks. At 320 units away the
-// 58-degree frustum is only 355 units tall about y=105 and a beam at y=300 was
-// clipped off the top of the frame -- the first build put the panels on screen
-// and the structure holding them outside it. At 440 the frustum is 488 tall, so
-// the whole gantry is in shot with the panels in the upper third, which is where
-// a motorway sign sits when you are under way.
-const GANTRY_Z = -180
 const BEAM_Y = 300
 // The gantry spans THE ROAD and nothing wider. It used to be 400 across with
 // 190-wide panels, which put its outer edge over the windows standing beside the
@@ -56,45 +50,45 @@ const BEAM_W = 330
 const SPAN_X = 158
 const PANEL_MAX_W = 130
 
-// id -> { group, panels: [{ mesh, to, count, open, tex, canvas }] }
-const gantries = new Map()
+const GREEN = '#0b6b3a'
+const BLUE = '#12386e'
+const GREY = '#2a2f3a'
+const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
+
+// `${workspaceId}:${kind}` -> { group, kind, panels: [...] }
+const gates = new Map()
 
 // ------------------------------------------------------------- the lane panel
 
-const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
-
-// Motorway green with a white border, because that is what a direction sign
-// looks like and the whole point is that it needs no explaining.
-function drawPanel(canvas, name, count, open) {
+function drawPanel(canvas, p) {
   const g = canvas.getContext('2d')
   const W = canvas.width
   const H = canvas.height
+  const live = p.tone !== 'barred'
   g.clearRect(0, 0, W, H)
-  g.fillStyle = open ? '#0b6b3a' : '#2a2f3a'
+  g.fillStyle = p.tone === 'enter' ? BLUE : p.tone === 'barred' ? GREY : GREEN
   g.fillRect(0, 0, W, H)
-  g.strokeStyle = open ? '#ffffff' : '#8b93a3'
+  g.strokeStyle = live ? '#ffffff' : '#8b93a3'
   g.lineWidth = 10
   g.strokeRect(16, 16, W - 32, H - 32)
 
   g.textAlign = 'center'
-  g.fillStyle = open ? '#ffffff' : '#8b93a3'
-  g.font = 'bold 74px ui-monospace, monospace'
-  g.fillText(name, W / 2, H * 0.44)
+  g.fillStyle = live ? '#ffffff' : '#8b93a3'
+  g.font = 'bold 70px ui-monospace, monospace'
+  g.fillText(p.title, W / 2, H * 0.44)
+  g.font = '36px ui-monospace, monospace'
+  g.fillText(p.sub, W / 2, H * 0.72)
 
-  g.font = '38px ui-monospace, monospace'
-  if (!open) {
+  if (p.tone === 'barred') {
     // A CLOSED WORKSPACE IS A BARRED EXIT, not a missing one. Leaving it off the
-    // gantry would make a workspace that exists look like one that does not,
-    // and there would then be nothing to click to open it.
-    g.fillText('closed', W / 2, H * 0.72)
+    // gate would make a workspace that exists look like one that does not, and
+    // there would then be nothing to click to open it.
     g.strokeStyle = ACC_CSS
     g.lineWidth = 12
     g.beginPath()
     g.moveTo(40, H - 40)
     g.lineTo(W - 40, 40)
     g.stroke()
-  } else {
-    g.fillText(count === 1 ? '1 window' : `${count} windows`, W / 2, H * 0.72)
   }
 }
 
@@ -111,9 +105,41 @@ function makePanel() {
   return { mesh, tex, canvas }
 }
 
+// ------------------------------------------------------------- what to show
+//
+// The panel row for a gate, as DATA. Working out what a sign says is a different
+// job from hanging it, and keeping them apart is what lets __gantry() report the
+// sign's own state instead of re-deriving it from the graph.
+const countIn = (id) => [...signs.values()].filter((s) => s.district === id).length
+
+function enterRow() {
+  // Left and right, because "insert a window on the left" is the thing that was
+  // asked for and a launcher with no side would have to invent one.
+  return [
+    { key: 'open:-1', action: { kind: 'open', side: -1 }, title: '‹ left', sub: 'open window', tone: 'enter' },
+    { key: 'open:1', action: { kind: 'open', side: 1 }, title: 'right ›', sub: 'open window', tone: 'enter' },
+  ]
+}
+
+function exitRow(id) {
+  const row = ws.exitsOf(id).map((to) => {
+    const dest = ws.get(to)
+    const n = countIn(to)
+    return {
+      key: `exit:${to}:${dest.open}:${n}:${dest.name}`,
+      action: { kind: 'exit', to },
+      title: dest.name,
+      sub: dest.open ? (n === 1 ? '1 window' : `${n} windows`) : 'closed',
+      tone: dest.open ? 'exit' : 'barred',
+    }
+  })
+  row.push({ key: 'new', action: { kind: 'newLane' }, title: '+ lane', sub: 'new workspace', tone: 'exit' })
+  return row
+}
+
 // ---------------------------------------------------------------- the gantry
 
-function buildGantry(id) {
+function buildGate(kind) {
   const group = new THREE.Group()
   const steel = new THREE.MeshStandardMaterial({ color: 0x4a5262, roughness: 0.6, metalness: 0.3 })
 
@@ -126,98 +152,99 @@ function buildGantry(id) {
   beam.position.set(0, BEAM_Y, 0)
   group.add(beam)
 
-  // A thin lit strip under the beam, so the gantry reads as a structure at a
-  // glance rather than as three bars that happen to meet.
+  // A thin lit strip under the beam, so a gate reads as a structure at a glance
+  // rather than as three bars that happen to meet -- and so the two gates are
+  // told apart before either is close enough to read.
   const trim = new THREE.Mesh(
     new THREE.BoxGeometry(BEAM_W, 3, 3),
-    new THREE.MeshBasicMaterial({ color: COOL, toneMapped: false }),
+    new THREE.MeshBasicMaterial({ color: kind === 'enter' ? COOL : ACC, toneMapped: false }),
   )
   trim.position.set(0, BEAM_Y - 12, 8)
   group.add(trim)
 
   scene.add(group)
-  return { group, panels: [] }
+  return { group, kind, panels: [] }
 }
 
-const countIn = (id) => [...signs.values()].filter((s) => s.district === id).length
+function syncGate(id, kind, z, row) {
+  const gkey = `${id}:${kind}`
+  let gate = gates.get(gkey)
+  if (!gate) {
+    gate = buildGate(kind)
+    gates.set(gkey, gate)
+  }
+  gate.group.position.set(ws.laneX(id), 0, z)
 
-// Reconcile the gantries with the graph. Safe to call every frame: the only work
-// done when nothing has changed is a comparison per panel.
+  // Rebuild the row only when what it SAYS changes -- `key` folds the action,
+  // the name, the count and the open state into one string, so a road whose
+  // window count is steady costs one comparison per panel per frame and nothing
+  // else.
+  const same = gate.panels.length === row.length && gate.panels.every((p, i) => p.key === row[i].key)
+  if (!same) {
+    const reusable = gate.panels.length === row.length
+    if (!reusable) {
+      for (const p of gate.panels) {
+        gate.group.remove(p.mesh)
+        p.mesh.geometry.dispose()
+        p.mesh.material.dispose()
+        p.tex.dispose()
+      }
+      gate.panels = []
+      const pw = Math.min(PANEL_MAX_W, (BEAM_W * 0.95) / row.length)
+      const ph = pw / 2
+      const x0 = -(pw * row.length) / 2 + pw / 2
+      row.forEach((_, i) => {
+        const p = makePanel()
+        p.mesh.scale.set(pw, ph, 1)
+        p.mesh.position.set(x0 + i * pw, BEAM_Y - 18 - ph / 2, 6)
+        gate.group.add(p.mesh)
+        gate.panels.push(p)
+      })
+    }
+    row.forEach((spec, i) => {
+      const p = gate.panels[i]
+      Object.assign(p, spec)
+      // What a click on this mesh MEANS. Read back by actionOf(); the mesh is
+      // the only thing a raycast hands you.
+      p.mesh.userData.gantryAction = spec.action
+      drawPanel(p.canvas, spec)
+      p.tex.needsUpdate = true
+    })
+  }
+  return gkey
+}
+
+// Reconcile both gates on every open road with the graph. Safe to call every
+// frame: when nothing has changed the work is one string compare per panel.
 //
-// The window count is why this runs in the frame loop rather than once. A sign
-// is adopted lazily -- a window can appear on a road seconds after the gantry
-// was built -- and a lane that says "0 windows" about a road with two on it is
-// worse than a lane that says nothing.
+// It runs in the frame loop rather than once because the numbers on the signs
+// are live. A sign is adopted lazily -- a window can appear on a road seconds
+// after its gate was built -- and a lane that says "0 windows" about a road with
+// two on it is worse than a lane that says nothing.
 export function syncGantries() {
   if (!scene) return
   const want = new Set()
 
   for (const w of ws.list()) {
     if (!w.open) continue
-    const exits = ws.exitsOf(w.id)
-    // No exits, no sign. An empty gantry is a promise of somewhere to go.
-    if (exits.length === 0) continue
-    want.add(w.id)
+    want.add(syncGate(w.id, 'enter', ENTER_Z, enterRow()))
 
-    let gy = gantries.get(w.id)
-    if (!gy) {
-      gy = buildGantry(w.id)
-      gantries.set(w.id, gy)
-    }
-    gy.group.position.set(ws.laneX(w.id), 0, GANTRY_Z)
-
-    // Rebuild the panel row only when the SET of exits changes -- otherwise the
-    // meshes are kept and just redrawn, so a changing window count never costs a
-    // geometry.
-    const sameRow = gy.panels.length === exits.length && gy.panels.every((p, i) => p.to === exits[i])
-    if (!sameRow) {
-      for (const p of gy.panels) {
-        gy.group.remove(p.mesh)
-        p.mesh.geometry.dispose()
-        p.mesh.material.dispose()
-        p.tex.dispose()
-      }
-      gy.panels = []
-      const pw = Math.min(PANEL_MAX_W, BEAM_W * 0.95 / exits.length)
-      const ph = pw / 2
-      const x0 = -(pw * exits.length) / 2 + pw / 2
-      exits.forEach((to, i) => {
-        const p = makePanel()
-        p.to = to
-        p.count = -1
-        p.open = null
-        p.mesh.scale.set(pw, ph, 1)
-        p.mesh.position.set(x0 + i * pw, BEAM_Y - 18 - ph / 2, 6)
-        // What a click on this mesh MEANS. Read back by exitOf(); the mesh is
-        // the only thing a raycast hands you.
-        p.mesh.userData.gantryExit = { from: w.id, to }
-        gy.group.add(p.mesh)
-        gy.panels.push(p)
-      })
-    }
-
-    for (const p of gy.panels) {
-      const dest = ws.get(p.to)
-      if (!dest) continue
-      const count = countIn(p.to)
-      if (count === p.count && dest.open === p.open && dest.name === p.name) continue
-      p.count = count
-      p.open = dest.open
-      p.name = dest.name
-      drawPanel(p.canvas, dest.name, count, dest.open)
-      p.tex.needsUpdate = true
-    }
+    // The exit gate stands past the LAST window, so it moves down the road as
+    // the road fills up.
+    let last = 0
+    for (const s of signs.values()) if (s.district === w.id) last = Math.max(last, s.milepost)
+    want.add(syncGate(w.id, 'exit', exitZ(last), exitRow(w.id)))
   }
 
-  for (const [id, gy] of [...gantries]) {
-    if (want.has(id)) continue
-    scene.remove(gy.group)
-    gy.group.traverse((o) => {
+  for (const [k, gate] of [...gates]) {
+    if (want.has(k)) continue
+    scene.remove(gate.group)
+    gate.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose()
       if (o.material) o.material.dispose()
     })
-    for (const p of gy.panels) p.tex.dispose()
-    gantries.delete(id)
+    for (const p of gate.panels) p.tex.dispose()
+    gates.delete(k)
   }
 }
 
@@ -225,30 +252,34 @@ export function syncGantries() {
 
 export function gantryMeshes() {
   const out = []
-  for (const gy of gantries.values()) for (const p of gy.panels) out.push(p.mesh)
+  for (const gate of gates.values()) for (const p of gate.panels) out.push(p.mesh)
   return out
 }
 
-export const exitOf = (mesh) => mesh?.userData?.gantryExit ?? null
+export const actionOf = (mesh) => mesh?.userData?.gantryAction ?? null
 
 // Hover. A panel that does nothing when you point at it does not read as
-// clickable, and there is no cursor to change out here in the scene -- so the
-// panel brightens instead, which is the same signal a real sign gives when your
+// clickable, and there is no cursor out here in the scene -- so the panel
+// brightens instead, which is the same signal a real sign gives when your
 // headlights reach it.
 let hovered = null
 export function setHovered(mesh) {
   if (hovered === mesh) return
   if (hovered) hovered.material.color.setHex(0xffffff)
-  hovered = mesh && exitOf(mesh) ? mesh : null
+  hovered = mesh && actionOf(mesh) ? mesh : null
   // MeshBasicMaterial multiplies its map by `color`, so >1 is a real brighten
   // rather than a wash -- the texture keeps its own contrast.
   if (hovered) hovered.material.color.setRGB(1.45, 1.45, 1.45)
 }
 
-// What the gantries are actually saying, without reading pixels off them.
+// What the gates are actually saying, read off the panels rather than off the
+// graph -- a report that re-derived the answer would agree with the graph by
+// construction and prove nothing about what is on the sign.
 export const gantryReport = () =>
-  [...gantries.entries()].map(([id, gy]) => ({
-    workspace: id,
-    x: Math.round(gy.group.position.x),
-    lanes: gy.panels.map((p) => ({ to: p.to, name: p.name, count: p.count, open: p.open })),
+  [...gates.entries()].map(([k, gate]) => ({
+    gate: k,
+    kind: gate.kind,
+    z: Math.round(gate.group.position.z),
+    x: Math.round(gate.group.position.x),
+    panels: gate.panels.map((p) => ({ title: p.title, sub: p.sub, tone: p.tone, action: p.action })),
   }))
