@@ -43,8 +43,44 @@ let nextSlot = 0
 // well inside it.
 const SIGN_OFFSET = 330
 
-// Side of the square resize grab, in world units on a 300-wide sign.
-const HANDLE = 26
+// Side of the square resize grab, in world units on a 300-wide sign. Big enough
+// to hit without aiming: at the default flat zoom this is about 56 screen pixels.
+const HANDLE = 34
+
+// The grab's face, drawn once and shared by every sign. A plain coloured square
+// says "something is here"; the corner rule and the grip say WHICH something,
+// which is the difference between a control people find and one they have to be
+// told about.
+let grabTex = null
+function grabTexture() {
+  if (grabTex) return grabTex
+  const c = document.createElement('canvas')
+  c.width = c.height = 64
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 64, 64)
+  g.fillStyle = 'rgba(3,4,10,0.72)'
+  g.fillRect(0, 0, 64, 64)
+  // The corner it belongs to: its own top and right edges drawn solid.
+  g.strokeStyle = '#2de2e6'
+  g.lineWidth = 6
+  g.beginPath()
+  g.moveTo(3, 61)
+  g.lineTo(3, 3)
+  g.lineTo(61, 3)
+  g.lineTo(61, 61)
+  g.stroke()
+  g.strokeStyle = '#f2c14e'
+  g.lineWidth = 4
+  for (const o of [16, 28, 40]) {
+    g.beginPath()
+    g.moveTo(o, 52)
+    g.lineTo(52, o)
+    g.stroke()
+  }
+  grabTex = new THREE.CanvasTexture(c)
+  grabTex.colorSpace = THREE.SRGBColorSpace
+  return grabTex
+}
 
 // ------------------------------------------------------------------- signs
 
@@ -165,19 +201,31 @@ function makeSign(view, milepost, district, side, lane) {
   post.position.set(mesh.position.x, postTop - postH / 2, mesh.position.z)
   scene.add(post)
 
-  // THE RESIZE GRAB, at the bottom-right corner of the surface.
+  // THE RESIZE GRAB, at the TOP-right corner of the surface.
   //
   // A child of the mesh, so it inherits the sign's pose for free and stays glued
   // to the corner through the flatten -- the same trick the popup quads use.
   //
-  // It is hidden except on the window you are standing in, because out on the
-  // road it would be a fleck on a distant sign that does nothing, and every
-  // pointer path here has to be able to say what it hit.
+  // TOP, and the reason is a few lines above: a sign STANDS ON THE ROAD.
+  // `mesh.position.y = 40 + sh / 2`, so its bottom edge is pinned at y=40 and it
+  // grows upward. The bottom corner therefore does not move when the window gets
+  // taller -- drag it down and the grab sits perfectly still under the pointer
+  // while the window changes somewhere else, which is indistinguishable from a
+  // resize that does not work. It was reported as exactly that. The top corner
+  // is the one that tracks the drag, because it is the edge that moves.
+  //
+  // It is also the half of the frame that is free: the tube rack is parented to
+  // the camera along the bottom and the `why` line sits under it, so a grab down
+  // there is buried in furniture even when it is on screen.
+  //
+  // Hidden except on the window you are standing in -- out on the road it would
+  // be a fleck on a distant sign that does nothing, and every pointer path here
+  // has to be able to say what it hit.
   const handle = new THREE.Mesh(
     new THREE.PlaneGeometry(HANDLE, HANDLE),
-    new THREE.MeshBasicMaterial({ color: COOL, toneMapped: false }),
+    new THREE.MeshBasicMaterial({ map: grabTexture(), transparent: true, toneMapped: false }),
   )
-  handle.position.set(sw / 2, -sh / 2, 3)
+  handle.position.set(sw / 2, sh / 2, 3)
   handle.userData.resizeHandle = true
   handle.visible = false
   mesh.add(handle)

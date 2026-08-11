@@ -473,8 +473,11 @@ function stepResize(ev) {
   const minH = Math.max(64, r.min?.height || 0)
   const maxW = r.max?.width || 4096
   const maxH = r.max?.height || 4096
+  // The grab is the TOP-right corner, so screen-y UP is taller -- which is also
+  // the direction that corner really travels, since the sign's bottom edge is
+  // pinned to the road and it grows upward.
   const w = Math.round(Math.min(maxW, Math.max(minW, r.w + (ev.clientX - r.sx) * r.k)))
-  const h = Math.round(Math.min(maxH, Math.max(minH, r.h + (ev.clientY - r.sy) * r.k)))
+  const h = Math.round(Math.min(maxH, Math.max(minH, r.h - (ev.clientY - r.sy) * r.k)))
   // Only configure on a CHANGE. A pointermove at 120Hz that re-sends the same
   // size is a configure the client has to ack, and a buffer it may reallocate.
   if (w === r.lastW && h === r.lastH) return
