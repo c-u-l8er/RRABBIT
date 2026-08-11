@@ -142,13 +142,22 @@ function setRange(fog, far) {
 // a fresh workspace at roadZ -2580 whose far bound was -1800. The clamp still
 // matters with per-road memory, because a road SHRINKS when its last window
 // closes.
-function goDistrict(id, { atHead = false } = {}) {
+//   `at` -- a caller that knows exactly where on the road it wants you, which
+//   is the map picking a window. It BEATS the memory, and saying so explicitly
+//   is the fix for a real bug: goWindow used to publish its target by writing it
+//   into roadMemory, and the "park the road you are leaving" line below then
+//   overwrote it with the current position whenever the destination was the road
+//   you were already on. So picking a window on your OWN lane read the value
+//   back unchanged and nothing moved -- reported as the map not shifting when
+//   toggling between two windows on the same lane. A destination is an argument,
+//   not a message left in shared state.
+function goDistrict(id, { atHead = false, at = null } = {}) {
   const w = ws.get(id)
   if (!w || !w.open) return null
   // Park the road you are leaving before you leave it.
   if (state.district) roadMemory.set(state.district, roadZ)
   const b = roadBoundsOf(id)
-  const want = atHead ? b.near : (roadMemory.get(id) ?? b.near)
+  const want = at !== null ? at : atHead ? b.near : (roadMemory.get(id) ?? b.near)
   roadZ = Math.min(b.near, Math.max(b.far, want))
   roadMemory.set(id, roadZ)
   state.district = id
@@ -314,11 +323,12 @@ function goWindow(district, milepost) {
   const s = [...signs.values()].find((x) => x.district === district && x.milepost === milepost && x.mesh)
   if (!s) return null
   const VIEW = 420
-  const b = roadBoundsOf(district)
   // camera z is 260 + roadZ, and we want (camera z - window z) === VIEW.
-  roadMemory.set(district, Math.min(b.near, Math.max(b.far, s.mesh.position.z + VIEW - 260)))
-  state.lastMapPick = { district, milepost }
-  return goDistrict(district)
+  // Handed to goDistrict as an ARGUMENT -- see `at` there for what writing it
+  // into roadMemory instead cost.
+  const at = s.mesh.position.z + VIEW - 260
+  state.lastMapPick = { district, milepost, at: Math.round(at) }
+  return goDistrict(district, { at })
 }
 
 // What a panel on a gate does when you click it. The gate hangs the action; this
