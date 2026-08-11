@@ -19,6 +19,7 @@ import { createAxisEventFromWheelEvent } from '@gfld/compositor'
 import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW } from './world.js'
 import * as ws from './workspaces.js'
 import { gantryMeshes, actionOf, setHovered } from './gantry.js'
+import { toggleMap, closeMap, isOpen as mapIsOpen } from './map.js'
 
 let renderer, gl, scene, camera, session
 export function attachTravel(c) {
@@ -50,6 +51,27 @@ const raycaster = new THREE.Raycaster()
 let roadZ = 0
 const roadMemory = new Map()
 
+// The workspace number being typed. 600ms is the pause after which a lone "1"
+// stops being a possible prefix of "12" and becomes a jump to lane 1 -- long
+// enough that a deliberate two-digit number is never split, short enough that a
+// single-digit jump on a big network does not feel like it hung.
+const DIGIT_GAP = 600
+let digits = ''
+let digitTimer = 0
+
+function commitDigits() {
+  clearTimeout(digitTimer)
+  digitTimer = 0
+  const n = Number(digits)
+  digits = ''
+  // A digit is a POSITION IN THE LAYOUT, not an id -- typing 2 means "the second
+  // road", which is what the map numbers. Ids are for the gates, which name
+  // their destinations.
+  const w = n >= 1 ? ws.at(n - 1) : null
+  state.lastLaneKey = { typed: n, went: w?.id ?? null }
+  if (w) goDistrict(w.id)
+}
+
 // The road runs from the head to the EXIT GATE, and the wheel stops at both.
 //
 // It used to stop at the last window, which was right when the last window was
@@ -76,43 +98,27 @@ function districtPose(id) {
   }
 }
 
-// The overview -- spec §5's R gear, re-missioned: all workspaces at once rather
-// than one.
+// THE 3D OVERVIEW IS GONE, and map.js is what replaced it.
 //
-// FOG IS A DISTANCE BUDGET, AND THE OVERVIEW BLOWS IT. Driving fog (far 4200)
-// suits a road you are on; from above, the outer districts are 5000+ units away
-// and the first overview rendered them as black. The pose and the fog have to
-// move together or the shot is of nothing.
-// AND FOG IS ONLY ONE OF TWO DISTANCE BUDGETS. Widening the fog alone still
-// rendered an empty overview, because the CAMERA'S FAR PLANE is 6000 and the
-// outer roads sit 6000-12000 away -- clipped before fog was ever consulted.
-// A "too far to see" bug has two independent causes and they look identical.
+// It flew the camera to 1150 units up and back so every road was in shot, and
+// what you got was a picture of the roads: grey strips with flecks on them. It
+// could not answer which workspace connects to which, what is on each one, or
+// take me to that. Those are the questions you have from up there, so the
+// overview is a MAP now -- nodes, arrows, names, counts, clickable -- and this
+// module keeps only the driving ranges.
+//
+// The measurement it cost is worth keeping even though its code is not: a "too
+// far to see" bug has TWO independent causes that look identical. Widening
+// scene.fog.far alone still rendered black, because the CAMERA'S FAR PLANE
+// clips before fog is ever consulted. If anything here ever needs to see a long
+// way again, both budgets move together or the shot is of nothing.
 const FOG_DRIVE = 4200
-const FOG_OVERVIEW = 16000
 const FAR_DRIVE = 6000
-const FAR_OVERVIEW = 20000
 
 function setRange(fog, far) {
   scene.fog.far = fog
   camera.far = far
   camera.updateProjectionMatrix()
-}
-
-function overviewPose() {
-  // Frame WHERE THE WINDOWS ARE, not the whole road. Mileposts start at 1, so
-  // the occupied stretch is the first few hundred units of each road; framing
-  // all 6000 put every sign in a thin band at the horizon.
-  //
-  // The span comes from the LAYOUT rather than from `spacing * (count - 1)`.
-  // That arithmetic was also reading `DISTRICT_X`, which this module never
-  // imported -- so the overview threw a ReferenceError the moment anyone pressed
-  // O. Asking the layout is both correct when the lanes are not evenly spaced
-  // and impossible to write without the value being in scope.
-  const span = ws.span()
-  return {
-    pos: new THREE.Vector3(0, 1150, span * 0.5 + 1300),
-    look: new THREE.Vector3(0, 0, -520),
-  }
 }
 
 // `id` is a workspace id. A CLOSED workspace is refused rather than flown to:
@@ -146,19 +152,10 @@ function goDistrict(id, { atHead = false } = {}) {
   roadZ = Math.min(b.near, Math.max(b.far, want))
   roadMemory.set(id, roadZ)
   state.district = id
-  state.overview = false
   setRange(FOG_DRIVE, FAR_DRIVE)
   flight = { from: currentPose(), to: districtPose(id), t: 0, target: null }
   state.mode = 'flying'
   return w.name
-}
-
-function goOverview() {
-  state.overview = true
-  setRange(FOG_OVERVIEW, FAR_OVERVIEW)
-  flight = { from: currentPose(), to: overviewPose(), t: 0, target: null }
-  state.mode = 'flying'
-  return true
 }
 
 // ------------------------------------------------------------- the flatten
@@ -299,6 +296,29 @@ function release() {
   resetWheelGesture()
   state.released++
   return true
+}
+
+// Come out of the map ON THE ROAD BESIDE a particular window.
+//
+// Not flattened into it: the ask was to "transfer back to the road view looking
+// at that window", and the road view is where you can see it standing in its
+// place with its neighbours either side. One more click flattens, which is the
+// same gesture it has always been.
+//
+// VIEW is how far short of the window to stop. Parking level with it would put
+// it at 90 degrees to your left or right, edge-on and unreadable -- a sign is
+// something you come up on.
+function goWindow(district, milepost) {
+  const w = ws.get(district)
+  if (!w || !w.open) return null
+  const s = [...signs.values()].find((x) => x.district === district && x.milepost === milepost && x.mesh)
+  if (!s) return null
+  const VIEW = 420
+  const b = roadBoundsOf(district)
+  // camera z is 260 + roadZ, and we want (camera z - window z) === VIEW.
+  roadMemory.set(district, Math.min(b.near, Math.max(b.far, s.mesh.position.z + VIEW - 260)))
+  state.lastMapPick = { district, milepost }
+  return goDistrict(district)
 }
 
 // What a panel on a gate does when you click it. The gate hangs the action; this
@@ -589,7 +609,10 @@ function installInput() {
   window.addEventListener(
     'wheel',
     (ev) => {
-      if (state.mode !== 'driving') return
+      // The map is over the road, and scrolling a map you are reading must
+      // scroll the MAP -- which is a normal overflowing element, so the answer
+      // is simply not to take the event.
+      if (state.mode !== 'driving' || mapIsOpen()) return
       ev.preventDefault()
       const { near, far } = roadBounds()
       // Trackpads emit many small deltas and a wheel a few large ones; scaling
@@ -670,7 +693,7 @@ function installInput() {
   }
 
   canvas.addEventListener('pointerdown', (ev) => {
-    if (state.mode !== 'driving') return
+    if (state.mode !== 'driving' || mapIsOpen()) return
     const hit = aim(ev)
     if (!hit) return
     const action = actionOf(hit.object)
@@ -700,23 +723,34 @@ function installInput() {
   // workspace.
   window.addEventListener('keydown', (ev) => {
     if (state.mode === 'flat' || ev.ctrlKey || ev.altKey || ev.metaKey) return
-    // ZERO IS THE OVERVIEW TOO, not just the letter O.
+    if (ev.key === 'Escape' && mapIsOpen()) return void closeMap()
+    if (ev.key === 'o' || ev.key === 'O') return void toggleMap()
+    if (!/^[0-9]$/.test(ev.key)) return
+
+    // TYPING 1 THEN 2 MEANS LANE 12, NOT LANE 1 AND THEN LANE 2.
     //
-    // The status line said "keys 1..3, O for overview" and was read as a zero --
-    // reported as "0 for overview doesn't work". In a monospace face at that
-    // size the two are near enough to identical, and the workspace keys next to
-    // it ARE digits, so a digit is the obvious guess. Zero is unbound (the roads
-    // are numbered from 1) and it sits at the end of that same run of keys, so
-    // binding it costs nothing and settles the ambiguity permanently. The label
-    // now names the key that cannot be misread.
-    const n = Number(ev.key)
-    // A digit is a POSITION IN THE LAYOUT, not an id -- pressing 2 means "the
-    // second road from the left", which is what you can see. Ids are for the
-    // gantry, which names its destinations.
-    if (Number.isInteger(n) && n >= 1) {
-      const w = ws.at(n - 1)
-      if (w) goDistrict(w.id)
-    } else if (ev.key === '0' || ev.key === 'o' || ev.key === 'O') goOverview()
+    // One digit per lane worked while there were three of them and stopped the
+    // moment the exit gate could make more: lane 12 was simply unreachable from
+    // the keyboard, and the two keystrokes that ought to reach it drove you
+    // somewhere else on the way. So digits accumulate.
+    //
+    // ZERO IS STILL THE MAP, but only as the FIRST digit -- the roads are
+    // numbered from 1, so a leading zero can never be part of a lane number,
+    // while the 0 in "10" always is. That is the whole rule, and it is why the
+    // test is on the buffer being empty rather than on a mode.
+    if (ev.key === '0' && digits === '') return void toggleMap()
+
+    digits += ev.key
+    clearTimeout(digitTimer)
+
+    // COMMIT AS SOON AS THE NUMBER CANNOT GROW. With five workspaces, "3" can
+    // only ever mean 3 -- 30-something does not exist -- so it goes immediately
+    // and single-digit jumps feel exactly as they always did. Only a prefix that
+    // could still become a bigger valid lane waits, and then only for as long as
+    // someone might plausibly still be typing it.
+    const count = ws.list().length
+    if (Number(digits) * 10 > count) commitDigits()
+    else digitTimer = setTimeout(commitDigits, DIGIT_GAP)
   })
 
   // TWO chords, because the first one is not always ours to receive.
@@ -775,14 +809,13 @@ function installInput() {
 export {
   districtPose,
   setRange,
-  overviewPose,
   goDistrict,
-  goOverview,
   pixelExactDistance,
   poseFor,
   flattenTo,
   release,
   currentPose,
+  goWindow,
   stepFlight,
   scenePointFromEvent,
   // shell.js's `__pointAt`/`__pointAtPopup` call this. They were written when

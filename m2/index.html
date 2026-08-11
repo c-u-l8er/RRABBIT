@@ -52,6 +52,10 @@
   </head>
   <body>
     <canvas id="gl"></canvas>
+    <!-- The road map. Empty and hidden until 0 opens it; map.js owns everything
+         inside, including its stylesheet, so the network view is one file you
+         can delete rather than a thing woven through the page. -->
+    <div id="map" hidden></div>
     <div id="status">booting</div>
     <!-- Invariant 1 lives here: whatever is over its redline, and WHY. Empty
          when nothing is, so it is a signal rather than furniture. -->

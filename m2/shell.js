@@ -71,7 +71,7 @@ import {
   districtPose,
   setRange,
   goDistrict,
-  goOverview,
+  goWindow,
   flattenTo,
   release,
   sendMotion,
@@ -80,6 +80,7 @@ import {
 } from './travel.js'
 import { attachRrabbit, adoptPending, syncPopups, checkPopupsMapped } from './rrabbit.js'
 import { attachGantry, syncGantries, gantryReport } from './gantry.js'
+import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
 // state lives in world.js now; the page and the diagnostics still expect it
 // to come from here.
@@ -92,7 +93,7 @@ const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? ''
 let renderer, gl, scene, camera, session, rack, vaoExt
 const DRIVE_POSE = { pos: new THREE.Vector3(0, 105, 260), look: new THREE.Vector3(0, 105, -640) }
 
-// workspace id -> { road, arch }. A Map rather than an array because the roads
+// workspace id -> { road }. A Map rather than an array because the roads
 // are no longer a fixed list laid down once at startup: workspaces are added,
 // closed and re-opened while the shell runs, and `syncRoads` reconciles the
 // scene with the graph every time that happens.
@@ -205,6 +206,9 @@ function buildWorld(canvas) {
   attachRrabbit(ctx)
   attachGantry(ctx)
   syncGantries()
+  // The map navigates through Travel rather than doing it itself, the same
+  // division the gates keep.
+  attachMap({ window: goWindow, district: (id) => goDistrict(id) })
 
   resize()
   window.addEventListener('resize', resize)
@@ -239,21 +243,15 @@ function syncRoads() {
       road.rotation.x = -Math.PI / 2
       scene.add(road)
 
-      // A gateway arch at the head of each road, so a workspace is identifiable
-      // from the overview without reading anything. It is an OVERVIEW label and
-      // is hidden from the road -- see the frame loop.
-      const arch = new THREE.Mesh(
-        new THREE.BoxGeometry(360, 14, 14),
-        new THREE.MeshStandardMaterial({ color: w.id === ws.root() ? COOL : ACC, roughness: 0.5 }),
-      )
-      arch.userData.district = w.id
-      scene.add(arch)
-
-      r = { road, arch }
+      // THE GATEWAY ARCH IS GONE. It existed so "a district is identifiable
+      // from the overview without reading anything", was hidden from the road
+      // because at eye level it was a bare crossbar in your way, and the
+      // overview it labelled has been replaced by a map that says the names
+      // out loud. Furniture whose only audience has left is not furniture.
+      r = { road }
       roads.set(w.id, r)
     }
     r.road.position.set(x, -30, -6600)
-    r.arch.position.set(x, 300, 60)
   }
   // The status line names the workspace keys, and creating a lane from an exit
   // gate changes how many there are -- so a line written once at startup starts
@@ -263,7 +261,7 @@ function syncRoads() {
     const el = document.getElementById('status')
     if (el) {
       el.textContent =
-        `${want.size} workspaces -- keys 1..${want.size}, 0 for overview. ` +
+        `${want.size} workspaces -- type a number for a lane (1..${want.size}), 0 for the map. ` +
         'Scroll: open windows at the entrance, then the lanes out at the far end.'
     }
   }
@@ -271,11 +269,8 @@ function syncRoads() {
   for (const [id, r] of [...roads]) {
     if (want.has(id)) continue
     scene.remove(r.road)
-    scene.remove(r.arch)
     r.road.geometry.dispose()
     r.road.material.dispose()
-    r.arch.geometry.dispose()
-    r.arch.material.dispose()
     roads.delete(id)
   }
 }
@@ -391,7 +386,6 @@ function frame(now = 0) {
     // the first thing you see every time you look forward. Reported, twice.
     // Serving its stated purpose means being visible exactly where that purpose
     // applies.
-    for (const r of roads.values()) r.arch.visible = state.overview
     // Greenfield decoded into OUR context and left its own bindings behind.
     // three caches GL state and would otherwise trust a cache that is no longer
     // true. This call exists for exactly this kind of interop.
@@ -795,7 +789,11 @@ window.__pointAtPopup = () => {
 // Takes an id, or an index into the layout for everything written against the
 // old numeric districts (`__district(1)` still means the second road).
 window.__district = (d) => goDistrict(typeof d === 'number' ? ws.at(d)?.id : d)
-window.__overview = () => goOverview()
+window.__map = (openIt) => {
+  if (openIt === false) closeMap()
+  else if (openIt === true) openMap()
+  return mapReport()
+}
 
 // THE M4 PROOF. Every window must occupy its OWN rect in the ledger, and
 // pickView must resolve each one's centre to that window -- WITHOUT relying on
