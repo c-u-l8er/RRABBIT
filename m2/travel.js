@@ -135,13 +135,6 @@ function setRange(fog, far) {
 //   otherwise -- you pressed a workspace key, which is a step sideways, and you
 //   are put back exactly where you left THAT road (see roadMemory).
 //
-// Either way roadZ is CLAMPED to the destination's own bounds. Roads are
-// different lengths now that the exit gate stands past the last window, so
-// carrying a position from a long road onto a short one put the camera beyond
-// its exit gate, looking back up an empty road at nothing. Measured: arriving on
-// a fresh workspace at roadZ -2580 whose far bound was -1800. The clamp still
-// matters with per-road memory, because a road SHRINKS when its last window
-// closes.
 //   `at` -- a caller that knows exactly where on the road it wants you, which
 //   is the map picking a window. It BEATS the memory, and saying so explicitly
 //   is the fix for a real bug: goWindow used to publish its target by writing it
@@ -151,6 +144,14 @@ function setRange(fog, far) {
 //   back unchanged and nothing moved -- reported as the map not shifting when
 //   toggling between two windows on the same lane. A destination is an argument,
 //   not a message left in shared state.
+//
+// Either way roadZ is CLAMPED to the destination's own bounds. Roads are
+// different lengths now that the exit gate stands past the last window, so
+// carrying a position from a long road onto a short one put the camera beyond
+// its exit gate, looking back up an empty road at nothing. Measured: arriving on
+// a fresh workspace at roadZ -2580 whose far bound was -1800. The clamp still
+// matters with per-road memory, because a road SHRINKS when its last window
+// closes.
 function goDistrict(id, { atHead = false, at = null } = {}) {
   const w = ws.get(id)
   if (!w || !w.open) return null
@@ -226,7 +227,38 @@ const zoomKey = (district, milepost) => `${district}:${milepost}`
 // one can exceed the viewport and be cropped. Scroll out once and that is
 // remembered for that window forever, which is the whole point of the memory.
 // `state.flatZoom === 0` is still exactly the pixel-exact case.
-const defaultZoom = (s) => -ZOOM_IN_LIMIT * pixelExactDistance(s)
+// ...BUT NEVER SO FAR IN THAT THE WINDOW STOPS FITTING ON THE SCREEN.
+//
+// The hard near limit crops: measured, a 250x250 surface arrives 714px tall in a
+// 577-tall canvas. That was a stated cost when it was only about pixels, and it
+// stopped being only about pixels when the window got a RESIZE GRAB at its
+// bottom-right corner -- measured again, the grab landed at screen y 651 in that
+// same 577-tall viewport, so the default arrival put the new control off the
+// screen. A control you cannot reach in the default state is not a control.
+//
+// So: as far in as the wheel goes, or as far in as still fits, whichever is
+// less. FIT is the same 0.86 of the frame the road view and the gantry use, and
+// the slack is what the grab sits in. `?zoom=max` restores the hard limit for
+// anyone who wants the crop.
+const FIT = 0.86
+const ZOOM_MODE = new URLSearchParams(location.search).get('zoom')
+
+// The distance at which the sign fills FIT of the frame, whichever axis binds.
+// The closest you can stand and still see all of the window.
+function fitDistance(s) {
+  const g = s.mesh.geometry.parameters
+  const vTan = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * FIT
+  return Math.max(g.height / (2 * vTan), g.width / (2 * vTan * camera.aspect))
+}
+
+function defaultZoom(s) {
+  const base = pixelExactDistance(s)
+  const hard = -ZOOM_IN_LIMIT * base
+  if (ZOOM_MODE === 'max') return hard
+  // Both are offsets from pixel-exact and both are negative going in, so the
+  // nearer of the two is the more negative -- take the less negative one.
+  return Math.max(hard, fitDistance(s) - base)
+}
 const rememberedZoom = (s) => zoomMemory.get(zoomKey(s.district, s.milepost)) ?? defaultZoom(s)
 
 function poseFor(s) {
@@ -276,21 +308,206 @@ function resetWheelGesture() {
 // person made with the wheel, it is undone by leaving and coming back, and no
 // other code may set it -- an automatic zoom would silently break the one
 // property the flatten exists to provide.
-function zoomFlat(d) {
-  const s = [...signs.values()].find(
+const flatSign = () =>
+  [...signs.values()].find(
     (x) => x.mesh && x.milepost === state.flatMilepost && x.district === state.flatDistrict,
-  )
-  if (!s) return
+  ) ?? null
+
+// One place that puts the camera at a chosen offset from pixel-exact. Both the
+// wheel and the resize move the camera, and they must clamp, record and remember
+// identically or the two disagree about where you are standing.
+function applyFlatZoom(s, want) {
   const base = pixelExactDistance(s)
   // Closer than a third and the surface fills more than the frame; further than
   // 2.5x and you are looking at the road again, which is what release is for.
-  flatZoom = Math.min(base * ZOOM_OUT_LIMIT, Math.max(-base * ZOOM_IN_LIMIT, flatZoom + d))
+  flatZoom = Math.min(base * ZOOM_OUT_LIMIT, Math.max(-base * ZOOM_IN_LIMIT, want))
   const t = s.mesh.rotation.y
   const normal = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
   camera.position.copy(s.mesh.position).addScaledVector(normal, base + flatZoom)
   camera.lookAt(s.mesh.position)
   state.flatZoom = Math.round(flatZoom)
   zoomMemory.set(zoomKey(s.district, s.milepost), flatZoom)
+}
+
+function zoomFlat(d) {
+  const s = flatSign()
+  if (s) applyFlatZoom(s, flatZoom + d)
+}
+
+// WHILE RESIZING, HOLD THE PIXEL SCALE -- which is what makes a resize look like
+// one.
+//
+// A sign's world width is a constant 300 whatever its surface is (makeSign), so
+// growing the surface at a fixed camera distance makes the window DENSER and not
+// bigger: measured, dragging 250x250 out to 326x310 left it 496px wide on screen
+// both before and after, which is not what dragging a window corner means
+// anywhere else in computing.
+//
+// Holding the scale instead moves the camera in as the surface grows, so the
+// corner stays under the pointer and the window gets bigger. The arithmetic is
+// one line: scale is base/d by construction, so d = base/scale.
+//
+// Runs every frame rather than once per configure because the surface does not
+// change when we ask -- the client has to ack and reallocate, and the sign is
+// rebuilt some frames later.
+function holdFlatScale() {
+  const job = resizing ?? settling
+  if (!job || state.mode !== 'flat') {
+    settling = null
+    return
+  }
+  const s = flatSign()
+  if (!s?.mesh) return
+  const base = pixelExactDistance(s)
+  // Hold the scale, BUT NEVER CLOSER THAN FIT. Holding it strictly is right
+  // until the window grows past the frame, at which point the grab you are
+  // dragging leaves the screen with it -- measured, growing 250x250 to 326x310
+  // put the corner at y 600 in a 577-tall viewport, so the gesture could be
+  // made and then not undone. Past that point the window keeps gaining
+  // resolution and stops gaining size, which is the half of the trade that can
+  // be reversed.
+  const d = Math.max(base / job.scale0, fitDistance(s))
+  applyFlatZoom(s, d - base)
+  if (settling && (performance.now() > settling.until || (s.size.width === settling.w && s.size.height === settling.h))) {
+    // One last apply at the size that actually arrived, then let go -- the zoom
+    // it lands on is now this window's, remembered like any other.
+    settling = null
+  }
+}
+
+// ------------------------------------------------------------- the resize
+//
+// A window you are standing in can be RESIZED, by dragging the grab at its
+// bottom-right corner. This is a real xdg_toplevel configure -- the client is
+// told a new size, reallocates its buffer and paints at it -- not a scale on the
+// quad, which would just be the zoom under another name and would resample
+// rather than give the application more room.
+//
+// WHY A CORNER GRAB AND NOT A DRAG ON THE EDGE OF THE SURFACE. While flat, every
+// pointer event over the window belongs to the application (that is the whole
+// point of the flatten) and every event beside it means "leave". There is no
+// spare gesture in between, so the resize needs a target of its own that is
+// neither: a small quad hung off the sign, hit-tested before both rules.
+//
+// The drag is in SCREEN pixels and the configure is in SURFACE pixels, and while
+// flat the two differ by a known scale -- the sign is fronto-parallel, so one
+// number converts them. Measuring it from the camera distance rather than from
+// the last flatten means it stays right while you are zoomed.
+let resizing = null
+
+// A RESIZE IS NOT OVER WHEN THE DRAG IS.
+//
+// configureSize only ASKS. The client has to ack the configure, reallocate its
+// buffer and paint, and the sign is rebuilt some frames after that -- so at
+// pointerup the surface is usually still its old size. Holding the scale only
+// while the pointer is down therefore held it over the period when nothing had
+// changed yet, and let go exactly when the change arrived: measured, a drag from
+// 250x250 to 326x310 left the window 496px wide on screen before AND after.
+//
+// So the hold outlives the drag, until the surface reaches the size that was
+// asked for or the client makes it clear it is not going to.
+let settling = null
+
+function surfacePerScreenPx(s) {
+  const dist = camera.position.distanceTo(s.mesh.position)
+  const worldPerPx = (2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / renderer.domElement.height
+  return worldPerPx * (s.size.width / s.mesh.geometry.parameters.width)
+}
+
+// Where the grab is on screen. Also what the probe aims at, so the test drives
+// the same pixels a hand would.
+function handlePoint() {
+  const s = flatSign()
+  if (!s?.handle?.visible) return null
+  const v = s.handle.getWorldPosition(new THREE.Vector3()).project(camera)
+  return {
+    x: ((v.x + 1) / 2) * renderer.domElement.clientWidth,
+    y: ((1 - v.y) / 2) * renderer.domElement.clientHeight,
+  }
+}
+
+function handleUnder(ev) {
+  const s = flatSign()
+  if (!s?.handle?.visible) return null
+  const rect = renderer.domElement.getBoundingClientRect()
+  raycaster.setFromCamera(
+    new THREE.Vector2(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    ),
+    camera,
+  )
+  return raycaster.intersectObject(s.handle, false).length ? s : null
+}
+
+function startResize(s, ev) {
+  // BY SHAPE, NOT BY CLASS NAME. Minification renames constructors and every
+  // check keyed on one was dead in the shipped bundle (see rrabbit.js); a method
+  // name survives, and `configureSize` is the only thing actually needed here.
+  const role = s.view?.surface?.role
+  if (typeof role?.configureSize !== 'function') return false
+  resizing = {
+    sx: ev.clientX,
+    sy: ev.clientY,
+    w: s.size.width,
+    h: s.size.height,
+    k: surfacePerScreenPx(s),
+    // Screen pixels per surface pixel at the moment the drag began -- the thing
+    // holdFlatScale keeps constant.
+    scale0: 1 / surfacePerScreenPx(s),
+    role,
+    min: role.queryMinSize?.() ?? null,
+    max: role.queryMaxSize?.() ?? null,
+  }
+  role.configureResizing?.(true)
+  state.resizes = (state.resizes ?? 0) + 1
+  return true
+}
+
+function stepResize(ev) {
+  const r = resizing
+  // A client may declare its own limits and they are the client's to declare.
+  // The floor of 64 is ours, and it is the difference between a small window and
+  // a window nobody can find again.
+  const minW = Math.max(64, r.min?.width || 0)
+  const minH = Math.max(64, r.min?.height || 0)
+  const maxW = r.max?.width || 4096
+  const maxH = r.max?.height || 4096
+  const w = Math.round(Math.min(maxW, Math.max(minW, r.w + (ev.clientX - r.sx) * r.k)))
+  const h = Math.round(Math.min(maxH, Math.max(minH, r.h + (ev.clientY - r.sy) * r.k)))
+  // Only configure on a CHANGE. A pointermove at 120Hz that re-sends the same
+  // size is a configure the client has to ack, and a buffer it may reallocate.
+  if (w === r.lastW && h === r.lastH) return
+  r.lastW = w
+  r.lastH = h
+  r.role.configureSize({ width: w, height: h })
+  state.resizeTo = [w, h]
+}
+
+function endResize() {
+  if (!resizing) return false
+  resizing.role.configureResizing?.(false)
+  if (resizing.lastW) {
+    // 1500ms is a deadline, not a duration: a client that honours the configure
+    // is done in a frame or two, and one that refuses -- or clamps to its own
+    // limits -- would otherwise hold the camera hostage forever.
+    settling = { scale0: resizing.scale0, w: resizing.lastW, h: resizing.lastH, until: performance.now() + 1500 }
+  }
+  resizing = null
+  return true
+}
+
+// Drive a resize without a mouse, for the same reason __pointAt exists.
+function resizeFlatBy(dxScreen, dyScreen) {
+  const s = flatSign()
+  if (!s) return null
+  const p = handlePoint()
+  if (!p) return null
+  if (!startResize(s, { clientX: p.x, clientY: p.y })) return null
+  stepResize({ clientX: p.x + dxScreen, clientY: p.y + dyScreen })
+  const asked = state.resizeTo
+  endResize()
+  return { from: [s.size.width, s.size.height], asked }
 }
 
 // Invariant 8: there is always a way out that does not depend on the 3D scene.
@@ -303,6 +520,7 @@ function release() {
   state.flatMilepost = null
   state.flatDistrict = null
   resetWheelGesture()
+  settling = null
   state.released++
   return true
 }
@@ -424,7 +642,7 @@ function currentPose() {
 }
 
 function stepFlight(dt) {
-  if (!flight) return
+  if (!flight) return holdFlatScale()
   // Ease at the same rate family RAVIO uses for camera terms (3.5-4.5); this is
   // a shot, not a thing you push.
   flight.t = Math.min(1, flight.t + dt * 2.6)
@@ -491,7 +709,11 @@ function scenePointFromEvent(ev) {
   // decorative.
   const meshes = [...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)
   const hits = raycaster.intersectObjects(meshes, true)
-  const hit = hits.find((h) => h.uv)
+  // The resize grab is a child of the sign, so a RECURSIVE pick finds it -- and
+  // it is not part of the surface. Left in, a click on the corner would resolve
+  // to no view at all, which reads to overFlatSurface as "outside the window"
+  // and would have made grabbing the handle the gesture that leaves.
+  const hit = hits.find((h) => h.uv && !h.object.userData.resizeHandle)
   if (!hit) return null
 
   // A popup carries its OWN view, and therefore its own rect in the ledger. Its
@@ -594,13 +816,20 @@ function installInput() {
       { capture: true, ...opts },
     )
 
-  swallow('pointermove', sendMotion)
+  swallow('pointermove', (ev) => {
+    if (resizing) return stepResize(ev)
+    sendMotion(ev)
+  })
   // A click on the window is the application's. A click on anything else --
   // the road, the sky, the space beside the surface -- is you asking to leave,
   // the same answer Esc gives. Clicking "outside" to dismiss is what every
   // other overlay in computing already taught people, and while flat it was the
   // one gesture that did nothing at all.
   swallow('pointerdown', (ev) => {
+    // The grab is checked FIRST, before both of the rules below -- it is neither
+    // the application's click nor a click outside asking to leave.
+    const grab = handleUnder(ev)
+    if (grab && startResize(grab, ev)) return
     if (!overFlatSurface(ev)) {
       release()
       canvas.blur()
@@ -608,7 +837,14 @@ function installInput() {
     }
     sendButton(ev, false)
   })
-  swallow('pointerup', (ev) => sendButton(ev, true))
+  swallow('pointerup', (ev) => {
+    if (endResize()) return
+    sendButton(ev, true)
+  })
+  // A drag that ends off the window, or that the browser takes away, must not
+  // leave the client stuck in its resizing state.
+  window.addEventListener('pointercancel', endResize, { capture: true })
+  window.addEventListener('blur', endResize)
   // Flat: the wheel belongs to whatever the pointer is over -- decided ONCE PER
   // GESTURE, not once per event.
   //
@@ -880,5 +1116,7 @@ export {
   // everything lived in one file and the split did not carry the reference
   // across, so both probes threw ReferenceError instead of aiming a pointer.
   sendMotion,
+  resizeFlatBy,
+  handlePoint,
   installInput,
 }

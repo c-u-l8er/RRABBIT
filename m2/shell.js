@@ -75,10 +75,12 @@ import {
   flattenTo,
   release,
   sendMotion,
+  resizeFlatBy,
+  handlePoint,
   stepFlight,
   installInput,
 } from './travel.js'
-import { attachRrabbit, adoptPending, syncPopups, checkPopupsMapped } from './rrabbit.js'
+import { attachRrabbit, adoptPending, syncPopups, syncHandles, checkPopupsMapped } from './rrabbit.js'
 import { attachGantry, syncGantries, gantryReport } from './gantry.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
@@ -367,6 +369,9 @@ function frame(now = 0) {
     lastT = now
     adoptPending()
     syncPopups()
+    // The resize grab only exists on the window you are in, and what that is
+    // changes from four different places -- reconcile rather than remember.
+    syncHandles()
     // After adoptPending, so a window that arrived this frame is already counted
     // on the lane that advertises its road, and the exit gate has already moved
     // down to stand past it.
@@ -852,6 +857,24 @@ window.__onScreen = (district = state.district, milepost = state.lastMapPick?.mi
     coverage: [+((Math.max(...xs) - Math.min(...xs)) / W).toFixed(3), +((Math.max(...ys) - Math.min(...ys)) / H).toFixed(3)],
   }
 }
+
+// THE RESIZE PROOF. Drives the real grab at its real screen position, so it
+// exercises the same path a hand does rather than a private shortcut, and
+// reports what the surface actually became -- the client has to ack the
+// configure and reallocate, so the number that matters is the one measured
+// after, not the one asked for.
+window.__resize = (dx = 120, dy = 90) => {
+  const before = [...signs.values()]
+    .filter((s) => s.district === state.flatDistrict && s.milepost === state.flatMilepost)
+    .map((s) => [s.size.width, s.size.height])[0]
+  const grab = handlePoint()
+  const r = resizeFlatBy(dx, dy)
+  return { grabAtScreen: grab && [Math.round(grab.x), Math.round(grab.y)], before, ...r }
+}
+window.__resized = () =>
+  [...signs.values()]
+    .filter((s) => s.district === state.flatDistrict && s.milepost === state.flatMilepost)
+    .map((s) => ({ milepost: s.milepost, size: s.size, mesh: s.mesh ? [s.mesh.geometry.parameters.width, +s.mesh.geometry.parameters.height.toFixed(1)] : null }))[0]
 
 window.__flatten = (m) => flattenTo(m)
 window.__release = () => release()

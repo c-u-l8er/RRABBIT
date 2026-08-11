@@ -43,6 +43,9 @@ let nextSlot = 0
 // well inside it.
 const SIGN_OFFSET = 330
 
+// Side of the square resize grab, in world units on a 300-wide sign.
+const HANDLE = 26
+
 // ------------------------------------------------------------------- signs
 
 // Adopt a Greenfield surface texture as a three.js map. Shared by signs and by
@@ -162,8 +165,37 @@ function makeSign(view, milepost, district, side, lane) {
   post.position.set(mesh.position.x, postTop - postH / 2, mesh.position.z)
   scene.add(post)
 
+  // THE RESIZE GRAB, at the bottom-right corner of the surface.
+  //
+  // A child of the mesh, so it inherits the sign's pose for free and stays glued
+  // to the corner through the flatten -- the same trick the popup quads use.
+  //
+  // It is hidden except on the window you are standing in, because out on the
+  // road it would be a fleck on a distant sign that does nothing, and every
+  // pointer path here has to be able to say what it hit.
+  const handle = new THREE.Mesh(
+    new THREE.PlaneGeometry(HANDLE, HANDLE),
+    new THREE.MeshBasicMaterial({ color: COOL, toneMapped: false }),
+  )
+  handle.position.set(sw / 2, -sh / 2, 3)
+  handle.userData.resizeHandle = true
+  handle.visible = false
+  mesh.add(handle)
+
   state.adopted++
-  return { mesh, frame, post, tex, rt, size: { width, height } }
+  return { mesh, frame, post, handle, tex, rt, size: { width, height } }
+}
+
+// The grab is only live on the window you are IN. Cheap enough to reconcile
+// every frame, and reconciling beats remembering: the flattened window changes
+// under this from four different places (flatten, release, a window dying, a
+// resize rebuilding the sign) and none of them should have to know about it.
+function syncHandles() {
+  const flatKey = `${state.flatDistrict}:${state.flatMilepost}`
+  for (const s of signs.values()) {
+    if (!s.handle) continue
+    s.handle.visible = state.mode === 'flat' && `${s.district}:${s.milepost}` === flatKey
+  }
 }
 
 // A surface's size is not known when it is created -- the first buffer decides
@@ -418,6 +450,7 @@ export {
   adoptSurfaceTexture,
   makeSign,
   adoptPending,
+  syncHandles,
   dropSign,
   isSurface,
   isPopupRole,
