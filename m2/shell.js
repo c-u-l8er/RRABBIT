@@ -50,101 +50,39 @@
 import * as THREE from 'three'
 import { createAppLauncher, createCompositorSession, initWasm } from '@gfld/compositor'
 import { createRack } from './tubes.js'
+import { state, signs, ctx, keyOf, ACC, COOL, BG, MILE, SCENE_ID, LEDGER_PITCH, LEDGER_COLS } from './world.js'
+import * as ws from './workspaces.js'
+import {
+  attachTravel,
+  districtPose,
+  setRange,
+  goDistrict,
+  goOverview,
+  flattenTo,
+  release,
+  sendMotion,
+  stepFlight,
+  installInput,
+} from './travel.js'
+import { attachRrabbit, adoptPending, syncPopups, checkPopupsMapped } from './rrabbit.js'
+import { attachGantry, syncGantries, gantryReport } from './gantry.js'
 
-const ACC = 0xf2c14e
-const COOL = 0x2de2e6
-const BG = 0x03040a
+// state lives in world.js now; the page and the diagnostics still expect it
+// to come from here.
+export { state }
 
-// Spacing between mileposts. RAVIO measured its way to S=300 for a change feed
-// of 15-25 rows/hour against a road passing 1800 signs/hour. Windows invert
-// that problem -- there are 5-30 of them, not thousands -- so this is NOT
-// RAVIO's S and must not be assumed to transfer (spec §7).
-const MILE = 260
-const SCENE_ID = 'road'
+// The tube bridge (bridge.py). SAME-ORIGIN by default -- see world.js for why
+// an absolute origin here was a bug.
+const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? ''
 
-// ---- M4: districts -------------------------------------------------------
-//
-// A district is a workspace. Spec §3 originally said "one Wayland output each";
-// §11.2 and §12.3 measured why that is the wrong shape:
-//
-//   - every scene renders every view, so extra outputs do not partition windows
-//   - a view only gets a texture where it INTERSECTS a scene's region
-//   - and a scene's region is its canvas, which is the visible one
-//
-// So districts are a partition of the ROAD, not of the output. There is one
-// flat output -- the ledger -- and every window lives in it at its own slot.
-// The road is a view of the ledger; a district is a stretch of road.
-//
-// THE LEDGER SLOT IS NOT COSMETIC. §12.3 found every window stacked at the same
-// rect, which left `pickView` able to tell windows apart only by stacking order
-// -- so routing was correct only because the flatten raises its target first.
-// Distinct slots make the ledger addressable by position, which is what a
-// window manager is supposed to be.
-const DISTRICTS = ['home', 'build', 'watch']
-const DISTRICT_X = 2600 // how far apart the roads are laid
-const LEDGER_PITCH = 264 // slot spacing in the flat output
-const LEDGER_COLS = 4
-// The tube bridge (bridge.py). Its own port so a shell without one still runs.
-const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? 'http://127.0.0.1:8913'
-
-export const state = {
-  compositor: 'idle',
-  surfaces: 0,
-  signs: 0,
-  adopted: 0,
-  frames: 0,
-  decodes: 0,
-  suppressed: 0,
-  // M2
-  mode: 'driving', // driving | flying | flat
-  flatMilepost: null,
-  flatDistrict: null,
-  pointerSent: 0,
-  buttonSent: 0,
-  lastScenePoint: null,
-  lastPickMatched: null,
-  released: 0,
-  district: 0,
-  overview: false,
-  placed: 0,
-  ledgerDistinct: null,
-  strandedPopups: 0,
-  strandedWarned: false,
-  popupQuads: 0,
-  lastWasPopup: null,
-  popupError: null,
-  tubeReader: null,
-  tubePolls: 0,
-  tubeError: null,
-  error: null,
-  frameError: null,
-}
-
-let renderer, gl, scene, camera, session, rack
-// Mileposts are PER DISTRICT -- each workspace numbers its own road.
-const nextMilepost = DISTRICTS.map(() => 1)
-let nextSlot = 0
-// surface key -> { milepost, mesh, tex, rt, size, view }
-const signs = new Map()
-
-// Camera flight. `from`/`to` are poses; t runs 0..1.
-let flight = null
-let flatTargetDistrict = 0
+let renderer, gl, scene, camera, session, rack, vaoExt
 const DRIVE_POSE = { pos: new THREE.Vector3(0, 105, 260), look: new THREE.Vector3(0, 105, -640) }
-const raycaster = new THREE.Raycaster()
-const districtArches = []
 
-const districtX = (d) => (d - (DISTRICTS.length - 1) / 2) * DISTRICT_X
-
-// A slot in the flat output. The ledger is a grid, one cell per window, so no
-// two windows share a rect and `pickView` can resolve a point to a window on
-// position alone.
-const ledgerSlot = (i) => ({
-  x: (i % LEDGER_COLS) * LEDGER_PITCH,
-  y: Math.floor(i / LEDGER_COLS) * LEDGER_PITCH,
-})
-
-const keyOf = (view) => `${view.surface.resource.client.id}:${view.surface.resource.id}`
+// workspace id -> { road, arch }. A Map rather than an array because the roads
+// are no longer a fixed list laid down once at startup: workspaces are added,
+// closed and re-opened while the shell runs, and `syncRoads` reconciles the
+// scene with the graph every time that happens.
+const roads = new Map()
 
 // ---------------------------------------------------------------- the world
 
@@ -163,6 +101,10 @@ function buildWorld(canvas) {
   renderer = new THREE.WebGLRenderer({ canvas, context: gl })
   renderer.setPixelRatio(1)
 
+  // THE FOURTH THING THAT MAKES THIS WORK, and the one that took a torn frame
+  // to find. See leaveNeutralVertexState() at the end of the frame.
+  vaoExt = gl.getExtension('OES_vertex_array_object')
+
   scene = new THREE.Scene()
   scene.background = new THREE.Color(BG)
   scene.fog = new THREE.Fog(BG, 1400, 4200)
@@ -175,28 +117,7 @@ function buildWorld(canvas) {
   key.position.set(-200, 400, 300)
   scene.add(key)
 
-  // One road per district, laid side by side. A workspace you can SEE from a
-  // neighbouring workspace is the difference between switching and teleporting.
-  DISTRICTS.forEach((name, d) => {
-    const road = new THREE.Mesh(
-      new THREE.PlaneGeometry(320, 6000),
-      new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
-    )
-    road.rotation.x = -Math.PI / 2
-    road.position.set(districtX(d), -30, -2600)
-    scene.add(road)
-
-    // A gateway arch at the head of each road, so a district is identifiable
-    // from the overview without reading anything.
-    const arch = new THREE.Mesh(
-      new THREE.BoxGeometry(360, 14, 14),
-      new THREE.MeshStandardMaterial({ color: d === 0 ? COOL : ACC, roughness: 0.5 }),
-    )
-    arch.position.set(districtX(d), 300, 60)
-    arch.userData.district = d
-    scene.add(arch)
-    districtArches.push(arch)
-  })
+  syncRoads()
 
   // The rack is parented to the camera, and a camera's children are only
   // rendered if the camera is itself in the scene graph. Without this line the
@@ -204,8 +125,71 @@ function buildWorld(canvas) {
   scene.add(camera)
   rack = createRack(camera)
 
+  // Hand the stage to both personalities. `session` is still null here -- it is
+  // created later in main() -- so this runs again once it exists. attach() is
+  // deliberately re-callable rather than one-shot: the alternative is reading
+  // through ctx on every access, which would have meant editing every line
+  // moved into travel.js and rrabbit.js, and the point of the split was to move
+  // that code without touching it.
+  Object.assign(ctx, { renderer, gl, scene, camera, session })
+  attachTravel(ctx)
+  attachRrabbit(ctx)
+  attachGantry(ctx)
+  syncGantries()
+
   resize()
   window.addEventListener('resize', resize)
+}
+
+// One road per OPEN workspace, laid side by side at the lane the layout gives
+// it. A workspace you can SEE from a neighbouring workspace is the difference
+// between switching and teleporting.
+//
+// Reconciliation rather than construction: this used to be a `forEach` over a
+// constant array, run once, and there was no case where the answer could change.
+// Now it can -- a workspace is added, closed, re-opened -- so the function has to
+// be safe to call at any time and idempotent when nothing moved.
+function syncRoads() {
+  const want = new Set()
+  for (const w of ws.list()) {
+    if (!w.open) continue
+    want.add(w.id)
+    const x = ws.laneX(w.id)
+    let r = roads.get(w.id)
+    if (!r) {
+      const road = new THREE.Mesh(
+        new THREE.PlaneGeometry(320, 6000),
+        new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
+      )
+      road.rotation.x = -Math.PI / 2
+      scene.add(road)
+
+      // A gateway arch at the head of each road, so a workspace is identifiable
+      // from the overview without reading anything. It is an OVERVIEW label and
+      // is hidden from the road -- see the frame loop.
+      const arch = new THREE.Mesh(
+        new THREE.BoxGeometry(360, 14, 14),
+        new THREE.MeshStandardMaterial({ color: w.id === ws.root() ? COOL : ACC, roughness: 0.5 }),
+      )
+      arch.userData.district = w.id
+      scene.add(arch)
+
+      r = { road, arch }
+      roads.set(w.id, r)
+    }
+    r.road.position.set(x, -30, -2600)
+    r.arch.position.set(x, 300, 60)
+  }
+  for (const [id, r] of [...roads]) {
+    if (want.has(id)) continue
+    scene.remove(r.road)
+    scene.remove(r.arch)
+    r.road.geometry.dispose()
+    r.road.material.dispose()
+    r.arch.geometry.dispose()
+    r.arch.material.dispose()
+    roads.delete(id)
+  }
 }
 
 // ---------------------------------------------------------------- the tubes
@@ -255,638 +239,40 @@ function resize() {
   camera.updateProjectionMatrix()
 }
 
-// ------------------------------------------------------------------- signs
 
-// Adopt a Greenfield surface texture as a three.js map. Shared by signs and by
-// popups so the two can never drift on colour space or the flip.
-// three r160 has no ExternalTexture class; setRenderTargetTextures is the
-// supported way in at this revision. It dereferences
-// `renderTarget.depthTexture` UNCONDITIONALLY, and a plain render target has
-// none, so the call dies with "Invalid value used as weak map key" three lines
-// before the branch that handles `depthTexture === undefined` -- hence a depth
-// texture that is never used.
-//
-// The flip is at SAMPLE time (repeat/offset) because `flipY` is an UPLOAD-time
-// flag and adoption does no upload.
-//
-// THE TWO BUFFER PATHS DISAGREE ABOUT WHICH WAY IS UP, and the fix is not one
-// constant. A web client's shm buffer is uploaded straight to the texture, so
-// it arrives bottom-up and needs the flip. A NATIVE client's frame is h264 and
-// is decoded through a shader that RENDERS INTO the texture, which flips it
-// once already -- flipping again turns it upside down.
-//
-// Measured on a real xterm: `[travis@PX13 RRABBIT]` came out as
-// `[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]` at the bottom of the window. The giveaway is `P` → `b`,
-// which is a VERTICAL mirror; a horizontal one would have given `ꟼ`. Choosing
-// the axis by reading the glyph beat guessing at it.
-//
-// `mimeType` is a property, so it survives minification -- unlike the class
-// names that broke in the built bundle (see isSurface above).
-function adoptSurfaceTexture(rs, view) {
-  const { width, height } = rs.size
-  const rt = new THREE.WebGLRenderTarget(width, height)
-  rt.depthTexture = new THREE.DepthTexture(width, height)
-  renderer.setRenderTargetTextures(rt, rs.texture.texture)
-  const tex = rt.texture
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
-  const mime = view?.surface?.state?.bufferContents?.mimeType
-  const alreadyUpright = mime === 'video/h264' || mime === 'image/png'
-  if (!alreadyUpright) {
-    tex.repeat.set(1, -1)
-    tex.offset.set(0, 1)
-  }
-  return { rt, tex }
-}
-
-function makeSign(view, milepost, district) {
-  const rs = view.renderStates[SCENE_ID]
-  if (!rs || !rs.texture || !rs.texture.texture) return null
-  const { width, height } = rs.size
-  if (!width || !height) return null
-
-  const { rt, tex } = adoptSurfaceTexture(rs, view)
-
-  // One sign is sized to ITS OWN surface. M0's board was a fixed rectangle and
-  // a 250x250 client filled a corner of it -- correct behaviour, wrong framing.
-  const sw = 300
-  const sh = (sw * height) / width
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(sw, sh),
-    new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
-  )
-
-  // Alternate sides of the road, like RAVIO's billboards -- on THIS district's
-  // road.
-  const side = milepost % 2 === 0 ? 1 : -1
-  mesh.position.set(districtX(district) + side * 260, 40 + sh / 2, -milepost * MILE)
-  mesh.rotation.y = -side * 0.42
-  scene.add(mesh)
-
-  const frame = new THREE.Mesh(
-    new THREE.PlaneGeometry(sw + 14, sh + 14),
-    new THREE.MeshBasicMaterial({ color: COOL }),
-  )
-  frame.position.copy(mesh.position)
-  frame.rotation.copy(mesh.rotation)
-  frame.translateZ(-2)
-  scene.add(frame)
-
-  // A post, so the sign stands on the road rather than floating -- and so
-  // there is geometry that can occlude the sign behind it.
-  //
-  // It must stop AT the sign's bottom edge, not run through it. An overlapping
-  // post covered the lower face and made a readback sample amber, which read as
-  // the window being the wrong way up. Furniture that crosses the picture is
-  // also an instrument that lies about the picture.
-  const postTop = mesh.position.y - sh / 2
-  const postH = postTop + 30
-  const post = new THREE.Mesh(
-    new THREE.BoxGeometry(14, postH, 14),
-    new THREE.MeshStandardMaterial({ color: ACC, roughness: 0.6 }),
-  )
-  post.position.set(mesh.position.x, postTop - postH / 2, mesh.position.z)
-  scene.add(post)
-
-  state.adopted++
-  return { mesh, frame, post, tex, rt, size: { width, height } }
-}
-
-// A surface's size is not known when it is created -- the first buffer decides
-// it, and renderStates are only built once the view intersects the scene. So
-// signs are adopted lazily, every frame, until they take.
-function adoptPending() {
-  const views = session?.renderer?.topLevelViews ?? []
-  for (const view of views) {
-    const k = keyOf(view)
-    const existing = signs.get(k)
-    if (existing && existing.mesh) {
-      // Invariant 6: content changes, PLACEMENT DOES NOT. The milepost is the
-      // window's address and is never recomputed.
-      const rs = view.renderStates[SCENE_ID]
-      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height)) {
-        // A resized surface is a new texture allocation. Rebuild the sign in
-        // place, at the SAME milepost.
-        dropSign(k)
-        signs.set(k, { milepost: existing.milepost, district: existing.district, slot: existing.slot })
-      }
-      continue
-    }
-    // Invariant 6, widened by M4: a window's address is now (district,
-    // milepost) and neither half is ever recomputed. The ledger slot is
-    // assigned once for the same reason -- a window that moved in the ledger
-    // would change where its input lands.
-    const district = existing?.district ?? state.district
-    const milepost = existing?.milepost ?? nextMilepost[district]++
-    const slot = existing?.slot ?? nextSlot++
-    placeInLedger(view, slot)
-    const built = makeSign(view, milepost, district)
-    // The view is kept so input can be mapped back into the flat output. It is
-    // re-read every frame rather than cached at build time: a view object is
-    // replaced when a surface is remapped.
-    signs.set(k, built ? { milepost, district, slot, view, ...built } : { milepost, district, slot, view })
-    if (built) built.mesh.userData.signKey = k
-  }
-  for (const [k, s] of signs) {
-    const v = views.find((x) => keyOf(x) === k)
-    if (v) s.view = v
-  }
-  state.signs = [...signs.values()].filter((s) => s.mesh).length
-
-  // Surfaces that went away.
-  //
-  // A window can close WHILE YOU ARE IN IT -- the client exits, the surface is
-  // destroyed, and without this the shell sits flat against a milepost that no
-  // longer has anything on it, with input routed to a surface that is gone.
-  // Proven by pressing Escape in the test client, which exits on ESC.
-  const live = new Set(views.map(keyOf))
-  for (const k of [...signs.keys()]) {
-    if (live.has(k)) continue
-    const dying = signs.get(k)
-    if (dying && dying.milepost === state.flatMilepost) release()
-    dropSign(k, true)
-  }
-}
-
-function dropSign(k, forget = false) {
-  const s = signs.get(k)
-  if (!s) return
-  for (const o of [s.mesh, s.frame, s.post]) if (o) scene.remove(o)
-  if (s.rt) s.rt.dispose()
-  if (forget) signs.delete(k)
-}
-
-// MINIFICATION EATS CLASS NAMES. `impl.constructor.name === 'Surface'` works in
-// the dev server and is DEAD in the built bundle -- measured: the shipped shell
-// reports constructor names of `ko`, `ro`, `mQ`. Everything keyed on those names
-// silently stopped: popups did not render at all in the production build, and
-// the detector that exists to catch exactly that was dead too.
-//
-// PROPERTY names survive (esbuild does not mangle them by default), so identify
-// by SHAPE. `positionerState` is unique to XdgPopup among surface roles.
-//
-// The lesson generalises past this file: a type check that depends on a name
-// the build tool is free to rewrite is a check that works until you ship it.
-const isSurface = (impl) => !!impl && !!impl.resource && !!impl.state && 'mapped' in impl
-const isPopupRole = (role) => !!role && role.positionerState !== undefined
-
-// ----------------------------------------------------------------- popups
-//
-// AN xdg_popup COULD NOT MAP IN GREENFIELD 1.0.0-rc1 (and still cannot on
-// master). `surface.mapped = true` happens in exactly one place --
-// `FloatingDesktopSurface.commit()`, reached via `DesktopSurface.commit()` --
-// and XdgToplevel, ShellSurface and XWaylandShellSurface all call it while
-// XdgPopup does not. So a popup got its role, got its buffer, and sat at
-// `mapped: false` forever: no menus, dropdowns or tooltips for ANY client.
-//
-// That is now FIXED AT THE SOURCE, not worked around:
-//   patches/greenfield-xdgpopup-map.patch  -- the upstream-ready diff
-//   tools/patch-compositor.mjs             -- applies it to the installed dist
-//
-// What remains here is a DETECTOR, not a fix. A shell that silently repaired
-// this would hide a missing patch until someone wondered where the menus went.
-// If this ever counts above zero, the patch did not apply.
-function checkPopupsMapped() {
-  const clients = session?.display?.clients
-  if (!clients) return
-  let stranded = 0
-  for (const client of Object.values(clients)) {
-    for (const o of Object.values(client.connection?.wlObjects ?? {})) {
-      const impl = o?.implementation
-      if (!isSurface(impl)) continue
-      if (!isPopupRole(impl.role)) continue
-      if (!impl.mapped && impl.state?.bufferContents) stranded++
-    }
-  }
-  state.strandedPopups = stranded
-  if (stranded && !state.strandedWarned) {
-    state.strandedWarned = true
-    console.warn(
-      `RRABBIT: ${stranded} popup(s) have a buffer and are not mapped. ` +
-        'The @gfld/compositor patch is missing -- run: node tools/patch-compositor.mjs',
-    )
-  }
-}
-
-// A popup is drawn ON ITS PARENT'S SIGN, at the position the COMPOSITOR
-// computed from the client's XdgPositioner. The shell does not invent a
-// position -- spec §7 feared there was no rectangle to anchor to on a receding
-// billboard, but the ledger has one: both surfaces have a rect there, and the
-// difference between them is the offset in parent-surface pixels.
-//
-//   local x = (dx + popupW/2 - parentW/2) * scale
-//   local y = -(dy + popupH/2 - parentH/2) * scale     (y is up in the plane)
-//
-// A menu that overhangs its window overhangs its sign too, which is correct.
-function popupsByParentKey() {
-  const out = new Map()
-  const clients = session?.display?.clients
-  if (!clients) return out
-  for (const client of Object.values(clients)) {
-    for (const o of Object.values(client.connection?.wlObjects ?? {})) {
-      const impl = o?.implementation
-      if (!isSurface(impl)) continue
-      if (!isPopupRole(impl.role)) continue
-      if (!impl.mapped) continue
-      const view = impl.role.view
-      const rs = view?.renderStates?.[SCENE_ID]
-      if (!rs?.texture?.texture || !rs.size.width) continue
-      // Walk up: a submenu's parent is another popup, and it still belongs to
-      // the toplevel's sign.
-      let p = impl.parent
-      let guard = 0
-      while (p && guard++ < 8) {
-        const pv = p.role?.view
-        if (pv && signs.has(keyOf(pv))) {
-          const k = keyOf(pv)
-          if (!out.has(k)) out.set(k, [])
-          out.get(k).push({ view, rs })
-          break
-        }
-        p = p.parent
-      }
-    }
-  }
-  return out
-}
-
-function syncPopups() {
-  const byParent = popupsByParentKey()
-  for (const [k, sign] of signs) {
-    if (!sign.mesh) continue
-    sign.popups = sign.popups ?? new Map()
-    const live = byParent.get(k) ?? []
-    const liveKeys = new Set(live.map((p) => keyOf(p.view)))
-
-    for (const { view, rs } of live) {
-      const pk = keyOf(view)
-      let q = sign.popups.get(pk)
-      const size = { w: rs.size.width, h: rs.size.height }
-      if (q && (q.size.w !== size.w || q.size.h !== size.h)) {
-        sign.mesh.remove(q.mesh)
-        q.rt.dispose()
-        sign.popups.delete(pk)
-        q = undefined
-      }
-      if (!q) {
-        const { rt, tex } = adoptSurfaceTexture(rs, view)
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(1, 1),
-          new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
-        )
-        // A child of the sign, so it inherits the sign's pose for free and
-        // stays glued to the window through the flatten.
-        mesh.userData.popupView = view
-        sign.mesh.add(mesh)
-        q = { mesh, rt, size }
-        sign.popups.set(pk, q)
-        state.popupQuads++
-      }
-      const g = sign.mesh.geometry.parameters
-      const scale = g.width / sign.size.width
-      const pr = view.regionRect
-      const sr = sign.view.regionRect
-      const dx = pr.x0 - sr.x0
-      const dy = pr.y0 - sr.y0
-      q.mesh.scale.set(size.w * scale, size.h * scale, 1)
-      q.mesh.position.set(
-        (dx + size.w / 2 - sign.size.width / 2) * scale,
-        -(dy + size.h / 2 - sign.size.height / 2) * scale,
-        1.5, // just proud of the sign face, so it never z-fights the window
-      )
-    }
-
-    for (const [pk, q] of [...sign.popups]) {
-      if (liveKeys.has(pk)) continue
-      sign.mesh.remove(q.mesh)
-      q.rt.dispose()
-      sign.popups.delete(pk)
-    }
-  }
-}
-
-// ---------------------------------------------------------------- the ledger
-
-// Put a window at its own rect in the flat output. `positionOffset` is the same
-// lever Greenfield's own FloatingDesktopSurface uses to drag a window, so this
-// is placement rather than a trick.
-function placeInLedger(view, slot) {
-  const p = ledgerSlot(slot)
-  const cur = view.positionOffset
-  if (cur && cur.x === p.x && cur.y === p.y) return
-  view.positionOffset = p
-  state.placed++
-}
-
-// ------------------------------------------------------------- the district
-
-function districtPose(d) {
-  return {
-    pos: new THREE.Vector3(districtX(d), 105, 260),
-    look: new THREE.Vector3(districtX(d), 105, -640),
-  }
-}
-
-// The overview -- spec §5's R gear, re-missioned: all workspaces at once rather
-// than one.
-//
-// FOG IS A DISTANCE BUDGET, AND THE OVERVIEW BLOWS IT. Driving fog (far 4200)
-// suits a road you are on; from above, the outer districts are 5000+ units away
-// and the first overview rendered them as black. The pose and the fog have to
-// move together or the shot is of nothing.
-// AND FOG IS ONLY ONE OF TWO DISTANCE BUDGETS. Widening the fog alone still
-// rendered an empty overview, because the CAMERA'S FAR PLANE is 6000 and the
-// outer roads sit 6000-12000 away -- clipped before fog was ever consulted.
-// A "too far to see" bug has two independent causes and they look identical.
-const FOG_DRIVE = 4200
-const FOG_OVERVIEW = 16000
-const FAR_DRIVE = 6000
-const FAR_OVERVIEW = 20000
-
-function setRange(fog, far) {
-  scene.fog.far = fog
-  camera.far = far
-  camera.updateProjectionMatrix()
-}
-
-function overviewPose() {
-  // Frame WHERE THE WINDOWS ARE, not the whole road. Mileposts start at 1, so
-  // the occupied stretch is the first few hundred units of each road; framing
-  // all 6000 put every sign in a thin band at the horizon.
-  const span = DISTRICT_X * (DISTRICTS.length - 1)
-  return {
-    pos: new THREE.Vector3(0, 1150, span * 0.5 + 1300),
-    look: new THREE.Vector3(0, 0, -520),
-  }
-}
-
-function goDistrict(d) {
-  if (d < 0 || d >= DISTRICTS.length) return null
-  state.district = d
-  state.overview = false
-  setRange(FOG_DRIVE, FAR_DRIVE)
-  flight = { from: currentPose(), to: districtPose(d), t: 0, target: null }
-  state.mode = 'flying'
-  return DISTRICTS[d]
-}
-
-function goOverview() {
-  state.overview = true
-  setRange(FOG_OVERVIEW, FAR_OVERVIEW)
-  flight = { from: currentPose(), to: overviewPose(), t: 0, target: null }
-  state.mode = 'flying'
-  return true
-}
-
-// ------------------------------------------------------------- the flatten
-//
-// PIXEL-EXACT means the surface's own pixels map 1:1 to screen pixels: no
-// resampling, no blur, text as crisp as it is on a flat desktop. That is the
-// whole reason to care about the distance rather than just "close enough".
-//
-// A world length L at distance d covers L/(2*d*tan(fov/2)) of the viewport
-// height. Setting that equal to (surface px / viewport px) and solving:
-//
-//     d = signWorldHeight * viewportPx / (surfacePx * 2 * tan(fov/2))
-//
-// Note this does NOT move the sign. Invariant 6: a window's placement is its
-// address. We fly the camera to the window, never the window to the camera.
-function pixelExactDistance(s) {
-  const worldH = s.mesh.geometry.parameters.height
-  const H = renderer.domElement.height
-  const fov = THREE.MathUtils.degToRad(camera.fov)
-  return (worldH * H) / (s.size.height * 2 * Math.tan(fov / 2))
-}
-
-function poseFor(s) {
-  // A PlaneGeometry faces +Z; after rotation.y = t its normal is (sin t, 0, cos t).
-  const t = s.mesh.rotation.y
-  const normal = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
-  const d = pixelExactDistance(s)
-  return {
-    pos: s.mesh.position.clone().addScaledVector(normal, d),
-    look: s.mesh.position.clone(),
-  }
-}
-
-// Mileposts restart in every district, so a milepost ALONE no longer names a
-// window -- (district, milepost) does. Defaulting the district to the one you
-// are standing in is what makes `__flatten(2)` still mean what it used to.
-function flattenTo(milepost, district = state.district) {
-  const s = [...signs.values()].find((x) => x.milepost === milepost && x.district === district && x.mesh)
-  if (!s) return null
-  flatTargetDistrict = district
-  flight = { from: currentPose(), to: poseFor(s), t: 0, target: milepost }
-  state.mode = 'flying'
-  return milepost
-}
-
-// Invariant 8: there is always a way out that does not depend on the 3D scene.
-function release() {
-  if (state.mode === 'driving') return false
-  // Back to the district you were in, not to district 0 -- releasing must
-  // not silently move you between workspaces.
-  flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
-  state.mode = 'flying'
-  state.flatMilepost = null
-  state.flatDistrict = null
-  state.released++
-  return true
-}
-
-function currentPose() {
-  const look = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).multiplyScalar(400).add(camera.position)
-  return { pos: camera.position.clone(), look }
-}
-
-function stepFlight(dt) {
-  if (!flight) return
-  // Ease at the same rate family RAVIO uses for camera terms (3.5-4.5); this is
-  // a shot, not a thing you push.
-  flight.t = Math.min(1, flight.t + dt * 2.6)
-  const e = flight.t < 0.5 ? 2 * flight.t * flight.t : 1 - Math.pow(-2 * flight.t + 2, 2) / 2
-  camera.position.lerpVectors(flight.from.pos, flight.to.pos, e)
-  const look = new THREE.Vector3().lerpVectors(flight.from.look, flight.to.look, e)
-  camera.lookAt(look)
-  if (flight.t >= 1) {
-    const target = flight.target
-    flight = null
-    if (target === null) {
-      state.mode = 'driving'
-    } else {
-      state.mode = 'flat'
-      state.flatMilepost = target
-      state.flatDistrict = flatTargetDistrict
-      // Invariant 7: focus follows the FLATTEN, never the drive-by.
-      //
-      // activateSurface RAISES the view, and that is load-bearing far beyond
-      // focus: every window sits at the same rect in the flat output, so
-      // pickView can only tell them apart by stacking order. Raising the
-      // flattened window is what makes pointer routing hit the right surface.
-      const s = [...signs.values()].find((x) => x.milepost === target && x.district === flatTargetDistrict)
-      if (s?.view) {
-        session.userShell.actions.activateSurface({
-          id: s.view.surface.resource.id,
-          client: { id: s.view.surface.resource.client.id },
-        })
-      }
-      // Greenfield's keydown listener lives on the canvas and its `focus`
-      // handler is what calls notifyKeyboardFocusIn. Without this the surface is
-      // activated, looks focused, and receives no keys at all.
-      renderer.domElement.focus()
-    }
-  }
-}
-
-// --------------------------------------------------------------- the input
-//
-// Raycast the sign, then convert the hit UV into the surface's own rect inside
-// the FLAT output, because that is the space Greenfield's pickView works in.
-function scenePointFromEvent(ev) {
-  if (state.mode !== 'flat') return null
-  const rect = renderer.domElement.getBoundingClientRect()
-  const ndc = new THREE.Vector2(
-    ((ev.clientX - rect.left) / rect.width) * 2 - 1,
-    -((ev.clientY - rect.top) / rect.height) * 2 + 1,
-  )
-  raycaster.setFromCamera(ndc, camera)
-  // RECURSIVE: popup quads are children of their sign, and a menu is the thing
-  // you most need to be able to click. A non-recursive pick made every popup
-  // decorative.
-  const meshes = [...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)
-  const hits = raycaster.intersectObjects(meshes, true)
-  const hit = hits.find((h) => h.uv)
-  if (!hit) return null
-
-  // A popup carries its OWN view, and therefore its own rect in the ledger. Its
-  // surface coordinates start at ITS top-left, not the parent's -- routing a
-  // menu click through the parent's rect would land somewhere in the window
-  // behind it.
-  const popupView = hit.object.userData.popupView
-  const target = popupView ?? signs.get(hit.object.userData.signKey)?.view
-  if (!target) return null
-
-  // The plane's v runs 0 at the BOTTOM; the surface's y runs 0 at the TOP, and
-  // the sign is upright (verified by __calibrate). So vTop = 1 - uv.y.
-  const u = hit.uv.x
-  const vTop = 1 - hit.uv.y
-  const r = target.regionRect
-  return {
-    x: r.x0 + u * (r.x1 - r.x0),
-    y: r.y0 + vTop * (r.y1 - r.y0),
-    sign: { view: target },
-    isPopup: !!popupView,
-  }
-}
-
-function sendMotion(ev) {
-  const p = scenePointFromEvent(ev)
-  if (!p) return
-  state.lastScenePoint = [Math.round(p.x), Math.round(p.y)]
-  state.lastWasPopup = !!p.isPopup
-  // Did Greenfield resolve this point to the surface we aimed at? If not, the
-  // remap is wrong and every click is landing somewhere else -- which would
-  // otherwise only show up as an application behaving strangely.
-  const picked = session.renderer.pickView({ x: p.x, y: p.y })
-  state.lastPickMatched = picked ? keyOf(picked) === keyOf(p.sign.view) : false
-  session.inputQueue.queueMotion({
-    x: p.x,
-    y: p.y,
-    timestamp: ev.timeStamp,
-    buttonCode: 0,
-    released: false,
-    buttons: ev.buttons ?? 0,
-    sceneId: SCENE_ID,
-  })
-  state.pointerSent++
-}
-
-function sendButton(ev, released) {
-  const p = scenePointFromEvent(ev)
-  if (!p) return
-  session.inputQueue.queueButton({
-    x: p.x,
-    y: p.y,
-    timestamp: ev.timeStamp,
-    buttonCode: ev.button ?? 0,
-    released,
-    buttons: ev.buttons ?? 0,
-    sceneId: SCENE_ID,
-  })
-  state.buttonSent++
-}
-
-function installInput() {
-  const canvas = renderer.domElement
-
-  // CAPTURE phase on window, so this runs before Greenfield's own target-phase
-  // listeners on the canvas. stopPropagation then keeps them from seeing a
-  // pointer position that means nothing in a perspective scene.
-  const swallow = (type, handler) =>
-    window.addEventListener(
-      type,
-      (ev) => {
-        if (state.mode === 'flat') {
-          ev.stopPropagation()
-          handler?.(ev)
-        }
-      },
-      { capture: true },
-    )
-
-  swallow('pointermove', sendMotion)
-  swallow('pointerdown', (ev) => sendButton(ev, false))
-  swallow('pointerup', (ev) => sendButton(ev, true))
-  swallow('wheel', null)
-
-  // Clicking a sign while driving flies to it. This is the only pointer path
-  // that is live outside `flat`.
-  canvas.addEventListener('pointerdown', (ev) => {
-    if (state.mode !== 'driving') return
-    const rect = canvas.getBoundingClientRect()
-    raycaster.setFromCamera(
-      new THREE.Vector2(
-        ((ev.clientX - rect.left) / rect.width) * 2 - 1,
-        -((ev.clientY - rect.top) / rect.height) * 2 + 1,
-      ),
-      camera,
-    )
-    const meshes = [...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)
-    const hit = raycaster.intersectObjects(meshes, false)[0]
-    if (hit) flattenTo(signs.get(hit.object.userData.signKey).milepost)
-  })
-
-  // THE ESCAPE HATCH (invariant 8). Capture phase, or the focused client's
-  // keydown listener eats it first -- a focused surface swallows every key
-  // including Esc, which is exactly how PARKVPS lost its way back to the road.
-  //
-  // NOT Esc+CapsLock: CapsLock is a lock, not a modifier, so it would steal Esc
-  // from vi whenever the light is on, and the page cannot see the light.
-  // District keys. Deliberately NOT live while flat: a digit typed into a
-  // focused application must reach the application, not move you to another
-  // workspace.
-  window.addEventListener('keydown', (ev) => {
-    if (state.mode === 'flat' || ev.ctrlKey || ev.altKey || ev.metaKey) return
-    const n = Number(ev.key)
-    if (Number.isInteger(n) && n >= 1 && n <= DISTRICTS.length) goDistrict(n - 1)
-    else if (ev.key === 'o' || ev.key === 'O') goOverview()
-  })
-
-  window.addEventListener(
-    'keydown',
-    (ev) => {
-      if (ev.ctrlKey && ev.altKey && ev.shiftKey && ev.key === 'Escape') {
-        ev.stopPropagation()
-        ev.preventDefault()
-        release()
-        canvas.blur()
-      }
-    },
-    { capture: true },
-  )
-}
 
 // --------------------------------------------------------------- the frame
+
+// WHY THE FRAME ENDS BY UNBINDING A VERTEX ARRAY.
+//
+// This was recorded for two months as "frames tear -- h264 damage-region
+// artifacts, unmeasured". It is not a damage-region problem and it is not in
+// the encoder. It is the shared context.
+//
+// three leaves one of its own VAOs bound when render() returns. Greenfield's
+// YUV->RGB pass then runs from a WebCodecs callback, in its own task, and
+// converts the decoded frame with a full-screen triangle strip:
+// `bindBuffer` + two `vertexAttribPointer` calls + `drawArrays`, and NO vertex
+// array of its own -- it was written for a context nobody else touches.
+// Without a VAO of its own, those pointer calls are recorded into whichever
+// VAO happens to be bound, which is three's, and the draw then reads the rest
+// of its attribute state from three's leftovers.
+//
+// Hence a triangle strip where one triangle lands and the other does not:
+// a clean DIAGONAL split, with the surviving half stretched across the quad --
+// exactly the "blurred giant glyphs" in docs/m8-native-flat.png. It also
+// silently corrupts the VAO three will use next.
+//
+// Measured before the fix: `OES_vertex_array_object` present, and
+// VERTEX_ARRAY_BINDING_OES non-null immediately after render() returned.
+//
+// Leaving the DEFAULT vertex array bound between frames costs one call and
+// means any Greenfield draw that lands between our frames operates on state
+// that belongs to nobody. three re-binds its own on the next resetState().
+function leaveNeutralVertexState() {
+  if (vaoExt) vaoExt.bindVertexArrayOES(null)
+  else if (gl.bindVertexArray) gl.bindVertexArray(null)
+}
 
 let lastT = 0
 function frame(now = 0) {
@@ -898,13 +284,40 @@ function frame(now = 0) {
     lastT = now
     adoptPending()
     syncPopups()
+    // After adoptPending, so a window that arrived this frame is already counted
+    // on the lane that advertises its road.
+    syncGantries()
     stepFlight(dt)
+    // THE ARCH IS AN OVERVIEW LABEL, SO IT ONLY EXISTS IN THE OVERVIEW.
+    //
+    // It was built "so a district is identifiable from the overview without
+    // reading anything" -- a good reason, applied at all times. From the road
+    // it is a bare crossbar hanging at y=300 across the head of your own
+    // street, with no uprights and nothing to say it is a gateway, and it is
+    // the first thing you see every time you look forward. Reported, twice.
+    // Serving its stated purpose means being visible exactly where that purpose
+    // applies.
+    for (const r of roads.values()) r.arch.visible = state.overview
     // Greenfield decoded into OUR context and left its own bindings behind.
     // three caches GL state and would otherwise trust a cache that is no longer
     // true. This call exists for exactly this kind of interop.
     renderer.resetState()
     renderer.render(scene, camera)
     state.frames++
+    leaveNeutralVertexState()
+
+    // Drain the shared context's error flag once per frame and REMEMBER it.
+    // Greenfield's Program.use() calls getError() straight after useProgram and
+    // blames the useProgram for whatever it finds -- but getError returns the
+    // first error since anyone last asked, so its "BUG? use gl program failed"
+    // is equally consistent with an error three left behind. Sampling here, at
+    // a known point, is what tells the two apart.
+    const glErr = gl.getError()
+    if (glErr !== gl.NO_ERROR) {
+      state.glErrors++
+      state.lastGlError = glErr
+      state.lastGlErrorFrame = state.frames
+    }
   } catch (e) {
     if (!state.frameError) state.frameError = String(e && e.stack ? e.stack : e)
   }
@@ -1120,7 +533,7 @@ window.__m1 = () => {
     out.mileposts.push({
       key: k,
       district: s.district,
-      districtName: DISTRICTS[s.district],
+      districtName: ws.get(s.district)?.name ?? null,
       milepost: s.milepost,
       slot: s.slot,
       built: !!s.mesh,
@@ -1129,10 +542,48 @@ window.__m1 = () => {
     if (s.mesh) out.sweeps.push({ milepost: s.milepost, district: s.district, ...sweepSign(s) })
   }
   out.camera = [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)]
-  out.districtNames = DISTRICTS
-  out.districtX = DISTRICTS.map((_, d) => districtX(d))
+  out.districtNames = ws.list().map((w) => w.name)
+  out.districtX = ws.list().map((w) => ws.laneX(w.id))
   return out
 }
+
+// THE INCREMENT-1 PROOF. The workspaces are a graph now, and the claim is that
+// nothing on screen moved: every lane sits where the old `districtX(index)`
+// arithmetic put it, every road in the scene belongs to an open workspace, and
+// every window's `district` names a workspace that exists.
+//
+// `laneMatchesOldArithmetic` is the one that matters -- it recomputes the
+// formula this change deleted and compares, rather than trusting that a layout
+// which LOOKS right is the same layout.
+window.__ws = () => {
+  const all = ws.list()
+  const OLD_DISTRICT_X = 2600
+  const rows = all.map((w, i) => ({
+    id: w.id,
+    name: w.name,
+    open: w.open,
+    exits: [...w.exits],
+    laneX: ws.laneX(w.id),
+    oldX: (i - (all.length - 1) / 2) * OLD_DISTRICT_X,
+    windows: [...signs.values()].filter((s) => s.district === w.id).length,
+    hasRoad: roads.has(w.id),
+  }))
+  return {
+    root: ws.root(),
+    standingIn: state.district,
+    span: ws.span(),
+    laneMatchesOldArithmetic: rows.every((r) => r.laneX === r.oldX),
+    roadsMatchOpenWorkspaces: rows.every((r) => r.hasRoad === r.open) && roads.size === rows.filter((r) => r.open).length,
+    everyWindowInAKnownWorkspace: [...signs.values()].every((s) => ws.has(s.district)),
+    rows,
+  }
+}
+window.__wsReset = () => ws.reset()
+
+// THE INCREMENT-2 PROOF. What every gantry is actually advertising, read off the
+// panels' own state rather than off the graph -- a lane that agrees with the
+// graph by construction would prove nothing about what is on the sign.
+window.__gantry = () => gantryReport()
 
 // Drive: move the camera down the road so occlusion by nearer posts is real.
 window.__drive = (z) => {
@@ -1236,7 +687,9 @@ window.__pointAtPopup = () => {
   }
 }
 
-window.__district = (d) => goDistrict(d)
+// Takes an id, or an index into the layout for everything written against the
+// old numeric districts (`__district(1)` still means the second road).
+window.__district = (d) => goDistrict(typeof d === 'number' ? ws.at(d)?.id : d)
 window.__overview = () => goOverview()
 
 // THE M4 PROOF. Every window must occupy its OWN rect in the ledger, and
@@ -1337,14 +790,67 @@ async function main() {
   const say = (t) => {
     if (status) status.textContent = t
   }
+  // A read-only handle on the same object the HUD reads. Every measurement in
+  // the spec so far had to be taken by editing the shell to print it; this
+  // makes the numbers reachable from outside without a rebuild.
+  window.rrabbit = state
+  window.rrabbitGl = () => gl
+  // Surface vs decoded-texture geometry, per sign. The h264 path pads to
+  // macroblocks, so these two are NOT the same rectangle, and every question
+  // about a sheared or offset frame is a question about the difference.
+  window.rrabbitSurfaces = () =>
+    [...signs.entries()].map(([k, s]) => {
+      const rs = s.view?.renderStates?.[SCENE_ID]
+      return {
+        key: k,
+        mime: s.view?.surface?.state?.bufferContents?.mimeType ?? null,
+        surface: rs?.size ? { w: rs.size.width, h: rs.size.height } : null,
+        texture: rs?.texture?.size ? { w: rs.texture.size.width, h: rs.texture.size.height } : null,
+      }
+    })
 
   try {
     buildWorld(document.getElementById('gl'))
     frame()
 
     await initWasm()
-    session = await createCompositorSession('rrabbit-m1')
+
+    // A NEW SESSION ID PER PAGE LOAD. This was the constant 'rrabbit-m1', and
+    // the proxy keys its own session off it -- so reloading the shell rejoined
+    // a proxy session whose client was bound to a browser connection that no
+    // longer existed. The symptom is a session that reports `app: open` and
+    // `surfaces: 0` with the application still running, and the documented
+    // workaround was to restart the proxy between runs.
+    //
+    // Reloading is what you do all day while building this, so the default is
+    // a clean session; `?session=<id>` pins one for the case where rejoining
+    // deliberately is the point.
+    const sessionId =
+      new URLSearchParams(location.search).get('session') ??
+      `rrabbit-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    session = await createCompositorSession(sessionId)
+    state.sessionId = sessionId
     window.__session = session
+
+    // The half of the stage that did not exist at buildWorld time. Travel needs
+    // it to raise a surface on flatten; RRABBIT needs it to see the views at
+    // all, so until this line adoptPending() reads an empty list and finds
+    // nothing -- which is correct, and is why it is safe to be running already.
+    ctx.session = session
+    attachTravel(ctx)
+    attachRrabbit(ctx)
+
+    // Ask for the clients to be closed on the way out, so the old session is
+    // reaped promptly rather than lingering until something times it out.
+    // `pagehide` and not `beforeunload`: the latter is not fired reliably on
+    // mobile or on a discarded tab, and this must not become a dialog.
+    window.addEventListener('pagehide', () => {
+      try {
+        session.terminate()
+      } catch {
+        /* leaving anyway -- a failure here must not block the unload */
+      }
+    })
 
     session.userShell.events.notify = (v, m) => {
       state.error = `${v}: ${m}`
@@ -1405,9 +911,10 @@ async function main() {
       const launcher = createAppLauncher(session, 'web')
       const clientName = params.get('client') ?? 'simple-shm'
       const plan = (params.get('windows') ?? '2,2,1').split(',').map((n) => parseInt(n, 10) || 0)
+      const lanes = ws.openList()
       ;(async () => {
-        for (let d = 0; d < Math.min(plan.length, DISTRICTS.length); d++) {
-          state.district = d
+        for (let d = 0; d < Math.min(plan.length, lanes.length); d++) {
+          state.district = lanes[d].id
           for (let i = 0; i < plan[d]; i++) {
             const app = launcher.launch(new URL(`${location.origin}/clients/${clientName}/app.html`), () => {})
             app.onError = (e) => {
@@ -1418,9 +925,9 @@ async function main() {
             await new Promise((r) => setTimeout(r, 2500))
           }
         }
-        state.district = 0
-        goDistrict(0)
-        say(`${DISTRICTS.length} districts -- keys 1..${DISTRICTS.length}, O for overview`)
+        state.district = ws.root()
+        goDistrict(ws.root())
+        say(`${lanes.length} workspaces -- keys 1..${lanes.length}, 0 for overview, or click a lane on the gantry`)
       })()
       say('compositor up -- opening windows across districts')
     }
