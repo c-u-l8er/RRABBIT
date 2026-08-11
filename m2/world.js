@@ -38,7 +38,13 @@ export const BG = 0x03040a
 //
 // So MILE now means what it says -- the distance between same-side neighbours --
 // and the sides are spaced independently of each other (windowZ below).
-export const MILE = 460
+//
+// 460 was the first honest value and it was still tight: a 300-wide sign turned
+// 24 degrees toward the road covers 122 units of z on its own, so consecutive
+// signs stood about two sign-widths apart and the nearer one still clipped the
+// edge of the next. 560 is the same layout with room to read each one whole as
+// you come up on it. Asked for.
+export const MILE = 560
 export const SCENE_ID = 'road'
 
 // ---- the shape of a road --------------------------------------------------
@@ -74,9 +80,11 @@ export const GATE_GAP = 900
 // files of traffic and they are spaced separately.
 //
 // The half-MILE offset on the right is what keeps the classic alternating look
-// when windows do alternate: left at 0, 460, 920 and right at 230, 690, 1150 is
-// exactly the old stagger, and now it survives three windows in a row on one
-// side instead of collapsing.
+// when windows do alternate: the left side lands on the MILEs and the right side
+// halfway between them, which is exactly the old stagger -- and it now survives
+// three windows in a row on one side instead of collapsing. Deliberately written
+// in terms of MILE rather than with the numbers in it, because the numbers have
+// already moved twice.
 export const windowZ = (laneIndex, side) =>
   ENTER_Z - GATE_GAP - laneIndex * MILE - (side > 0 ? MILE / 2 : 0)
 
