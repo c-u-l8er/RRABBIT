@@ -175,8 +175,14 @@ function syncRoads() {
     const x = ws.laneX(w.id)
     let r = roads.get(w.id)
     if (!r) {
+      // 14000 long, not 6000. The road used to end at z=-5600, which was past
+      // anything a 260-unit milepost could reach; same-side spacing is 460 now
+      // and the exit gate stands a clear run beyond the last window, so a road
+      // with a dozen windows on one side would have run out of tarmac under it.
+      // Fog stops at 4200 either way, so this costs one quad and shows nothing
+      // extra.
       const road = new THREE.Mesh(
-        new THREE.PlaneGeometry(320, 6000),
+        new THREE.PlaneGeometry(320, 14000),
         new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
       )
       road.rotation.x = -Math.PI / 2
@@ -195,7 +201,7 @@ function syncRoads() {
       r = { road, arch }
       roads.set(w.id, r)
     }
-    r.road.position.set(x, -30, -2600)
+    r.road.position.set(x, -30, -6600)
     r.arch.position.set(x, 300, 60)
   }
   // The status line names the workspace keys, and creating a lane from an exit
@@ -577,6 +583,7 @@ window.__m1 = () => {
       // milepost: a window opened from the enter gate stands where it was asked
       // to, and parity only decides when nobody said.
       side: s.side ?? null,
+      lane: s.lane ?? null,
       x: s.mesh ? Math.round(s.mesh.position.x) : null,
       z: s.mesh ? Math.round(s.mesh.position.z) : null,
       built: !!s.mesh,

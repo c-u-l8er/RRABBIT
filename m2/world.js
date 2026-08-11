@@ -22,11 +22,23 @@ export const ACC = 0xf2c14e
 export const COOL = 0x2de2e6
 export const BG = 0x03040a
 
-// Spacing between mileposts. RAVIO measured its way to S=300 for a change feed
-// of 15-25 rows/hour against a road passing 1800 signs/hour. Windows invert
-// that problem -- there are 5-30 of them, not thousands -- so this is NOT
-// RAVIO's S and must not be assumed to transfer (spec §7).
-export const MILE = 260
+// Spacing between two windows ON THE SAME SIDE of the road. RAVIO measured its
+// way to S=300 for a change feed of 15-25 rows/hour against a road passing 1800
+// signs/hour. Windows invert that problem -- there are 5-30 of them, not
+// thousands -- so this is NOT RAVIO's S and must not be assumed to transfer
+// (spec §7).
+//
+// IT WAS 260, AND IT MEANT SOMETHING ELSE. It used to be the gap between
+// consecutive MILEPOSTS, with sides forced to alternate -- so same-side
+// neighbours were really 520 apart and 260 was never the distance between two
+// signs you could see at once. Letting the enter gate choose a side broke that
+// silently: ask for the left three times and you get three 300-wide signs 260
+// apart, each one standing in front of the next. Reported as new windows being
+// too close to see the full contents of while scrolling by.
+//
+// So MILE now means what it says -- the distance between same-side neighbours --
+// and the sides are spaced independently of each other (windowZ below).
+export const MILE = 460
 export const SCENE_ID = 'road'
 
 // ---- the shape of a road --------------------------------------------------
@@ -53,13 +65,35 @@ export const SCENE_ID = 'road'
 export const ENTER_Z = -180
 export const GATE_GAP = 900
 
-// A window's z from its milepost. Was `-milepost * MILE` inline in makeSign;
-// it is a property of the ROAD, so it lives with the road.
-export const windowZ = (milepost) => ENTER_Z - GATE_GAP - (milepost - 1) * MILE
+// Where a window stands, from its ordinal ON ITS OWN SIDE of the road.
+//
+// NOT from its milepost. The milepost is the window's ADDRESS -- unique on the
+// road, never reissued, the thing input and the flatten resolve through -- and
+// tying position to it made the two sides share one sequence, so what the left
+// side did decided where the right side's next window went. They are separate
+// files of traffic and they are spaced separately.
+//
+// The half-MILE offset on the right is what keeps the classic alternating look
+// when windows do alternate: left at 0, 460, 920 and right at 230, 690, 1150 is
+// exactly the old stagger, and now it survives three windows in a row on one
+// side instead of collapsing.
+export const windowZ = (laneIndex, side) =>
+  ENTER_Z - GATE_GAP - laneIndex * MILE - (side > 0 ? MILE / 2 : 0)
 
-// The exit gantry stands one clear run past the LAST window. An empty road still
-// has one -- a workspace with nothing in it is still somewhere you can leave.
-export const exitZ = (lastMilepost) => windowZ(Math.max(1, lastMilepost)) - GATE_GAP
+// The exit gate stands one clear run past the LAST window on a road -- read off
+// the signs actually standing there rather than computed from a count, because
+// the two sides advance independently and neither one's ordinal knows how far
+// down the road the other has got.
+//
+// An empty road still has an exit gate: a workspace with nothing in it is still
+// somewhere you can leave.
+export function lastWindowZ(district) {
+  let z = windowZ(0, -1)
+  for (const s of signs.values()) if (s.mesh && s.district === district) z = Math.min(z, s.mesh.position.z)
+  return z
+}
+
+export const exitZOf = (district) => lastWindowZ(district) - GATE_GAP
 
 // How far ahead of you a gantry sits when you stop in front of it. Measured, not
 // chosen: at 320 units the 58-degree frustum is only 355 units tall about y=105

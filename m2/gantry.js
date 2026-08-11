@@ -33,7 +33,7 @@
 // that already has an owner.
 
 import * as THREE from 'three'
-import { signs, ACC, COOL, ENTER_Z, exitZ } from './world.js'
+import { signs, ACC, COOL, ENTER_Z, exitZOf } from './world.js'
 import * as ws from './workspaces.js'
 
 let scene = null
@@ -41,7 +41,11 @@ export function attachGantry(c) {
   scene = c.scene
 }
 
-const BEAM_Y = 300
+// The beam sits lower than it used to, to make room ABOVE it for the name board.
+// At 440 units away the frustum top is y=349, so a board hung over a beam at 300
+// would have been clipped -- the same trap the first gantry fell into.
+const BEAM_Y = 262
+const BOARD_H = 46
 // The gantry spans THE ROAD and nothing wider. It used to be 400 across with
 // 190-wide panels, which put its outer edge over the windows standing beside the
 // road -- see SIGN_OFFSET in rrabbit.js for the measurement. Uprights sit at the
@@ -90,6 +94,43 @@ function drawPanel(canvas, p) {
     g.lineTo(W - 40, 40)
     g.stroke()
   }
+}
+
+// WHICH ROAD IS THIS. Reported as missing: the enter gate said what its two
+// buttons did and never said where you were, so the one sign you meet on
+// arriving at a workspace was the one that could not tell you which workspace it
+// was. It goes on BOTH gates -- the question is just as live when you are
+// leaving -- and it is deliberately not a panel: it carries no action, it is not
+// clickable, and it must not look like something that is.
+function drawBoard(canvas, name, count) {
+  const g = canvas.getContext('2d')
+  const W = canvas.width
+  const H = canvas.height
+  g.clearRect(0, 0, W, H)
+  g.fillStyle = '#0a0d16'
+  g.fillRect(0, 0, W, H)
+  g.strokeStyle = ACC_CSS
+  g.lineWidth = 6
+  g.strokeRect(3, 3, W - 6, H - 6)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.fillStyle = ACC_CSS
+  g.font = 'bold 62px ui-monospace, monospace'
+  g.fillText(`${name}   ·   ${count === 1 ? '1 window' : `${count} windows`}`, W / 2, H / 2 + 4)
+}
+
+function makeBoard() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 1024
+  canvas.height = 128
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(BEAM_W, BOARD_H),
+    new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+  )
+  mesh.position.set(0, BEAM_Y + BOARD_H / 2 + 12, 6)
+  return { mesh, tex, canvas }
 }
 
 function makePanel() {
@@ -162,8 +203,11 @@ function buildGate(kind) {
   trim.position.set(0, BEAM_Y - 12, 8)
   group.add(trim)
 
+  const board = makeBoard()
+  group.add(board.mesh)
+
   scene.add(group)
-  return { group, kind, panels: [] }
+  return { group, kind, panels: [], board, boardKey: null }
 }
 
 function syncGate(id, kind, z, row) {
@@ -174,6 +218,17 @@ function syncGate(id, kind, z, row) {
     gates.set(gkey, gate)
   }
   gate.group.position.set(ws.laneX(id), 0, z)
+
+  const w = ws.get(id)
+  const here = countIn(id)
+  const bkey = `${w?.name}:${here}`
+  if (bkey !== gate.boardKey) {
+    gate.boardKey = bkey
+    gate.boardName = w?.name ?? id
+    gate.boardCount = here
+    drawBoard(gate.board.canvas, gate.boardName, here)
+    gate.board.tex.needsUpdate = true
+  }
 
   // Rebuild the row only when what it SAYS changes -- `key` folds the action,
   // the name, the count and the open state into one string, so a road whose
@@ -231,9 +286,7 @@ export function syncGantries() {
 
     // The exit gate stands past the LAST window, so it moves down the road as
     // the road fills up.
-    let last = 0
-    for (const s of signs.values()) if (s.district === w.id) last = Math.max(last, s.milepost)
-    want.add(syncGate(w.id, 'exit', exitZ(last), exitRow(w.id)))
+    want.add(syncGate(w.id, 'exit', exitZOf(w.id), exitRow(w.id)))
   }
 
   for (const [k, gate] of [...gates]) {
@@ -244,6 +297,7 @@ export function syncGantries() {
       if (o.material) o.material.dispose()
     })
     for (const p of gate.panels) p.tex.dispose()
+    gate.board.tex.dispose()
     gates.delete(k)
   }
 }
@@ -279,6 +333,7 @@ export const gantryReport = () =>
   [...gates.entries()].map(([k, gate]) => ({
     gate: k,
     kind: gate.kind,
+    board: gate.boardKey,
     z: Math.round(gate.group.position.z),
     x: Math.round(gate.group.position.x),
     panels: gate.panels.map((p) => ({ title: p.title, sub: p.sub, tone: p.tone, action: p.action })),

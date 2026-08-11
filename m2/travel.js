@@ -16,7 +16,7 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, hooks, keyOf, SCENE_ID, exitZ, GANTRY_VIEW } from './world.js'
+import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW } from './world.js'
 import * as ws from './workspaces.js'
 import { gantryMeshes, actionOf, setHovered } from './gantry.js'
 
@@ -33,9 +33,22 @@ const raycaster = new THREE.Raycaster()
 // ------------------------------------------------------------- the district
 
 // How far down the road you have driven, in world units, 0 at the start and
-// negative going away. It is a property of the ROAD, not of a district: step
-// sideways into another workspace and you are still the same distance along.
+// negative going away.
+//
+// EACH WORKSPACE REMEMBERS ITS OWN. It used to be one number shared by every
+// road -- "step sideways into another workspace and you are still the same
+// distance along" -- which is a coherent idea and is not what a workspace is
+// for. You leave a road parked in front of the thing you were doing, and coming
+// back to find yourself somewhere else because another road moved is the same
+// complaint as the flat zoom being forgotten: a position you chose, discarded
+// by something you did elsewhere. Reported.
+//
+// The distinction that survives is between the two ways of arriving, and it is
+// the one goDistrict already draws: a workspace KEY is a step sideways and
+// restores where you were, while taking an EXIT is a junction and puts you at
+// the head of the new road.
 let roadZ = 0
+const roadMemory = new Map()
 
 // The road runs from the head to the EXIT GATE, and the wheel stops at both.
 //
@@ -46,13 +59,11 @@ let roadZ = 0
 // enter gate gets when you are parked at the head -- so you finish the road
 // looking at the sign rather than standing under it.
 function roadBoundsOf(id) {
-  // ONE workspace's own signs, not every sign in the world: roads are different
-  // lengths, and borrowing another workspace's last milepost lets you drive off
-  // the end of a short one into nothing.
-  let last = 0
-  for (const s of signs.values()) if (s.mesh && s.district === id) last = Math.max(last, s.milepost)
+  // exitZOf reads ONE workspace's own signs, not every sign in the world: roads
+  // are different lengths, and borrowing another workspace's last window lets
+  // you drive off the end of a short one into nothing.
   // camera z is 260 + roadZ, and we want (camera z - exitZ) === GANTRY_VIEW.
-  return { near: 0, far: exitZ(last) + GANTRY_VIEW - 260 }
+  return { near: 0, far: exitZOf(id) + GANTRY_VIEW - 260 }
 }
 
 const roadBounds = () => roadBoundsOf(state.district)
@@ -115,20 +126,25 @@ function overviewPose() {
 //   place a brand-new workspace makes sense to arrive at: its entrance, where
 //   windows are opened.
 //
-//   otherwise -- you pressed a workspace key, which is a step sideways, and
-//   `roadZ` is a property of the road rather than of a workspace: you are still
-//   the same distance along.
+//   otherwise -- you pressed a workspace key, which is a step sideways, and you
+//   are put back exactly where you left THAT road (see roadMemory).
 //
 // Either way roadZ is CLAMPED to the destination's own bounds. Roads are
 // different lengths now that the exit gate stands past the last window, so
 // carrying a position from a long road onto a short one put the camera beyond
 // its exit gate, looking back up an empty road at nothing. Measured: arriving on
-// a fresh workspace at roadZ -2580 whose far bound was -1800.
+// a fresh workspace at roadZ -2580 whose far bound was -1800. The clamp still
+// matters with per-road memory, because a road SHRINKS when its last window
+// closes.
 function goDistrict(id, { atHead = false } = {}) {
   const w = ws.get(id)
   if (!w || !w.open) return null
+  // Park the road you are leaving before you leave it.
+  if (state.district) roadMemory.set(state.district, roadZ)
   const b = roadBoundsOf(id)
-  roadZ = atHead ? b.near : Math.min(b.near, Math.max(b.far, roadZ))
+  const want = atHead ? b.near : (roadMemory.get(id) ?? b.near)
+  roadZ = Math.min(b.near, Math.max(b.far, want))
+  roadMemory.set(id, roadZ)
   state.district = id
   state.overview = false
   setRange(FOG_DRIVE, FAR_DRIVE)
@@ -560,6 +576,7 @@ function installInput() {
       // deltaY is NEGATIVE when the wheel rolls away from you, which everything
       // else in the world treats as forward/closer -- so it adds, not subtracts.
       roadZ = Math.min(near, Math.max(far, roadZ + ev.deltaY * 0.6))
+      roadMemory.set(state.district, roadZ)
       const p = districtPose(state.district)
       camera.position.copy(p.pos)
       camera.lookAt(p.look)
@@ -590,7 +607,12 @@ function installInput() {
   }
 
   // The road is camera state, so nothing in the DOM can be asked where you are.
-  window.__road = () => ({ roadZ, ...roadBounds(), cameraZ: camera.position.z })
+  window.__road = () => ({
+    roadZ,
+    ...roadBounds(),
+    cameraZ: camera.position.z,
+    parked: Object.fromEntries([...roadMemory].map(([k, v]) => [k, Math.round(v)])),
+  })
 
   // What the GPU is actually holding. A shell that gets slower with every
   // navigation is leaking something, and the only honest way to tell a leak

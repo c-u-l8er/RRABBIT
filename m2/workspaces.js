@@ -101,6 +101,10 @@ function install(list, root) {
       // restored from disk would start the first window of the session at
       // milepost 7 with nothing at 1..6.
       next: 1,
+      // How many windows stand on each SIDE of this road. The milepost is the
+      // address; these decide position, and they advance independently so that
+      // what the left side does cannot move the right side's next window.
+      lanes: { l: 0, r: 0 },
     })
   }
   rootId = root ?? list[0]?.id ?? null
@@ -207,6 +211,15 @@ export function takeMilepost(id) {
   const n = nodes.get(id)
   if (!n) return 1
   return n.next++
+}
+
+// The next free slot on one side of a road. Paired with takeMilepost: one gives
+// the window its name, this one gives it its place.
+export function takeLane(id, side) {
+  const n = nodes.get(id)
+  if (!n) return 0
+  const k = side > 0 ? 'r' : 'l'
+  return n.lanes[k]++
 }
 
 export function add({ id, name, exits = [], open = true } = {}) {

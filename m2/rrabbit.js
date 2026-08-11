@@ -112,7 +112,7 @@ function adoptSurfaceTexture(rs, view) {
   return { rt, tex }
 }
 
-function makeSign(view, milepost, district, side) {
+function makeSign(view, milepost, district, side, lane) {
   const rs = view.renderStates[SCENE_ID]
   if (!rs || !rs.texture || !rs.texture.texture) return null
   const { width, height } = rs.size
@@ -133,7 +133,7 @@ function makeSign(view, milepost, district, side) {
   // milepost parity, like RAVIO's billboards; it is now whatever the window was
   // opened with, because "open one on the left" is a thing you can ask for from
   // the enter gantry. Parity is still the default when nobody said.
-  mesh.position.set(ws.laneX(district) + side * SIGN_OFFSET, 40 + sh / 2, windowZ(milepost))
+  mesh.position.set(ws.laneX(district) + side * SIGN_OFFSET, 40 + sh / 2, windowZ(lane, side))
   mesh.rotation.y = -side * 0.42
   scene.add(mesh)
 
@@ -187,6 +187,7 @@ function adoptPending() {
           district: existing.district,
           slot: existing.slot,
           side: existing.side,
+          lane: existing.lane,
         })
       }
       continue
@@ -202,14 +203,19 @@ function adoptPending() {
     // the district is: the surface does not exist when the click happens, so
     // the request has to wait here for it.
     const side = existing?.side ?? sideQueue.shift() ?? (milepost % 2 === 0 ? 1 : -1)
+    // The place on that side, taken once and never recomputed -- invariant 6
+    // covers this for the same reason it covers the milepost.
+    const lane = existing?.lane ?? ws.takeLane(district, side)
     placeInLedger(view, slot)
-    const built = makeSign(view, milepost, district, side)
+    const built = makeSign(view, milepost, district, side, lane)
     // The view is kept so input can be mapped back into the flat output. It is
     // re-read every frame rather than cached at build time: a view object is
     // replaced when a surface is remapped.
     signs.set(
       k,
-      built ? { milepost, district, slot, side, view, ...built } : { milepost, district, slot, side, view },
+      built
+        ? { milepost, district, slot, side, lane, view, ...built }
+        : { milepost, district, slot, side, lane, view },
     )
     if (built) built.mesh.userData.signKey = k
   }
