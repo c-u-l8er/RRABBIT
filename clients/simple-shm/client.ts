@@ -29,7 +29,6 @@ import {
 } from '@gfld/client-protocol'
 
 const MAX_BUFFER_ALLOC = 2 as const
-const KEY_ESC = 1 as const
 
 interface ClientDisplay {
   display: WlDisplay
@@ -396,9 +395,22 @@ class Display implements ClientDisplay, WlRegistryEvents, WlShmEvents, XdgWmBase
   }
 
   key(serial: number, time: number, key: number, state: number): void {
-    if (key == KEY_ESC && state) {
-      terminate()
-    }
+    // ESC DOES NOT QUIT, and must not be given back that job.
+    //
+    // Upstream's simple-shm exits on Esc because it is a standalone demo you
+    // launch from a terminal and want to dismiss. Here it is the stand-in for
+    // "a window" in a shell whose windows are the whole interface, and Esc is
+    // the first key anybody presses to mean *get me out of this thing*. Wiring
+    // that to terminate() meant the shell appeared to DESTROY the window you
+    // were trying to leave -- reported three times as "windows are disappearing
+    // after pressing esc", and each time it was this line, not the compositor
+    // and not the shell.
+    //
+    // The compositor still closes it the proper way through xdgToplevelClose.
+    void serial
+    void time
+    void key
+    void state
   }
 
   keymap(format: number, fd: any, size: number): void {
