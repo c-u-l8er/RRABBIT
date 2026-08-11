@@ -42,9 +42,18 @@ export const BG = 0x03040a
 // 460 was the first honest value and it was still tight: a 300-wide sign turned
 // 24 degrees toward the road covers 122 units of z on its own, so consecutive
 // signs stood about two sign-widths apart and the nearer one still clipped the
-// edge of the next. 560 is the same layout with room to read each one whole as
-// you come up on it. Asked for.
-export const MILE = 560
+// edge of the next. 560, then 660, both asked for.
+//
+// `?mile=N` overrides it, because this has now been tuned by eye three times and
+// the loop for that should not run through a rebuild. It only affects where
+// windows adopted AFTER the page loads are placed -- placement is an address and
+// is never recomputed (invariant 6) -- so it is a reload knob, which is what a
+// layout constant should be.
+const MILE_DEFAULT = 660
+export const MILE = (() => {
+  const n = Number(new URLSearchParams(location.search).get('mile'))
+  return Number.isFinite(n) && n >= 200 && n <= 3000 ? n : MILE_DEFAULT
+})()
 export const SCENE_ID = 'road'
 
 // ---- the shape of a road --------------------------------------------------
