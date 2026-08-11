@@ -104,6 +104,49 @@ const forgetStatus = () => {
 
 // ---------------------------------------------------------------- the world
 
+// Only ever called once the request has ALREADY failed, so it is free to be
+// destructive: claiming a 2d context on a canvas that could not give us a WebGL
+// one costs nothing, and a throwaway canvas is thrown away.
+//
+// The three answers, in the order that tells them apart:
+//
+//   1. The canvas is already a WebGL2 canvas. `getContext('webgl')` does not
+//      return an existing 'webgl2' context -- they are distinct types -- which
+//      is the same mismatch the header warns about for Greenfield, arriving from
+//      the other direction.
+//   2. A FRESH canvas can still get a context, so WebGL works on this machine
+//      and it is this page that cannot have one. In practice that means the
+//      browser's live-context limit, which a shell reloaded all afternoon while
+//      its Greenfield sessions outlive the page will reach. Closing the tab and
+//      opening it again is the fix, and now it says so.
+//   3. Neither can. There is no WebGL here at all -- a disabled or blocklisted
+//      GPU, or the software path refusing. This is the one that is not our
+//      problem to retry, and it is the answer the T&R image has always been at
+//      risk of giving (spec: WebGL over Xorg scfb with no DRM is a hypothesis).
+function whyNoContext(canvas) {
+  const already2 = (() => {
+    try {
+      return !!canvas.getContext('webgl2')
+    } catch {
+      return false
+    }
+  })()
+  if (already2) {
+    return 'WebGL1 refused because this canvas already holds a WebGL2 context. The shell must own a WebGL1 context (see the header) -- something else called getContext on #gl first.'
+  }
+  const freshWorks = (() => {
+    try {
+      return !!document.createElement('canvas').getContext('webgl')
+    } catch {
+      return false
+    }
+  })()
+  if (freshWorks) {
+    return 'WebGL works here but this page could not get a context -- almost always the browser\'s live-context limit, reached by reloading the shell while old sessions still hold theirs. Close the tab and open it again.'
+  }
+  return 'No WebGL context is available in this browser at all (fresh canvases are refused too), so this is the machine or the browser, not the shell. Check hardware acceleration, and on the T&R image whether the software path survives Xorg scfb.'
+}
+
 function buildWorld(canvas) {
   // Create the context OURSELVES, as WebGL1, so that Greenfield's later
   // getContext('webgl') returns this very object. If three were left to make a
@@ -116,6 +159,14 @@ function buildWorld(canvas) {
     antialias: true,
     preserveDrawingBuffer: true,
   })
+  // A NULL CONTEXT IS THREE DIFFERENT FAULTS AND THEY NEED DIFFERENT ANSWERS.
+  //
+  // Reported as `TypeError: Cannot read properties of null (reading
+  // 'getExtension')` -- the first line that happened to touch `gl` after the
+  // request quietly returned null, which names neither the request nor the
+  // reason. Every one of these is recoverable and none of them is a bug in this
+  // file, so the shell has to say which one it is.
+  if (!gl) throw new Error(whyNoContext(canvas))
   renderer = new THREE.WebGLRenderer({ canvas, context: gl })
   renderer.setPixelRatio(1)
 
@@ -630,6 +681,10 @@ window.__ws = () => {
 }
 window.__wsReset = () => ws.reset()
 
+// The diagnosis, reachable without having to cause the failure. A message that
+// only appears when the shell is already dead is a message nobody can check.
+window.__whyNoContext = (canvas) => whyNoContext(canvas ?? document.createElement('canvas'))
+
 // THE INCREMENT-2 PROOF. What every gantry is actually advertising, read off the
 // panels' own state rather than off the graph -- a lane that agrees with the
 // graph by construction would prove nothing about what is on the sign.
@@ -899,6 +954,21 @@ async function main() {
         session.terminate()
       } catch {
         /* leaving anyway -- a failure here must not block the unload */
+      }
+      // AND GIVE THE GL CONTEXT BACK.
+      //
+      // Terminating the session was only half of leaving. A browser allows a
+      // small number of live WebGL contexts -- Chrome drops the oldest, Firefox
+      // refuses -- and this page holds one for as long as the browser has not
+      // got round to collecting it. Iterating on the shell means reloading it
+      // dozens of times an hour, each load asking for another, and the failure
+      // when the limit is hit is a null context on a page that worked a minute
+      // ago. Handing it back explicitly is what makes a reload cost nothing.
+      try {
+        renderer.dispose()
+        gl.getExtension('WEBGL_lose_context')?.loseContext()
+      } catch {
+        /* same -- nothing here is worth blocking an unload for */
       }
     })
 
