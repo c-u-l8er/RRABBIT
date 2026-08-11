@@ -314,20 +314,68 @@ function release() {
 // place with its neighbours either side. One more click flattens, which is the
 // same gesture it has always been.
 //
-// VIEW is how far short of the window to stop. Parking level with it would put
-// it at 90 degrees to your left or right, edge-on and unreadable -- a sign is
-// something you come up on.
+// HOW FAR SHORT OF THE WINDOW TO STOP, computed from the sign rather than
+// chosen.
+//
+// It was a flat 420 and that was a guess, which is the kind of number this file
+// is supposed to not contain. At 420 the sign's TOP EDGE lands one pixel above
+// the viewport -- a window standing 300 tall with its centre at y=190 subtends
+// more than the frustum's half-height at that range -- so you arrived at the
+// window you asked for and could not see all of it. Reported.
+//
+// And a constant could not have been right anyway: a sign is sized to its own
+// surface (makeSign), so a tall client is a tall sign and needs more room than a
+// square one. So solve it, the same way pixelExactDistance does for the flatten.
+//
+// Camera is at road level looking straight down the road, so in camera space the
+// sign is a box `d` ahead, `cx` to one side, spanning yBot..yTop. Rotated by
+// `t`, its half-width splits into an x extent and a z extent -- the NEAR corner
+// is closer than d and the FAR corner further, and each binds a different edge
+// of the frame:
+//
+//   vertical   the nearest part subtends the most, so it decides the top edge
+//   horizontal the far corner has the largest x, the near corner the smallest z
+//
+// M keeps the whole thing inside 86% of the frame rather than exactly touching
+// the edges, because a sign flush against the border reads as cropped even when
+// it is not.
+function roadViewDistance(s) {
+  const g = s.mesh.geometry.parameters
+  const t = Math.abs(s.mesh.rotation.y)
+  const xExtent = (g.width / 2) * Math.cos(t)
+  const zExtent = (g.width / 2) * Math.sin(t)
+  const cx = Math.abs(s.mesh.position.x - ws.laneX(s.district))
+  const camY = 105
+  const yTop = s.mesh.position.y + g.height / 2
+  const yBot = s.mesh.position.y - g.height / 2
+
+  const M = 0.86
+  const vTan = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * M
+  const hTan = vTan * camera.aspect
+
+  const dV = Math.max(Math.abs(yTop - camY), Math.abs(camY - yBot)) / vTan + zExtent
+  const dFar = (cx + xExtent) / hTan - zExtent
+  const dNear = (cx - xExtent) / hTan + zExtent
+  return Math.max(dV, dFar, dNear, 240)
+}
+
+// Come out of the map ON THE ROAD BESIDE a particular window.
+//
+// Not flattened into it: the ask was to "transfer back to the road view looking
+// at that window", and the road view is where you can see it standing in its
+// place with its neighbours either side. One more click flattens, which is the
+// same gesture it has always been.
 function goWindow(district, milepost) {
   const w = ws.get(district)
   if (!w || !w.open) return null
   const s = [...signs.values()].find((x) => x.district === district && x.milepost === milepost && x.mesh)
   if (!s) return null
-  const VIEW = 420
-  // camera z is 260 + roadZ, and we want (camera z - window z) === VIEW.
+  const view = roadViewDistance(s)
+  // camera z is 260 + roadZ, and we want (camera z - window z) === view.
   // Handed to goDistrict as an ARGUMENT -- see `at` there for what writing it
   // into roadMemory instead cost.
-  const at = s.mesh.position.z + VIEW - 260
-  state.lastMapPick = { district, milepost, at: Math.round(at) }
+  const at = s.mesh.position.z + view - 260
+  state.lastMapPick = { district, milepost, view: Math.round(view), at: Math.round(at) }
   return goDistrict(district, { at })
 }
 

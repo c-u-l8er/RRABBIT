@@ -821,6 +821,38 @@ window.__ledger = () => {
   return { distinctRects: keys.size === rows.length, rows }
 }
 
+// IS THE WHOLE SIGN ON SCREEN? Projects the mesh's own four corners, so it
+// measures what is drawn rather than agreeing with the arithmetic that placed
+// the camera. `__flatMetrics` does the same thing for the flatten, and for the
+// same reason: the first road-view distance was a constant that put the sign's
+// top edge one pixel above the viewport, and nothing in the shell could say so.
+window.__onScreen = (district = state.district, milepost = state.lastMapPick?.milepost) => {
+  const s = [...signs.values()].find((x) => x.district === district && x.milepost === milepost && x.mesh)
+  if (!s) return { found: false, district, milepost }
+  const g = s.mesh.geometry.parameters
+  const W = renderer.domElement.width
+  const H = renderer.domElement.height
+  const corner = (sx, sy) => {
+    const v = s.mesh.localToWorld(new THREE.Vector3((g.width / 2) * sx, (g.height / 2) * sy, 0)).project(camera)
+    return [+(((v.x + 1) / 2) * W).toFixed(1), +(((1 - v.y) / 2) * H).toFixed(1)]
+  }
+  const pts = [corner(-1, 1), corner(1, 1), corner(1, -1), corner(-1, -1)]
+  const xs = pts.map((p) => p[0])
+  const ys = pts.map((p) => p[1])
+  return {
+    found: true,
+    district,
+    milepost,
+    viewport: [W, H],
+    corners: pts,
+    box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map((n) => +n.toFixed(1)),
+    fullyOnScreen: Math.min(...xs) >= 0 && Math.min(...ys) >= 0 && Math.max(...xs) <= W && Math.max(...ys) <= H,
+    // How much of each axis it uses. Fully on screen but 3% tall would be a
+    // different complaint with the same answer.
+    coverage: [+((Math.max(...xs) - Math.min(...xs)) / W).toFixed(3), +((Math.max(...ys) - Math.min(...ys)) / H).toFixed(3)],
+  }
+}
+
 window.__flatten = (m) => flattenTo(m)
 window.__release = () => release()
 
