@@ -200,9 +200,28 @@ function pixelExactDistance(s) {
 // Keyed by ADDRESS, not by view key: a surface that is remapped gets a new view
 // but keeps its milepost (invariant 6), and mileposts are never reissued, so a
 // later window cannot inherit a dead one's zoom.
+// How far the wheel may take you either way, as a fraction of pixel-exact
+// distance. Named because the DEFAULT is now one of them and the two must not
+// drift apart: a default outside the clamp would be shoved back by the first
+// scroll, which reads as the zoom jumping when you touch it.
+const ZOOM_IN_LIMIT = 0.65
+const ZOOM_OUT_LIMIT = 1.5
+
 const zoomMemory = new Map()
 const zoomKey = (district, milepost) => `${district}:${milepost}`
-const rememberedZoom = (s) => zoomMemory.get(zoomKey(s.district, s.milepost)) ?? 0
+// A window you have never zoomed arrives ALL THE WAY IN -- the wheel's own near
+// limit, not a separate number -- because that is what was asked for, and
+// because a window you have just flown into is one you are about to work in.
+//
+// THIS RETIRES THE LAST OF "ARRIVING IS ALWAYS PIXEL-EXACT". The cost was
+// already stated when zoom became per-window; it is now paid by default rather
+// than only by windows you had zoomed, so it is worth saying flatly: at
+// ZOOM_IN_LIMIT the surface is drawn at about 2.9x and IS RESAMPLED, and a tall
+// one can exceed the viewport and be cropped. Scroll out once and that is
+// remembered for that window forever, which is the whole point of the memory.
+// `state.flatZoom === 0` is still exactly the pixel-exact case.
+const defaultZoom = (s) => -ZOOM_IN_LIMIT * pixelExactDistance(s)
+const rememberedZoom = (s) => zoomMemory.get(zoomKey(s.district, s.milepost)) ?? defaultZoom(s)
 
 function poseFor(s) {
   // A PlaneGeometry faces +Z; after rotation.y = t its normal is (sin t, 0, cos t).
@@ -259,7 +278,7 @@ function zoomFlat(d) {
   const base = pixelExactDistance(s)
   // Closer than a third and the surface fills more than the frame; further than
   // 2.5x and you are looking at the road again, which is what release is for.
-  flatZoom = Math.min(base * 1.5, Math.max(-base * 0.65, flatZoom + d))
+  flatZoom = Math.min(base * ZOOM_OUT_LIMIT, Math.max(-base * ZOOM_IN_LIMIT, flatZoom + d))
   const t = s.mesh.rotation.y
   const normal = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
   camera.position.copy(s.mesh.position).addScaledVector(normal, base + flatZoom)
@@ -350,7 +369,9 @@ function stepFlight(dt) {
       const arriving = [...signs.values()].find(
         (x) => x.milepost === target && x.district === flatTargetDistrict,
       )
-      flatZoom = arriving ? rememberedZoom(arriving) : 0
+      // `.mesh` and `.size` are what pixelExactDistance reads, and a sign whose
+      // surface has not been built yet has neither.
+      flatZoom = arriving?.mesh ? rememberedZoom(arriving) : 0
       state.flatZoom = Math.round(flatZoom)
       // A gesture cannot span a flight. Without this, a wheel still in flight
       // when you arrive would be owned by whatever the LAST window decided.
