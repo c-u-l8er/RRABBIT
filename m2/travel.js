@@ -368,10 +368,31 @@ function holdFlatScale() {
   // be reversed.
   const d = Math.max(base / job.scale0, fitDistance(s))
   applyFlatZoom(s, d - base)
-  if (settling && (performance.now() > settling.until || (s.size.width === settling.w && s.size.height === settling.h))) {
+  if (!settling) return
+
+  const arrived = s.size.width === settling.w && s.size.height === settling.h
+  if (arrived || performance.now() > settling.until) {
     // One last apply at the size that actually arrived, then let go -- the zoom
     // it lands on is now this window's, remembered like any other.
+    if (!arrived) state.resizeGaveUp = { asked: [settling.w, settling.h], got: [s.size.width, s.size.height] }
     settling = null
+    return
+  }
+
+  // ASK AGAIN UNTIL IT IS TRUE.
+  //
+  // configureSize is fire-and-forget: there is no failure to catch and no reply
+  // that means "applied". A client that is mid-reallocation, or holding both its
+  // buffers, simply does nothing with a configure -- measured, a drag that asked
+  // for 355x338 left the surface at 271x268 and nothing anywhere said so. The
+  // size you let go at is the one that matters, so it is re-asked at a rate a
+  // client can absorb until the surface is observed to be it, or until the
+  // deadline says the client is refusing rather than lagging.
+  if (performance.now() - settling.sentAt > 220) {
+    settling.sentAt = performance.now()
+    settling.role.configureSize({ width: settling.w, height: settling.h })
+    state.configures = (state.configures ?? 0) + 1
+    state.resizeRetries = (state.resizeRetries ?? 0) + 1
   }
 }
 
@@ -418,17 +439,28 @@ function surfacePerScreenPx(s) {
 // the same pixels a hand would.
 function handlePoint() {
   const s = flatSign()
-  if (!s?.handle?.visible) return null
-  const v = s.handle.getWorldPosition(new THREE.Vector3()).project(camera)
+  if (!s?.handle?.visible || !s.grabPad) return null
+  const v = s.grabPad.getWorldPosition(new THREE.Vector3()).project(camera)
   return {
     x: ((v.x + 1) / 2) * renderer.domElement.clientWidth,
     y: ((1 - v.y) / 2) * renderer.domElement.clientHeight,
   }
 }
 
+// The grip brightens and the cursor changes when the pointer is over the pad --
+// the same signal the gantry lanes give, and the only thing that says a control
+// is there before you press it.
+function setGrabHot(s, hot) {
+  if (!s?.handle) return
+  if (hot) s.handle.material.color.setRGB(1.6, 1.6, 1.6)
+  else s.handle.material.color.setHex(0xffffff)
+  renderer.domElement.style.cursor = hot ? 'nesw-resize' : ''
+  state.grabHot = !!hot
+}
+
 function handleUnder(ev) {
   const s = flatSign()
-  if (!s?.handle?.visible) return null
+  if (!s?.handle?.visible || !s.grabPad) return null
   const rect = renderer.domElement.getBoundingClientRect()
   raycaster.setFromCamera(
     new THREE.Vector2(
@@ -437,7 +469,7 @@ function handleUnder(ev) {
     ),
     camera,
   )
-  return raycaster.intersectObject(s.handle, false).length ? s : null
+  return raycaster.intersectObject(s.grabPad, false).length ? s : null
 }
 
 function startResize(s, ev) {
@@ -464,6 +496,77 @@ function startResize(s, ev) {
   return true
 }
 
+// A pointermove can fire many times between two frames, and every configureSize
+// is a round trip the client has to ack and a buffer it may reallocate. Compute
+// per event, SEND per frame.
+// ONE CONFIGURE IN FLIGHT AT A TIME.
+//
+// configureSize does not resize anything -- it asks, and the client acks and
+// reallocates in its own time. Greenfield's scheduleConfigure DROPS a new
+// request outright when one is already queued and differs, so a stream of them
+// does not queue up, it goes missing: measured, a drag paced across 40 frames
+// asked for 334x320, left ONE unacked configure outstanding, `pending.size` at
+// {0,0}, and the surface still 250x250. Reported as the drag working for a
+// little bit and then freezing, which is exactly the shape of it -- the first
+// configure lands, the rest are dropped on the floor.
+//
+// So the next one is sent only once the last has LANDED, which is observable
+// without any Greenfield internals: the sign's size is the size the surface
+// actually reached. A 400ms stale timer covers a client that ignores a configure
+// it does not like, and `force` covers the last one, which must go out even if
+// the previous is still in the air or the final pixels of every drag are lost.
+// Called once, from endResize. Kept as its own function because "the size the
+// drag ended on" and "the act of asking for it" are different things and the
+// retry in holdFlatScale needs the second one too.
+function flushResize() {
+  const r = resizing
+  if (!r?.want) return
+  const { w, h } = r.want
+  r.want = null
+  if (w === r.w && h === r.h) return
+  r.lastW = w
+  r.lastH = h
+  r.sentAt = performance.now()
+  r.role.configureSize({ width: w, height: h })
+  state.resizeTo = [w, h]
+  state.configures = (state.configures ?? 0) + 1
+}
+
+// THE DRAG IS A PREVIEW; THE COMMIT IS ONE REQUEST ON RELEASE.
+//
+// Measured, and this is the whole reason for the shape of it: a single spaced
+// configure lands every time (250 -> 292 -> 320 -> 299, three in a row), while a
+// stream during a drag applies one or two and then the client stops honouring
+// them at all -- it keeps acking, keeps painting, and ignores the size. Re-asking
+// afterwards does not recover it: nine retries over two and a half seconds left
+// the surface at 252 when 355 was asked for.
+//
+// So do not stream. Scale the quad while you drag, which costs the client
+// nothing and shows the size you are choosing, and send exactly one configure
+// when you let go -- the case that is known to work.
+//
+// The grip counter-scales so it stays the same size under the pointer; the hit
+// pad does not, because a target that grows with the window is only easier.
+function previewResize(r, w, h) {
+  const s = flatSign()
+  if (!s?.mesh) return
+  const sx = w / r.w
+  const sy = h / r.h
+  s.mesh.scale.set(sx, sy, 1)
+  if (s.frame) s.frame.scale.set(sx, sy, 1)
+  if (s.handle) s.handle.scale.set(1 / sx, 1 / sy, 1)
+  state.resizePreview = [w, h]
+}
+
+function clearPreview() {
+  const s = flatSign()
+  if (!s?.mesh) return
+  s.mesh.scale.set(1, 1, 1)
+  if (s.frame) s.frame.scale.set(1, 1, 1)
+  if (s.handle) s.handle.scale.set(1, 1, 1)
+  state.resizePreview = null
+}
+
 function stepResize(ev) {
   const r = resizing
   // A client may declare its own limits and they are the client's to declare.
@@ -480,21 +583,36 @@ function stepResize(ev) {
   const h = Math.round(Math.min(maxH, Math.max(minH, r.h - (ev.clientY - r.sy) * r.k)))
   // Only configure on a CHANGE. A pointermove at 120Hz that re-sends the same
   // size is a configure the client has to ack, and a buffer it may reallocate.
-  if (w === r.lastW && h === r.lastH) return
-  r.lastW = w
-  r.lastH = h
-  r.role.configureSize({ width: w, height: h })
-  state.resizeTo = [w, h]
+  r.want = { w, h }
+  previewResize(r, w, h)
 }
 
 function endResize() {
   if (!resizing) return false
+  // The preview goes before the request, so the quad is back at 1:1 when the
+  // real buffer arrives at the new size.
+  clearPreview()
+  flushResize()
+  if (resizing.captured !== undefined) {
+    try {
+      renderer.domElement.releasePointerCapture(resizing.captured)
+    } catch {
+      /* already gone */
+    }
+  }
   resizing.role.configureResizing?.(false)
   if (resizing.lastW) {
     // 1500ms is a deadline, not a duration: a client that honours the configure
     // is done in a frame or two, and one that refuses -- or clamps to its own
     // limits -- would otherwise hold the camera hostage forever.
-    settling = { scale0: resizing.scale0, w: resizing.lastW, h: resizing.lastH, until: performance.now() + 1500 }
+    settling = {
+      scale0: resizing.scale0,
+      w: resizing.lastW,
+      h: resizing.lastH,
+      role: resizing.role,
+      sentAt: performance.now(),
+      until: performance.now() + 2500,
+    }
   }
   resizing = null
   return true
@@ -821,6 +939,7 @@ function installInput() {
 
   swallow('pointermove', (ev) => {
     if (resizing) return stepResize(ev)
+    setGrabHot(flatSign(), !!handleUnder(ev))
     sendMotion(ev)
   })
   // A click on the window is the application's. A click on anything else --
@@ -831,13 +950,36 @@ function installInput() {
   swallow('pointerdown', (ev) => {
     // The grab is checked FIRST, before both of the rules below -- it is neither
     // the application's click nor a click outside asking to leave.
+    // WHAT A CLICK IN THE FLAT VIEW DECIDED. Three outcomes, and "it does not
+    // work" can be any of them -- the grab missing, the click reaching the
+    // application, or the click being read as "outside" and leaving the window
+    // entirely. Guessing between them from a description is what this replaces.
     const grab = handleUnder(ev)
-    if (grab && startResize(grab, ev)) return
+    if (grab && startResize(grab, ev)) {
+      // TAKE THE GESTURE PROPERLY, or the browser takes it back. An unprevented
+      // pointerdown on a canvas can begin a native drag or a selection, and the
+      // browser then stops delivering moves and fires pointercancel -- which is
+      // wired to endResize, so the drag ended on the first pixel and the whole
+      // feature read as doing nothing. Capture also guarantees the moves keep
+      // arriving once the pointer leaves the window it started on, which a
+      // resize that makes things bigger does immediately.
+      ev.preventDefault()
+      try {
+        canvas.setPointerCapture(ev.pointerId)
+        resizing.captured = ev.pointerId
+      } catch {
+        /* synthetic events have no real pointer to capture; the drag still works */
+      }
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'grab' }
+      return
+    }
     if (!overFlatSurface(ev)) {
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'leave' }
       release()
       canvas.blur()
       return
     }
+    state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'app' }
     sendButton(ev, false)
   })
   swallow('pointerup', (ev) => {

@@ -190,7 +190,24 @@ class Window implements ClientWindow, XdgSurfaceEvents, WlCallbackEvents {
     this.pruneOldReleasedBuffers()
     const buffer = this.nextBuffer()
     if (buffer === undefined) {
-      throw new Error(!callback ? 'Failed to create the first buffer.' : 'Both buffers busy at redraw(). Server bug?')
+      if (!callback) {
+        throw new Error('Failed to create the first buffer.')
+      }
+      // NO FREE BUFFER THIS FRAME IS NOT FATAL, and throwing made it fatal.
+      // redraw runs from the frame callback, so an exception ends the callback
+      // chain: the client stays connected, keeps acking configures, and never
+      // paints again. With only two buffers an interactive resize reaches this
+      // regularly -- each new size is a fresh allocation while the compositor
+      // still holds the old one -- which is why resizing worked for a moment and
+      // then froze, and why re-asking afterwards changed nothing.
+      //
+      // Skip the frame and re-arm. A commit carrying only a frame request is
+      // ordinary Wayland, and by the next callback a buffer has come back.
+      callback.destroy()
+      this.callback = this.surface.frame()
+      this.callback.listener = this
+      this.surface.commit()
+      return
     }
 
     paintPixels(buffer.shmData!, 20, this.width, this.height, time)

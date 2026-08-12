@@ -47,10 +47,18 @@ const SIGN_OFFSET = 330
 // to hit without aiming: at the default flat zoom this is about 56 screen pixels.
 const HANDLE = 34
 
-// The grab's face, drawn once and shared by every sign. A plain coloured square
-// says "something is here"; the corner rule and the grip say WHICH something,
-// which is the difference between a control people find and one they have to be
-// told about.
+// The grab's face, drawn once and shared by every sign.
+//
+// It was a boxed cyan card straddling the corner, and it read as a second window
+// frame floating beside the first -- reported as looking weird, which it did:
+// half of it hung outside the window it belongs to, so it looked like a separate
+// object rather than a part of one.
+//
+// Now it sits WHOLLY INSIDE the corner, like every resize gripper anywhere else,
+// and it is just the grip: three diagonals pointing the way the corner travels,
+// on a panel dark enough to read over any window content. No border, because the
+// window already has one right beside it and two frames a few pixels apart is
+// what made it look wrong.
 let grabTex = null
 function grabTexture() {
   if (grabTex) return grabTex
@@ -58,20 +66,15 @@ function grabTexture() {
   c.width = c.height = 64
   const g = c.getContext('2d')
   g.clearRect(0, 0, 64, 64)
-  g.fillStyle = 'rgba(3,4,10,0.72)'
-  g.fillRect(0, 0, 64, 64)
-  // The corner it belongs to: its own top and right edges drawn solid.
-  g.strokeStyle = '#2de2e6'
-  g.lineWidth = 6
+  g.fillStyle = 'rgba(3,4,10,0.66)'
   g.beginPath()
-  g.moveTo(3, 61)
-  g.lineTo(3, 3)
-  g.lineTo(61, 3)
-  g.lineTo(61, 61)
-  g.stroke()
-  g.strokeStyle = '#f2c14e'
-  g.lineWidth = 4
-  for (const o of [16, 28, 40]) {
+  g.roundRect ? g.roundRect(0, 0, 64, 64, 10) : g.rect(0, 0, 64, 64)
+  g.fill()
+  g.strokeStyle = '#2de2e6'
+  g.lineWidth = 5
+  g.lineCap = 'round'
+  // Bottom-left to top-right: the direction dragging this corner makes it grow.
+  for (const o of [14, 26, 38]) {
     g.beginPath()
     g.moveTo(o, 52)
     g.lineTo(52, o)
@@ -225,13 +228,34 @@ function makeSign(view, milepost, district, side, lane) {
     new THREE.PlaneGeometry(HANDLE, HANDLE),
     new THREE.MeshBasicMaterial({ map: grabTexture(), transparent: true, toneMapped: false }),
   )
-  handle.position.set(sw / 2, sh / 2, 3)
+  // Wholly inside the corner, not straddling it.
+  handle.position.set(sw / 2 - HANDLE / 2 - 5, sh / 2 - HANDLE / 2 - 5, 3)
   handle.userData.resizeHandle = true
   handle.visible = false
   mesh.add(handle)
 
+  // THE HIT AREA IS BIGGER THAN THE GRIP, and centred ON the corner rather than
+  // inside it, so it reaches out past the window's edge.
+  //
+  // The grip belongs inside the corner because that is where a gripper looks
+  // right; the pointer does not care where it looks right, and the corner of a
+  // window is exactly where a hand aims from OUTSIDE it. Reported as the
+  // indicator not showing when hovering just outside the corner -- which was
+  // true, and would have been true of any target drawn only within the window.
+  //
+  // An invisible MATERIAL rather than an invisible object: three skips
+  // material.visible === false when drawing and still raycasts the mesh, which
+  // is exactly the pair of properties this needs.
+  const grabPad = new THREE.Mesh(
+    new THREE.PlaneGeometry(HANDLE * 2.3, HANDLE * 2.3),
+    new THREE.MeshBasicMaterial({ visible: false }),
+  )
+  grabPad.position.set(sw / 2, sh / 2, 3)
+  grabPad.userData.resizeHandle = true
+  mesh.add(grabPad)
+
   state.adopted++
-  return { mesh, frame, post, handle, tex, rt, size: { width, height } }
+  return { mesh, frame, post, handle, grabPad, tex, rt, size: { width, height } }
 }
 
 // The grab is only live on the window you are IN. Cheap enough to reconcile
@@ -261,14 +285,28 @@ function adoptPending() {
       if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height)) {
         // A resized surface is a new texture allocation. Rebuild the sign in
         // place, at the SAME milepost.
-        dropSign(k)
-        signs.set(k, {
-          milepost: existing.milepost,
-          district: existing.district,
-          slot: existing.slot,
-          side: existing.side,
-          lane: existing.lane,
-        })
+        //
+        // BUILD THE REPLACEMENT BEFORE DROPPING THE OLD ONE. This used to drop
+        // first and leave a record with no mesh, so the window vanished for
+        // however many frames it took the next buffer to arrive -- once, that is
+        // a blink nobody sees; during a resize drag it is one per configure, and
+        // it is what "really flashy and glitchy" was. If the new sign cannot be
+        // built yet, the old one keeps standing, which is the correct thing to
+        // show: the window has not changed yet.
+        const rebuilt = makeSign(view, existing.milepost, existing.district, existing.side, existing.lane)
+        if (rebuilt) {
+          dropSign(k)
+          signs.set(k, {
+            milepost: existing.milepost,
+            district: existing.district,
+            slot: existing.slot,
+            side: existing.side,
+            lane: existing.lane,
+            view,
+            ...rebuilt,
+          })
+          rebuilt.mesh.userData.signKey = k
+        }
       }
       continue
     }
@@ -329,6 +367,15 @@ function dropSign(k, forget = false) {
   if (!s) return
   for (const o of [s.mesh, s.frame, s.post]) if (o) scene.remove(o)
   if (s.rt) s.rt.dispose()
+  // The grab is a CHILD of the mesh, so removing the mesh takes it off screen
+  // and leaves its geometry and material behind. One per resize is not much and
+  // a drag makes a lot of them. (The texture is shared and outlives every sign,
+  // which is why it is not disposed here.)
+  for (const o of [s.handle, s.grabPad]) {
+    if (!o) continue
+    o.geometry.dispose()
+    o.material.dispose()
+  }
   if (forget) signs.delete(k)
 }
 

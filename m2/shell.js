@@ -871,6 +871,14 @@ window.__resize = (dx = 120, dy = 90) => {
   const r = resizeFlatBy(dx, dy)
   return { grabAtScreen: grab && [Math.round(grab.x), Math.round(grab.y)], before, ...r }
 }
+// Where the grab is, WITHOUT touching anything. `__resize(0,0)` was being used
+// for this and it is not a read: it starts and ends a real drag, which sends a
+// no-op configure and leaves the pacing believing the client has just caught up.
+// A probe with side effects measures the probe.
+window.__grabPoint = () => {
+  const p = handlePoint()
+  return p ? [Math.round(p.x), Math.round(p.y)] : null
+}
 window.__resized = () =>
   [...signs.values()]
     .filter((s) => s.district === state.flatDistrict && s.milepost === state.flatMilepost)
