@@ -72,6 +72,10 @@ const PANEL_MIN_W = 96
 const PANEL_MIN_H = 44
 const ROW_GAP = 6
 const VISIBLE_ROWS = 3
+// The scrollbar: its own width, plus the gap either side that keeps it off the
+// panels and inside the upright.
+const BAR_W = 6
+const BAR_TOTAL = 16
 
 const GREEN = '#0b6b3a'
 const BLUE = '#12386e'
@@ -255,23 +259,38 @@ function buildGate(kind) {
   const board = makeBoard()
   group.add(board.mesh)
 
-  const more = makePanelTex(512, 64, BEAM_W, 22)
-  more.mesh.visible = false
-  group.add(more.mesh)
+  const flat = (color) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color, toneMapped: false }))
+    m.visible = false
+    group.add(m)
+    return m
+  }
+  const bar = { track: flat(0x0a0f1a), thumb: flat(ACC) }
 
   scene.add(group)
-  return { group, kind, panels: [], board, boardKey: null, more, moreKey: null, scroll: 0 }
+  return { group, kind, panels: [], board, boardKey: null, bar, scroll: 0 }
 }
 
 // How the row breaks into a grid. Pure arithmetic, so the layout and the thing
 // that draws it cannot disagree.
-function grid(n) {
-  const usable = BEAM_W * 0.95
+//
+// THE BAR TAKES ITS SPACE FROM THE PANELS, like a scrollbar anywhere else, which
+// is why this is computed twice: once to find out whether there is anything to
+// scroll, and again with the width the bar leaves if there is. Once, not until
+// it settles -- narrowing can only ever add rows, so a second pass cannot take
+// the bar away again, and a loop would be solving a problem that does not exist.
+function layoutIn(usable, n) {
   const cols = Math.max(1, Math.min(n, Math.floor(usable / PANEL_MIN_W)))
   const pw = Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, usable / cols))
-  const ph = Math.max(PANEL_MIN_H, pw / 2)
-  const rows = Math.ceil(n / cols)
-  return { cols, pw, ph, rows, maxScroll: Math.max(0, rows - VISIBLE_ROWS) }
+  return { cols, pw, ph: Math.max(PANEL_MIN_H, pw / 2), rows: Math.ceil(n / cols) }
+}
+
+function grid(n) {
+  const full = BEAM_W * 0.95
+  let g = layoutIn(full, n)
+  const bar = g.rows > VISIBLE_ROWS
+  if (bar) g = layoutIn(full - BAR_TOTAL, n)
+  return { ...g, bar, maxScroll: Math.max(0, g.rows - VISIBLE_ROWS) }
 }
 
 // Positioning is separate from building, because scrolling moves panels without
@@ -292,37 +311,40 @@ function placePanels(gate) {
     p.mesh.scale.set(g.pw, g.ph, 1)
     p.mesh.position.set(x0 + c * g.pw, BEAM_Y - 18 - g.ph / 2 - shown * (g.ph + ROW_GAP), 6)
   })
-  const hiddenAbove = gate.scroll
-  const hiddenBelow = Math.max(0, g.rows - VISIBLE_ROWS - gate.scroll)
-  const key = `${hiddenAbove}/${hiddenBelow}`
-  if (gate.more) {
-    // The strip only exists when something is off the gate. A gate that fits has
-    // nothing to say about scrolling.
-    gate.more.mesh.visible = hiddenAbove > 0 || hiddenBelow > 0
-    gate.more.mesh.position.set(0, BEAM_Y - 18 - Math.min(g.rows, VISIBLE_ROWS) * (g.ph + ROW_GAP) - 8, 6)
-    if (gate.more.mesh.visible && key !== gate.moreKey) {
-      gate.moreKey = key
-      drawMore(gate.more.canvas, hiddenAbove, hiddenBelow)
-      gate.more.tex.needsUpdate = true
-    }
-  }
+  placeBar(gate, g)
 }
 
-function drawMore(canvas, above, below) {
-  const g = canvas.getContext('2d')
-  const W = canvas.width
-  const H = canvas.height
-  g.clearRect(0, 0, W, H)
-  g.fillStyle = 'rgba(3,4,10,0.8)'
-  g.fillRect(0, 0, W, H)
-  g.textAlign = 'center'
-  g.textBaseline = 'middle'
-  g.font = 'bold 30px ui-monospace, monospace'
-  g.fillStyle = ACC_CSS
-  const bits = []
-  if (above) bits.push(`^ ${above}`)
-  if (below) bits.push(`v ${below}`)
-  g.fillText(`${bits.join('   ')}   scroll here`, W / 2, H / 2 + 2)
+// A SCROLLBAR RATHER THAN A SENTENCE.
+//
+// The strip used to read `v 1  scroll here`, which says there is more and cannot
+// say how much more -- a bar says both at once and says it in the shape everyone
+// already reads: how far down you are, and how much of the whole you are looking
+// at. It is two flat quads and no text, so it also stops being something that
+// has to be redrawn every time a number under it changes.
+function placeBar(gate, g) {
+  const on = g.maxScroll > 0
+  gate.bar.track.visible = on
+  gate.bar.thumb.visible = on
+  if (!on) return
+
+  const trackH = VISIBLE_ROWS * g.ph + (VISIBLE_ROWS - 1) * ROW_GAP
+  const top = BEAM_Y - 18
+  const x = (g.pw * g.cols) / 2 + BAR_TOTAL / 2
+
+  // z=12, not 6. The uprights are BoxGeometry 16 deep, so they occupy z -8..8 --
+  // a bar at 6 is INSIDE the leg it sits beside, which is exactly as visible as
+  // not drawing it. The panels get away with 6 because nothing is behind them.
+  gate.bar.track.scale.set(BAR_W, trackH, 1)
+  gate.bar.track.position.set(x, top - trackH / 2, 12)
+
+  // The thumb is the fraction of the rows you can see, sat at the fraction you
+  // have scrolled past -- so a gate with one row hidden shows a long thumb near
+  // the top, and one with ten shows a short one that actually travels.
+  const thumbH = Math.max(8, (trackH * VISIBLE_ROWS) / g.rows)
+  const travel = trackH - thumbH
+  const t = g.maxScroll ? gate.scroll / g.maxScroll : 0
+  gate.bar.thumb.scale.set(BAR_W, thumbH, 1)
+  gate.bar.thumb.position.set(x, top - t * travel - thumbH / 2, 13)
 }
 
 function syncGate(id, kind, z, row) {
@@ -468,6 +490,12 @@ export const gantryReport = () =>
     rows: gate.grid?.rows ?? 0,
     cols: gate.grid?.cols ?? 0,
     scroll: gate.scroll ?? 0,
+    bar: gate.bar?.track?.visible
+      ? {
+          thumbFraction: +(gate.bar.thumb.scale.y / gate.bar.track.scale.y).toFixed(3),
+          atTop: gate.bar.thumb.position.y === gate.bar.track.position.y + gate.bar.track.scale.y / 2 - gate.bar.thumb.scale.y / 2,
+        }
+      : null,
     shown: gate.panels.filter((p) => p.mesh.visible).length,
     z: Math.round(gate.group.position.z),
     x: Math.round(gate.group.position.x),
