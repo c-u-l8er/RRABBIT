@@ -14,9 +14,9 @@
 // in this direction only.
 
 import * as THREE from 'three'
-import { state, signs, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ } from './world.js'
+import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder } from './world.js'
 import * as ws from './workspaces.js'
-import { release } from './travel.js'
+import { release, rekeyZoom } from './travel.js'
 
 let renderer, gl, scene, camera, session
 export function attachRrabbit(c) {
@@ -54,6 +54,25 @@ const GRIP_H = 20
 // (w + h) / 2 / sqrt(2), and anything less than that overlaps the surface again.
 const GRIP_REACH = (GRIP_W / 2 + GRIP_H / 2) / Math.SQRT2 + 1
 const PAD = 66
+// `(prev)--` is eight characters, so the quad is wide and short. Its hit pad is
+// taller and wider, the same allowance the resize grab's pad makes.
+//
+// SMALLER AND CLOSER, asked for -- and the resize arrow was asked for exactly
+// this once already ("smaller, closer, and only there when you reach for it").
+// A control that only appears when you reach for it does not need to announce
+// itself, so it can be small; and the nearer it sits to the edge it acts on, the
+// more it reads as part of that edge rather than as something floating beside
+// the window.
+//
+// Only the HEIGHT is chosen. The width comes from the text (stepTexture), so the
+// quad has no transparent margin to hold the glyphs away from the window.
+//
+// STEP_GAP clears the FRAME, not the surface. The frame is `sw + 14`, so its
+// edge is 7 out from the picture -- an inner edge at 6 was sitting on the cyan
+// border rather than beyond it, which is the one place a control must not be:
+// half on the chrome of the thing it acts on. 8 is one unit clear of it.
+const STEP_H = 20
+const STEP_GAP = 8
 
 // The grab's face: the text `-->`, and nothing else.
 //
@@ -88,6 +107,147 @@ function grabTexture() {
   grabTex = new THREE.CanvasTexture(c)
   grabTex.colorSpace = THREE.SRGBColorSpace
   return grabTex
+}
+
+// The close control's face: `X--`, which is `-->` read in a mirror.
+//
+// Asked for as "--X", and drawn the other way round on purpose: the two are the
+// same shape pointing away from opposite corners of the same window, so the tail
+// belongs on the inside and the head on the outside in BOTH of them. `-->` at
+// the top right has its head out to the right; `X--` at the top left has its X
+// out to the left. Written "--X" it would point back INTO the window, which is
+// the one thing neither control does.
+//
+// RED, and the only red anything in this shell. The resize grab is amber like
+// the rest of the furniture because dragging a window bigger is not a decision;
+// closing one is, and it is next to a control you are going to be reaching for
+// with the same hand.
+// THE STEP CONTROLS, on the middle of each side edge: `(prev)--` on the left and
+// `--(next)` on the right.
+//
+// Same family as `-->` and `X--` -- text, a shadow, no panel -- and the dashes
+// point INTO the window on these two, which is the opposite of the corner pair
+// and is right for the opposite reason. The corner controls act on this window
+// and reach away from it; these two bring another window HERE, so the arrow
+// comes from the edge you are pointing at back to where you are standing.
+// THE QUAD IS SIZED TO THE TEXT, not the text to the quad.
+//
+// It was a fixed 256x64 canvas with `--(next)` drawn centred in it. Eight
+// characters of 40px monospace is about 192px, so roughly 32px of transparent
+// canvas sat either side of the glyphs -- and on an 88-wide quad that is eleven
+// world units of nothing between the window's edge and the first thing you can
+// see. Asked twice to bring it closer; the second time it was already 9 units
+// out and the gap being complained about was entirely inside the texture.
+//
+// EXACTLY THE TRAP `-->` HIT AND HAD FIXED: "the glyphs sat in a wide
+// transparent margin, which put the visible arrow much further from the corner
+// than the mesh actually is". Written down, in this file, and walked into again
+// by a control built later. So: measure the text, cut the canvas to it, and let
+// the quad take its aspect from that -- then the mesh edge IS the glyph edge and
+// STEP_GAP means what it says.
+const STEP_FONT = 44
+const stepTex = { prev: null, next: null }
+function stepTexture(which) {
+  if (stepTex[which]) return stepTex[which]
+  const text = which === 'prev' ? '(prev)--' : '--(next)'
+  const measure = document.createElement('canvas').getContext('2d')
+  measure.font = `bold ${STEP_FONT}px ui-monospace, monospace`
+  const w = Math.ceil(measure.measureText(text).width)
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = Math.round(STEP_FONT * 1.35)
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, c.width, c.height)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = `bold ${STEP_FONT}px ui-monospace, monospace`
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 10
+  g.fillStyle = '#' + COOL.toString(16).padStart(6, '0')
+  // Twice, so the shadow is dark enough to read against a bright window.
+  g.fillText(text, c.width / 2, c.height / 2 + 1)
+  g.fillText(text, c.width / 2, c.height / 2 + 1)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  stepTex[which] = { tex, aspect: c.width / c.height }
+  return stepTex[which]
+}
+
+let closeTex = null
+function closeTexture() {
+  if (closeTex) return closeTex
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 64
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 128, 64)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = 'bold 58px ui-monospace, monospace'
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 10
+  g.fillStyle = '#ff6b6b'
+  g.fillText('X--', 64, 35)
+  g.fillText('X--', 64, 35)
+  closeTex = new THREE.CanvasTexture(c)
+  closeTex.colorSpace = THREE.SRGBColorSpace
+  return closeTex
+}
+
+// THE NAME BOARD over a window, and the way into the menu about it.
+//
+// A canvas texture rather than glyph geometry, for the reason the gantry panels
+// give: the text changes whenever the client changes its title, and geometry
+// text needs a font asset and a build step. Redrawn only when the string
+// actually changes -- see syncTitles.
+//
+// The address is on it as well as the title. A client picks its own title and
+// two of them can pick the same one; `home:2` is the shell's name for the window
+// and is the thing the map, the keyboard and every report in here agree on. The
+// title tells you what it is, the address tells you which one.
+const PLATE_H = 26
+
+// THE NAME BOARD IS TEXT, AND NOTHING ELSE.
+//
+// It was a bordered card with the window's address in grey on the right, and
+// both were asked to go. They are the same mistake the resize grab already made
+// and had corrected: a picture hung next to a window, which is a thing that
+// draws pictures. `-->` won that argument by being three characters and a
+// shadow, and this is the same answer -- the name, in the same monospace as
+// every other word in the shell, with a shadow so it survives being over a lit
+// sign or over nothing at all.
+//
+// THE ADDRESS IS GONE FROM IT TOO. `home:2` was there because a client can name
+// two windows the same thing and the shell needs one name that is unique. That
+// is still true and it is still not the board's job: the map says the address on
+// the window's own page, and out here you are looking AT the window rather than
+// looking it up.
+function plateTexture(title, width) {
+  const px = 3 // canvas pixels per world unit, so the text is not soft
+  const c = document.createElement('canvas')
+  c.width = Math.max(64, Math.round(width * px))
+  c.height = Math.round(PLATE_H * px)
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, c.width, c.height)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = `bold ${Math.round(PLATE_H * px * 0.72)}px ui-monospace, monospace`
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 12
+  g.fillStyle = '#f3ead4'
+  // CLIPPED, not shrunk. A title that changes size as the client edits it is a
+  // board that moves while you are reading it.
+  g.save()
+  g.beginPath()
+  g.rect(0, 0, c.width, c.height)
+  g.clip()
+  // Twice, so the shadow is dark enough to read against a bright window.
+  g.fillText(title, c.width / 2, c.height / 2)
+  g.fillText(title, c.width / 2, c.height / 2)
+  g.restore()
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
 }
 
 // ------------------------------------------------------------------- signs
@@ -176,21 +336,18 @@ function makeSign(view, milepost, district, side, lane) {
     new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
   )
 
-  // Which side of the road, and where along it. The side used to be forced by
-  // milepost parity, like RAVIO's billboards; it is now whatever the window was
-  // opened with, because "open one on the left" is a thing you can ask for from
-  // the enter gantry. Parity is still the default when nobody said.
-  mesh.position.set(ws.laneX(district) + side * SIGN_OFFSET, 40 + sh / 2, windowZ(lane, side))
-  mesh.rotation.y = -side * 0.42
+  // HOW HIGH is decided here and nowhere else -- a sign STANDS ON the road, so
+  // its bottom edge is pinned at y=40 and a taller window grows upward. Which
+  // side of the road and where along it are decided by positionSign below, from
+  // facts that can change after the sign is built.
+  mesh.position.y = 40 + sh / 2
   scene.add(mesh)
 
   const frame = new THREE.Mesh(
     new THREE.PlaneGeometry(sw + 14, sh + 14),
     new THREE.MeshBasicMaterial({ color: COOL }),
   )
-  frame.position.copy(mesh.position)
-  frame.rotation.copy(mesh.rotation)
-  frame.translateZ(-2)
+  frame.position.y = mesh.position.y
   scene.add(frame)
 
   // A post, so the sign stands on the road rather than floating -- and so
@@ -206,8 +363,15 @@ function makeSign(view, milepost, district, side, lane) {
     new THREE.BoxGeometry(14, postH, 14),
     new THREE.MeshStandardMaterial({ color: ACC, roughness: 0.6 }),
   )
-  post.position.set(mesh.position.x, postTop - postH / 2, mesh.position.z)
+  post.position.y = postTop - postH / 2
   scene.add(post)
+
+  // Which side of the road, and where along it. The side used to be forced by
+  // milepost parity, like RAVIO's billboards; it is now whatever the window was
+  // opened with, because "open one on the left" is a thing you can ask for from
+  // the enter gantry -- and, since windows can be moved, whatever it was last
+  // put on. Parity is still the default when nobody said.
+  positionSign({ mesh, frame, post }, district, side, lane)
 
   // THE RESIZE GRAB, at the TOP-right corner of the surface.
   //
@@ -244,6 +408,13 @@ function makeSign(view, milepost, district, side, lane) {
   handle.rotation.z = Math.PI / 4
   handle.position.set(sw / 2 + GRIP_REACH, sh / 2 + GRIP_REACH, 3)
   handle.userData.resizeHandle = true
+  // `chrome` is the general fact -- this object belongs to the shell and not to
+  // the client -- and `resizeHandle` is what it does. pickView filters on the
+  // general one, so a control added later cannot forget to opt out of being
+  // mistaken for a click on the application. That mistake is not a missed click:
+  // a hit that resolves to no view reads as a click OUTSIDE the window, which is
+  // the gesture that leaves it.
+  handle.userData.chrome = true
   handle.visible = false
   mesh.add(handle)
 
@@ -264,17 +435,164 @@ function makeSign(view, milepost, district, side, lane) {
   // for the application, which is the same fault wearing a disguise.
   grabPad.position.set(sw / 2 + PAD / 2, sh / 2 + PAD / 2, 3)
   grabPad.userData.resizeHandle = true
+  grabPad.userData.chrome = true
   mesh.add(grabPad)
 
+  // THE CLOSE CONTROL, at the mirror of the grab -- top LEFT, wholly outside the
+  // surface, same size, same distance out, turned the other way.
+  //
+  // IT IS DRAWN WHENEVER YOU ARE IN THE WINDOW, unlike the grab beside it, and
+  // the difference is deliberate rather than an oversight. The grab appears only
+  // when you reach for it because a resize is a thing you go looking for at the
+  // edge you want to move, and an arrow parked there permanently is clutter. A
+  // close control has to be FINDABLE: a way out that you can only see once you
+  // are already pointing at it is one you have to be told about.
+  const closeBtn = new THREE.Mesh(
+    new THREE.PlaneGeometry(GRIP_W, GRIP_H),
+    new THREE.MeshBasicMaterial({ map: closeTexture(), transparent: true, toneMapped: false }),
+  )
+  closeBtn.rotation.z = -Math.PI / 4
+  closeBtn.position.set(-(sw / 2 + GRIP_REACH), sh / 2 + GRIP_REACH, 3)
+  closeBtn.userData.closeButton = true
+  closeBtn.userData.chrome = true
+  closeBtn.visible = false
+  mesh.add(closeBtn)
+
+  const closePad = new THREE.Mesh(new THREE.PlaneGeometry(PAD, PAD), new THREE.MeshBasicMaterial({ visible: false }))
+  closePad.position.set(-(sw / 2 + PAD / 2), sh / 2 + PAD / 2, 3)
+  closePad.userData.closeButton = true
+  closePad.userData.chrome = true
+  mesh.add(closePad)
+
+  // THE NAME BOARD, between the two of them.
+  //
+  // A unit quad scaled by the layout, the same trick the gantry panels use, so
+  // the texture can be swapped for a longer title without rebuilding geometry.
+  // It spans the gap the two corner controls leave, and it is the click target
+  // for everything about this window that is not "resize it" or "close it".
+  const plateW = Math.max(120, sw - 2 * (GRIP_REACH + GRIP_W / 2))
+  const plate = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ transparent: true, toneMapped: false }),
+  )
+  plate.scale.set(plateW, PLATE_H, 1)
+  plate.position.set(0, sh / 2 + GRIP_REACH, 3)
+  plate.userData.titlePlate = true
+  plate.userData.chrome = true
+  plate.visible = false
+  mesh.add(plate)
+
+  const platePad = new THREE.Mesh(
+    new THREE.PlaneGeometry(plateW, PAD),
+    new THREE.MeshBasicMaterial({ visible: false }),
+  )
+  platePad.position.set(0, sh / 2 + GRIP_REACH, 3)
+  platePad.userData.titlePlate = true
+  platePad.userData.chrome = true
+  mesh.add(platePad)
+
+  // `(prev)--` and `--(next)`, on the middle of each side edge, hover-only like
+  // the two corner controls. Outside the surface for the same reason all of them
+  // are: the thing underneath is somebody else's application.
+  const step = {}
+  for (const which of ['prev', 'next']) {
+    const dir = which === 'prev' ? -1 : 1
+    const face = stepTexture(which)
+    const stepW = STEP_H * face.aspect
+    const btn = new THREE.Mesh(
+      new THREE.PlaneGeometry(stepW, STEP_H),
+      new THREE.MeshBasicMaterial({ map: face.tex, transparent: true, toneMapped: false }),
+    )
+    btn.position.set(dir * (sw / 2 + STEP_GAP + stepW / 2), 0, 3)
+    btn.userData.stepButton = dir
+    btn.userData.chrome = true
+    btn.visible = false
+    mesh.add(btn)
+    // The pad does NOT shrink with the button. It is what you aim at, the button
+    // is only what you see, and making the target smaller because the label got
+    // smaller is how a control ends up needing to be hunted for.
+    const pad = new THREE.Mesh(
+      new THREE.PlaneGeometry(stepW + 32, PAD),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    pad.position.copy(btn.position)
+    pad.userData.stepButton = dir
+    pad.userData.chrome = true
+    mesh.add(pad)
+    step[which] = { btn, pad }
+  }
+
   state.adopted++
-  return { mesh, frame, post, handle, grabPad, tex, rt, size: { width, height } }
+  return {
+    mesh,
+    frame,
+    post,
+    handle,
+    grabPad,
+    closeBtn,
+    closePad,
+    plate,
+    platePad,
+    plateW,
+    prevBtn: step.prev.btn,
+    prevPad: step.prev.pad,
+    nextBtn: step.next.btn,
+    nextPad: step.next.pad,
+    // HOW FAR THE SHELL'S OWN FURNITURE STICKS UP PAST THE PICTURE, in world
+    // units, recorded on the ledger because Travel has to know it and cannot
+    // import this module (RRABBIT imports Travel, for release()).
+    //
+    // It is what "can you see all of the window" means now. The flatten's fit
+    // used to be the surface's own height, which was the whole window until
+    // there was a name board and a close control standing above the top edge --
+    // and then arriving put both of them off the top of the screen, behind the
+    // status line. Measured in the shot that found it: the plate was half
+    // covered and the `X--` was hard against the frame edge.
+    //
+    // The close control is turned 45 degrees, so its half-extent is GRIP_REACH
+    // by that constant's own construction; its top is therefore twice out.
+    chromeTop: Math.max(2 * GRIP_REACH, GRIP_REACH + PLATE_H / 2),
+    tex,
+    rt,
+    size: { width, height },
+  }
 }
 
-// The grab is only live on the window you are IN. Cheap enough to reconcile
-// every frame, and reconciling beats remembering: the flattened window changes
-// under this from four different places (flatten, release, a window dying, a
-// resize rebuilding the sign) and none of them should have to know about it.
-// KEEP EVERY SIGN OVER ITS OWN ROAD.
+// WHERE THE THREE PIECES OF A SIGN STAND, from the three facts that decide it.
+//
+// One function called from two places, because there are now two ways a sign
+// arrives at a position: it is built there, or it is MOVED there. A second copy
+// of this arithmetic in syncPlacement would be a copy that can disagree with the
+// one in makeSign, and the disagreement would look like a window drifting off
+// its own road.
+//
+// The frame steps back along the MESH'S OWN NORMAL rather than subtracting from
+// z. At a 24-degree turn that offset is mostly z but partly x, and the code this
+// replaced set the frame's x to the mesh's x flat -- throwing the x part away.
+// It got away with it because what was left is still enough to keep the frame
+// behind the picture; it would not have got away with it at a sharper turn.
+//
+// The post's y is NOT touched: how high a sign stands is decided by its own
+// surface's height, once, in makeSign. Moving a window along the road does not
+// change how tall it is.
+const SIGN_TURN = 0.42
+function positionSign(parts, district, side, lane) {
+  const { mesh, frame, post } = parts
+  mesh.position.x = ws.laneX(district) + side * SIGN_OFFSET
+  mesh.position.z = windowZ(lane, side)
+  mesh.rotation.y = -side * SIGN_TURN
+  if (frame) {
+    frame.position.copy(mesh.position)
+    frame.rotation.copy(mesh.rotation)
+    frame.translateZ(-2)
+  }
+  if (post) {
+    post.position.x = mesh.position.x
+    post.position.z = mesh.position.z
+  }
+}
+
+// KEEP EVERY SIGN WHERE ITS ADDRESS SAYS IT IS.
 //
 // A sign's x is `laneX(district) + side * SIGN_OFFSET`, computed once when the
 // window is adopted -- and `laneX` is not a constant. It centres the whole set,
@@ -283,20 +601,287 @@ function makeSign(view, milepost, district, side, lane) {
 // frame); the windows did not, so they were left hanging over the gap where
 // their road used to be.
 //
-// This is not a breach of invariant 6. The invariant is that a window's ADDRESS
-// -- its workspace, milepost and side -- is never recomputed, and none of that
-// changes here. Only the world position those three currently resolve to does,
-// which is exactly what has to happen when the road moves.
+// It reconciles z and the turn as well now, and that is the whole mechanism
+// behind moving a window: the move functions below change `district`, `side` and
+// `lane` on the RECORD and nothing else. Nobody moves a mesh. The next frame
+// notices the position those fields resolve to is not the position the mesh is
+// at, and puts it right -- which means a move is correct by the same code path
+// that was already keeping every other window honest.
 //
-// It already applied before any of the editing: `+ lane` from an exit gate has
-// been shifting every road by 1300 units since it was built.
+// WHAT THIS DOES TO INVARIANT 6. The invariant was "a window's address --
+// workspace, milepost, side -- is never recomputed", and it is now narrower and
+// more accurate: **nothing moves a window except someone moving it**. Adoption,
+// a resize, a new buffer, a remapped surface, a neighbouring workspace being
+// created -- none of those may change where a window stands, and none of them
+// do. An explicit move does, because that is what it is for.
+//
+// The x/z test catches a side change on its own: flipping the side moves x by
+// 2 * SIGN_OFFSET, so there is no case where the turn is stale and the position
+// is not.
+// A WINDOW ON ANOTHER NETWORK'S ROAD IS NOT IN THIS WORLD.
+//
+// `laneX` can only answer for the network it is laying out, and for anything else
+// it answers 0 -- which is not a position, it is the absence of one. Left to run,
+// this loop would take every window belonging to every other network and stack
+// them all down the middle of the middle road. That is the one thing multi-tenancy
+// could break that nothing else would notice, because the windows are still alive
+// and the compositor is still perfectly happy.
+//
+// So they are hidden instead, and hiding is the honest answer rather than a
+// workaround: the road they stand on is not laid, so there is nowhere for them to
+// be. Their ADDRESS is untouched -- district, milepost, side and lane all still
+// say exactly where they will stand when that network is selected again -- which
+// is invariant 6 doing what it is for. Switching back puts them straight back.
+//
+// They still have to come OUT of every raycast, and that is not automatic: three
+// raycasts a mesh you hand it directly whether or not it is visible. See `aim` and
+// `scenePointFromEvent` in travel.js.
 function syncPlacement() {
   for (const s of signs.values()) {
     if (!s.mesh) continue
+    const here = ws.inActive(s.district)
+    for (const part of [s.mesh, s.frame, s.post]) if (part) part.visible = here
+    if (!here) continue
     const x = ws.laneX(s.district) + s.side * SIGN_OFFSET
-    if (s.mesh.position.x === x) continue
-    for (const o of [s.mesh, s.frame, s.post]) if (o) o.position.x = x
+    const z = windowZ(s.lane, s.side)
+    if (s.mesh.position.x === x && s.mesh.position.z === z) continue
+    positionSign(s, s.district, s.side, s.lane)
   }
+}
+
+// ------------------------------------------------------------ moving a window
+//
+// Three moves, because there are three questions you can ask about where a
+// window is: which side of the road it is on, how far along that side it is,
+// and WHICH ROAD. They are separate operations rather than one `place()` with
+// three arguments because they have genuinely different answers to "and where
+// exactly?" -- crossing keeps your place, reordering swaps with a neighbour, and
+// changing road puts you at the end of the new one.
+//
+// None of them touch the scene. See syncPlacement.
+
+const signAt = (district, milepost) =>
+  [...signs.values()].find((s) => s.mesh && s.district === district && s.milepost === milepost) ?? null
+
+const rowOf = (district, side) =>
+  [...signs.values()]
+    .filter((s) => s.mesh && s.district === district && s.side === side)
+    .sort((a, b) => a.lane - b.lane)
+
+// The lowest ordinal on a side that nothing live is standing on.
+//
+// FILLING HOLES RATHER THAN APPENDING. A lane ordinal is a place, not an
+// address -- unlike a milepost there is no harm at all in a later window
+// standing where an earlier one did -- and appending past every gap is what
+// turns a road that has been worked on into a mile of empty tarmac with the
+// windows at the far end of it.
+function firstFreeLane(district, side, self) {
+  const taken = new Set()
+  for (const s of signs.values())
+    if (s !== self && s.mesh && s.district === district && s.side === side) taken.add(s.lane)
+  let l = 0
+  while (taken.has(l)) l++
+  ws.claimLane(district, side, l)
+  return l
+}
+
+const placement = (s) =>
+  s && { district: s.district, milepost: s.milepost, side: s.side > 0 ? 'right' : 'left', lane: s.lane }
+
+// ACROSS THE ROAD, KEEPING ITS ORDINAL. Left lane 3 becomes right lane 3.
+//
+// THIS USED TO DRIFT, AND IT WAS A RATCHET. The first version asked "which
+// ordinal on the other side stands nearest where I am now?", worked it out from
+// the z with laneAtZ, and rounded. The two sides are deliberately half a MILE
+// out of step, so that question's answer is ALWAYS exactly x.5 -- and rounding
+// x.5 always goes the same way. Every crossing therefore moved the window half a
+// MILE further from the entrance, and crossing back moved it another half. Sent
+// one across and back four times and it was 2640 units down the road, which is
+// exactly what was reported: they "just kept moving further and further back".
+//
+// A near-miss dressed as arithmetic. The rule that cannot do this is the one
+// with no arithmetic in it: your ordinal is yours, the side is what changes.
+// Crossing is then its own inverse -- twice and you are provably where you
+// started -- which is the property a two-state control has to have.
+//
+// IT MOVES ONE WINDOW. It briefly swapped with whoever held the ordinal on the
+// far side, on the argument that a swap is drift-free and is the same answer
+// ws.setPos gives when two roads want one number. Wrong here, and the question
+// that showed it was wrong is the obvious one: crossing the road is a thing you
+// ask of ONE window, and a control that quietly moves a second one is a control
+// you cannot use without checking what else it did.
+//
+// It is also a rarer collision than it looks. Left 3 and right 3 are half a MILE
+// apart on opposite sides of the tarmac -- they do not collide at all -- so the
+// only conflict is the exact slot being taken, and then it takes the nearest
+// free ordinal on that side instead. That is a bump, not a ratchet: there is no
+// half-step being rounded, so crossing back returns to the ordinal it came from
+// whenever that ordinal is still free.
+export function flipWindowSide(district, milepost) {
+  const s = signAt(district, milepost)
+  if (!s) return null
+  const side = -s.side
+  const lane = freeLaneNear(district, side, s.lane, s)
+  s.side = side
+  s.lane = lane
+  ws.claimLane(district, side, lane)
+  return placement(s)
+}
+
+// The ordinal at or beside `want` that nothing live on that side is standing on.
+// Searching outward keeps a bumped window as near as possible to the place it
+// asked for; `self` is excluded so a window can always keep its own slot.
+function freeLaneNear(district, side, want, self) {
+  const taken = new Set()
+  for (const x of signs.values())
+    if (x !== self && x.mesh && x.district === district && x.side === side) taken.add(x.lane)
+  const l = Math.max(0, want)
+  for (let step = 0; step <= 512; step++) {
+    if (!taken.has(l + step)) return l + step
+    if (l - step >= 0 && !taken.has(l - step)) return l - step
+  }
+  return ws.takeLane(district, side)
+}
+
+// ONE PLACE ALONG THE ROAD. delta < 0 is toward the entrance.
+//
+// IT USED TO MEAN ONE PLACE ALONG ITS OWN SIDE, and that was almost always
+// nothing at all. Windows alternate sides by default, so a road with four
+// windows on it is usually two files of two -- and a window alone on its side
+// has no same-side neighbour, so both arrows were disabled and the control was
+// dead. Reported as nearer and further not working, which is precisely what a
+// permanently disabled pair of buttons is.
+//
+// The sides are separate for SPACING -- that argument still stands and is why
+// windowZ takes a side. They are not separate for "where am I in the queue":
+// you drive past all of them in one sequence, and that sequence is what moving
+// one place along means.
+//
+// A SWAP OF THE WHOLE PLACE -- side and ordinal together -- so the two windows
+// exchange positions exactly and nothing else on the road moves. Crossing the
+// road can therefore happen as a side effect of moving along it, which is
+// correct: the window in front of you may be on the other side.
+export function nudgeWindowAlong(district, milepost, delta) {
+  const s = signAt(district, milepost)
+  if (!s) return null
+  const road = roadOrder(district)
+  const i = road.indexOf(s)
+  const j = i + Math.sign(delta)
+  if (i < 0 || j < 0 || j >= road.length) return null
+  const other = road[j]
+  const side = s.side
+  const lane = s.lane
+  s.side = other.side
+  s.lane = other.lane
+  other.side = side
+  other.lane = lane
+  ws.claimLane(district, s.side, s.lane)
+  ws.claimLane(district, other.side, other.lane)
+  return placement(s)
+}
+
+// ONTO ANOTHER ROAD ENTIRELY.
+//
+// This is the one that changes the window's ADDRESS, and it has to: a milepost
+// is unique on its road, and the number this window holds may already be in use
+// on the destination. So it takes a fresh one there and its old one is retired
+// -- mileposts are never reissued, which is exactly what makes retiring one
+// safe. Everything keyed by the address has to come along, and there are two
+// such things: the remembered zoom, and the shell's idea of which window you are
+// standing in.
+//
+// It takes the FIRST FREE place on its side of the new road, not the end of it.
+// There is no "where it already was" to preserve on a road it has never been on,
+// so the choice is between the first gap and the far end -- and the far end has
+// the same ratchet crossing the road had: send a window to the next workspace
+// and back a few times and it walks off down both roads, one MILE per trip,
+// through the empty slots it keeps leaving behind. The first gap is stable.
+//
+// A CLOSED WORKSPACE HAS NO ROAD -- syncRoads lays one per OPEN workspace -- so
+// a window moved onto one would stand in the air over nothing. Refusing is the
+// truthful answer, the same one a barred lane on the exit gate gives.
+export function moveWindowTo(district, milepost, dest) {
+  const s = signAt(district, milepost)
+  const d = ws.get(dest)
+  if (!s || !d || !d.open || dest === district) return null
+  const to = ws.takeMilepost(dest)
+  const lane = firstFreeLane(dest, s.side, s)
+  // Both halves of the address change at once, so the zoom is rekeyed from the
+  // old pair before either is overwritten.
+  rekeyZoom(district, milepost, dest, to)
+  if (state.flatDistrict === district && state.flatMilepost === milepost) {
+    state.flatDistrict = dest
+    state.flatMilepost = to
+  }
+  s.district = dest
+  s.milepost = to
+  s.lane = lane
+  return placement(s)
+}
+
+// DROPPED ONTO ANOTHER WINDOW ON THE SAME ROAD: take its place.
+//
+// INSERT, not swap, and this is the one place the two part company. The buttons
+// swap because `one place along` names a pair and moving anything else would be
+// moving a window nobody mentioned. A drag names a POSITION -- you carried this
+// row to that spot in the list and let go -- so the answer has to be that it is
+// now at that spot and everything else closed up behind it.
+//
+// Renumbering the rest is free here in a way it never is for mileposts or lane
+// numbers: an ordinal on a side is a PLACE, not an address. Nothing is keyed by
+// it, and the list is renumbered 0..n afterwards, so a road cannot grow a gap by
+// being rearranged.
+//
+// Dropping across the two sides crosses the road as well, landing at the target's
+// place on the target's side -- which is the same thing the gesture looks like.
+export function reorderWindowTo(district, milepost, ontoMilepost) {
+  const s = signAt(district, milepost)
+  const onto = signAt(district, ontoMilepost)
+  if (!s || !onto || s === onto) return null
+  const from = s.side
+  const side = onto.side
+  const row = rowOf(district, side).filter((x) => x !== s)
+  const at = row.indexOf(onto)
+  if (at < 0) return null
+  row.splice(at, 0, s)
+  s.side = side
+  row.forEach((x, i) => (x.lane = i))
+  ws.resetLane(district, side, row.length)
+  // The side it LEFT closes up too, or crossing the road leaves a hole behind
+  // and the next thing to look at that road sees a gap it did not make.
+  if (from !== side) {
+    const back = rowOf(district, from)
+    back.forEach((x, i) => (x.lane = i))
+    ws.resetLane(district, from, back.length)
+  }
+  return placement(s)
+}
+
+// CLOSE THE ROAD UP -- every window on it back to 0, 1, 2 on its own side, in
+// the order it already stands in.
+//
+// A road grows holes honestly: a window closes and its slot stays empty, and one
+// or two gaps read as a road you have been working on rather than as a fault.
+// They accumulate, though, and a road with the last window a kilometre past the
+// first is one you have to drive rather than read. Two things fill it with
+// holes -- closing windows, and (until this commit) moving them -- so a road
+// could get into that state before there was any way out of it but a restart.
+//
+// It changes NO addresses. Every window keeps its milepost, its workspace and
+// its side; only how far along it stands changes, and the order is preserved
+// exactly, so nothing you were looking for is anywhere unexpected afterwards.
+export function tidyRoad(district) {
+  if (!ws.has(district)) return null
+  let moved = 0
+  for (const side of [-1, 1]) {
+    const row = rowOf(district, side)
+    row.forEach((s, i) => {
+      if (s.lane !== i) moved++
+      s.lane = i
+    })
+    ws.resetLane(district, side, row.length)
+  }
+  return { district, moved, left: rowOf(district, -1).length, right: rowOf(district, 1).length }
 }
 
 // ARMED IS NOT VISIBLE. The grab is live on the window you are standing in; it
@@ -311,9 +896,114 @@ function syncHandles() {
   for (const s of signs.values()) {
     if (!s.handle) continue
     const armed = state.mode === 'flat' && `${s.district}:${s.milepost}` === flatKey
+    // The PAD carries armed too, not just the grip. Everything that hit-tests a
+    // control raycasts its pad, and reading armed off a different object than
+    // the one being aimed at is how a control ends up live in one place and dead
+    // in another.
     s.handle.userData.armed = armed
+    if (s.grabPad) s.grabPad.userData.armed = armed
     if (!armed) s.handle.visible = false
+    // The close control and the name board are armed by the same test, and then
+    // they part company on being DRAWN.
+    //
+    //   `X--` follows the grab exactly: only there when you reach for it. It was
+    //   drawn permanently for one build, on the argument that a way out has to
+    //   be findable -- and asked for as hover-only, which settles it. The two
+    //   corner controls are a matched pair and behaving differently was the odd
+    //   thing about them.
+    //
+    //   The name board is always up, because it is the only one of the three
+    //   that SAYS something. A label you have to hover to read is not a label,
+    //   and it is also the thing your pointer aims at to find the other two.
+    for (const o of [s.closeBtn, s.closePad, s.plate, s.platePad]) {
+      if (o) o.userData.armed = armed
+    }
+    if (!armed && s.closeBtn) s.closeBtn.visible = false
+    if (s.plate) s.plate.visible = armed
+    // A STEP CONTROL IS ARMED ONLY IF THERE IS SOMEWHERE TO STEP TO. At the ends
+    // of a road one of them points at nothing, and a control that is drawn and
+    // then does nothing is worse than one that is not there -- you press it
+    // twice before deciding the feature is broken.
+    if (s.prevBtn) {
+      const road = armed ? roadOrder(s.district) : []
+      const i = road.indexOf(s)
+      for (const [o, p, ok] of [
+        [s.prevBtn, s.prevPad, i > 0],
+        [s.nextBtn, s.nextPad, i >= 0 && i < road.length - 1],
+      ]) {
+        const live = armed && ok
+        o.userData.armed = live
+        p.userData.armed = live
+        if (!live) o.visible = false
+      }
+    }
   }
+}
+
+// WHAT THE NAME BOARD SAYS, kept up with what the client calls itself.
+//
+// A title arrives whenever the client feels like sending one -- at map time,
+// after a document loads, on every keystroke in some editors -- so the string is
+// checked every frame and the TEXTURE is rebuilt only when it has actually
+// changed. That is the same discipline the gantry panels keep, and for the same
+// reason: redrawing a canvas per frame per window is the one way a name board
+// could cost anything.
+//
+// A window with no title yet says what it is rather than nothing. Plenty of
+// clients never set one at all.
+function syncTitles() {
+  for (const s of signs.values()) {
+    if (!s.plate) continue
+    const want = nameOf(s)
+    if (s.plateText === want) continue
+    s.plateText = want
+    s.plate.material.map?.dispose()
+    s.plate.material.map = plateTexture(want, s.plateW)
+    s.plate.material.needsUpdate = true
+  }
+}
+
+// WHAT A WINDOW IS CALLED: yours if you have named it, the client's otherwise,
+// and something rather than nothing if neither. One function, so the board, the
+// map's list and the map's window page cannot disagree about it.
+export function nameOf(sign) {
+  const k = sign?.mesh?.userData?.signKey ?? ''
+  return renames.get(k) || titles.get(k) || 'untitled window'
+}
+
+// NAME IT YOURSELF, and clearing the name falls back to the client's.
+//
+// Keyed by the SURFACE, not by the address, so it survives every move -- a
+// window you named does not lose its name by crossing the road or changing
+// workspace, which is the one thing that would make naming useless.
+export function renameWindow(district, milepost, name) {
+  const s = signAt(district, milepost)
+  const k = s?.mesh?.userData?.signKey
+  if (!k) return null
+  const clean = String(name ?? '').trim().slice(0, 40)
+  if (clean) renames.set(k, clean)
+  else renames.delete(k)
+  return { district, milepost, name: nameOf(s), mine: !!clean }
+}
+
+// ASK THE CLIENT TO CLOSE. Not "destroy the surface" -- that is the compositor
+// pulling a window out from under a program that may have unsaved work in it.
+// `requestClose` is xdg_toplevel.close, which is the polite request every window
+// manager sends, and a client is allowed to put up a dialog instead of going.
+//
+// BY SHAPE, NOT BY CLASS NAME, for the reason startResize states: minification
+// renames constructors and every check keyed on one was dead in the shipped
+// bundle. `requestClose` is a method name and survives.
+//
+// So this returns "asked", never "closed". The window goes away when its surface
+// is destroyed, which adoptPending notices on a later frame -- and if you were
+// standing in it, that is the path that already releases you.
+export function requestCloseWindow(district, milepost) {
+  const s = signAt(district, milepost)
+  const role = s?.view?.surface?.role
+  if (typeof role?.requestClose !== 'function') return null
+  role.requestClose()
+  return { district, milepost, asked: true }
 }
 
 // A surface's size is not known when it is created -- the first buffer decides
@@ -417,12 +1107,22 @@ function dropSign(k, forget = false) {
   // and leaves its geometry and material behind. One per resize is not much and
   // a drag makes a lot of them. (The texture is shared and outlives every sign,
   // which is why it is not disposed here.)
-  for (const o of [s.handle, s.grabPad]) {
+  for (const o of [s.handle, s.grabPad, s.closeBtn, s.closePad, s.plate, s.platePad, s.prevBtn, s.prevPad, s.nextBtn, s.nextPad]) {
     if (!o) continue
     o.geometry.dispose()
     o.material.dispose()
   }
-  if (forget) signs.delete(k)
+  // The name board's texture is NOT shared -- there is one per window and it is
+  // rebuilt whenever the title changes -- so unlike the grab's it has to go.
+  s.plate?.material?.map?.dispose()
+  if (forget) {
+    signs.delete(k)
+    renames.delete(k)
+    // Only when the surface is really gone. A sign dropped to be REBUILT (a
+    // resize) keeps its key, and forgetting the title there would blank the name
+    // board on every configure of a drag.
+    titles.delete(k)
+  }
 }
 
 // MINIFICATION EATS CLASS NAMES. `impl.constructor.name === 'Surface'` works in
@@ -593,6 +1293,7 @@ export {
   adoptPending,
   syncPlacement,
   syncHandles,
+  syncTitles,
   dropSign,
   isSurface,
   isPopupRole,

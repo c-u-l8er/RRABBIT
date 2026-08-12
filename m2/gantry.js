@@ -35,6 +35,7 @@
 import * as THREE from 'three'
 import { signs, ACC, COOL, ENTER_Z, exitZOf } from './world.js'
 import * as ws from './workspaces.js'
+import * as tracks from './tracks.js'
 
 // The enter gate's back panel needs to know where back IS. Travel owns the
 // history; this only reads it, the same way it reads the window counts.
@@ -84,6 +85,7 @@ const GREY = '#2a2f3a'
 // you continue on. The reloop is neither an exit nor an entrance.
 const LOOP = '#5a3a1e'
 const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
+const COOL_CSS = '#' + COOL.toString(16).padStart(6, '0')
 
 // `${workspaceId}:${kind}` -> { group, kind, panels: [...] }
 const gates = new Map()
@@ -127,9 +129,21 @@ function drawPanel(canvas, p) {
 // buttons did and never said where you were, so the one sign you meet on
 // arriving at a workspace was the one that could not tell you which workspace it
 // was. It goes on BOTH gates -- the question is just as live when you are
-// leaving -- and it is deliberately not a panel: it carries no action, it is not
-// clickable, and it must not look like something that is.
-function drawBoard(canvas, name, count) {
+// leaving -- and pressing it opens the map (see makeBoard).
+//
+// IT NAMES THE TRACK TOO, and that is not decoration. Ten tracks can be parked
+// on the same road, so "which road am I on" stopped being the whole answer to
+// "where am I": switching from track 2 to track 5 while both sit on `home`
+// changes everything about what `back` will do and nothing about the view.
+// Without the track on the board, that switch is invisible -- which is exactly
+// how "the numbers don't work" gets reported about keys that are working.
+// THE NETWORK GOES ON THE RIGHT, opposite the track, for exactly the argument the
+// track won. Two networks can each have a road called `home` with two windows on
+// it, and taking a ramp between them changes every road in the world -- so without
+// the network on the board the biggest journey the shell can make is the one it
+// says least about. Amber stays "where am I", the track is cool on the left, and
+// the network is cool on the right.
+function drawBoard(canvas, name, count, track, network) {
   const g = canvas.getContext('2d')
   const W = canvas.width
   const H = canvas.height
@@ -143,7 +157,23 @@ function drawBoard(canvas, name, count) {
   g.textBaseline = 'middle'
   g.fillStyle = ACC_CSS
   g.font = 'bold 62px ui-monospace, monospace'
-  g.fillText(`${name}   ·   ${count === 1 ? '1 window' : `${count} windows`}`, W / 2, H / 2 + 4)
+  // The track goes on the LEFT and in the cool colour, so the amber line stays
+  // the answer to "where am I" and the track reads as a separate fact rather
+  // than as part of the road's name.
+  const label = `${name}   ·   ${count === 1 ? '1 window' : `${count} windows`}`
+  g.fillText(label, W / 2, H / 2 + 4)
+  if (track) {
+    g.textAlign = 'left'
+    g.fillStyle = COOL_CSS
+    g.font = 'bold 44px ui-monospace, monospace'
+    g.fillText(track, 26, H / 2 + 4)
+  }
+  if (network) {
+    g.textAlign = 'right'
+    g.fillStyle = COOL_CSS
+    g.font = 'bold 44px ui-monospace, monospace'
+    g.fillText(String(network).slice(0, 14), W - 26, H / 2 + 4)
+  }
 }
 
 function makeBoard() {
@@ -157,6 +187,12 @@ function makeBoard() {
     new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
   )
   mesh.position.set(0, BEAM_Y + BOARD_H / 2 + 12, 6)
+  // THE BOARD IS A BUTTON, on both gates. It said where you were and did
+  // nothing, which made it the largest, most legible thing on the road that
+  // could not be pressed -- and the map is the one control every road wants
+  // within reach at both ends. Asked for at the beginning and the end, which is
+  // exactly the two gates.
+  mesh.userData.gantryAction = { kind: 'map' }
   return { mesh, tex, canvas }
 }
 
@@ -358,12 +394,22 @@ function syncGate(id, kind, z, row) {
 
   const w = ws.get(id)
   const here = countIn(id)
-  const bkey = `${w?.name}:${here}`
+  // The track has to be IN THE KEY or the board never redraws when you switch --
+  // the name and the count are both unchanged by switching tracks, which is the
+  // whole case this was added for.
+  const trackLabel = tracks.labelOf(tracks.active())
+  // The network belongs in the key for the same reason the track does, and even
+  // more so: two networks can have a road with the same name and the same window
+  // count, so a key without it would leave the board naming the network you left.
+  const netLabel = ws.activeTenantName()
+  const bkey = `${w?.name}:${here}:${trackLabel}:${netLabel}`
   if (bkey !== gate.boardKey) {
     gate.boardKey = bkey
     gate.boardName = w?.name ?? id
     gate.boardCount = here
-    drawBoard(gate.board.canvas, gate.boardName, here)
+    gate.boardTrack = trackLabel
+    gate.boardNetwork = netLabel
+    drawBoard(gate.board.canvas, gate.boardName, here, trackLabel, netLabel)
     gate.board.tex.needsUpdate = true
   }
 
@@ -442,7 +488,12 @@ export function gantryMeshes() {
   // Only what is ON the gate. three raycasts a mesh you hand it directly whether
   // or not it is visible, so a scrolled-off lane would still take clicks through
   // the ones drawn over it.
-  for (const gate of gates.values()) for (const p of gate.panels) if (p.mesh.visible) out.push(p.mesh)
+  for (const gate of gates.values()) {
+    for (const p of gate.panels) if (p.mesh.visible) out.push(p.mesh)
+    // The board too, now that pressing it means something. It is never scrolled
+    // off -- it is not on the panel grid -- so it needs no visibility test.
+    if (gate.board?.mesh) out.push(gate.board.mesh)
+  }
   return out
 }
 

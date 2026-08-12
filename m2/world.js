@@ -16,7 +16,7 @@
 // function moved here from the old single file reads EXACTLY as it did before
 // -- the split moved code, it did not rewrite it.
 
-import { root as workspaceRoot } from './workspaces.js'
+import { root as workspaceRoot, rampsOf } from './workspaces.js'
 
 export const ACC = 0xf2c14e
 export const COOL = 0x2de2e6
@@ -97,10 +97,45 @@ export const GATE_GAP = 900
 export const windowZ = (laneIndex, side) =>
   ENTER_Z - GATE_GAP - laneIndex * MILE - (side > 0 ? MILE / 2 : 0)
 
-// The exit gate stands one clear run past the LAST window on a road -- read off
-// the signs actually standing there rather than computed from a count, because
-// the two sides advance independently and neither one's ordinal knows how far
-// down the road the other has got.
+// THERE IS DELIBERATELY NO INVERSE OF windowZ.
+//
+// One existed for a day. Crossing the road asked "which ordinal on the other
+// side stands nearest the z I am at now?", and because the two sides are half a
+// MILE out of step the answer is always exactly x.5 -- so the rounding decided
+// it, always the same way, and every crossing walked the window half a MILE
+// further down the road. See flipWindowSide in rrabbit.js for what replaced it:
+// the ordinal is kept and only the side changes, which needs no arithmetic and
+// is its own inverse. If a z ever has to be turned back into a lane again, that
+// is the trap it is walking into.
+
+// ---- the centre line ------------------------------------------------------
+//
+// THE DASHES ARE ADDRESSES, not decoration. A yellow centre line down the middle
+// of the road is the marking a road has; making each dash a numbered slot is
+// what turns it into a row of places you can point at -- which is what a ramp
+// needs, because a ramp is not at the gate and not at a milepost, it is at a spot
+// on the tarmac.
+//
+// `dashZ` is arithmetic on constants and NOTHING ELSE. That is deliberate and it
+// is the same discipline as a milepost: dash 7 is at the same z whether the road
+// has one window on it or twelve, so a ramp built at dash 7 does not move when
+// the road around it changes. If this ever grew a term for the window layout,
+// every ramp on every road would slide the next time a window opened.
+export const DASH_PITCH = 180
+export const DASH_LEN = 96
+// Just in front of where you park at the head of the road, so dash 0 is the first
+// thing under the bonnet rather than something behind you.
+export const DASH_0_Z = 200
+export const dashZ = (i) => DASH_0_Z - i * DASH_PITCH
+// Which dash is nearest a given z -- for the panel that has to say where a ramp
+// is in words. NOT used to place anything (see the note in windowZ's neighbour
+// about inverses); rounding here decides a label, not a position.
+export const dashNear = (z) => Math.max(0, Math.round((DASH_0_Z - z) / DASH_PITCH))
+
+// The exit gate stands one clear run past the LAST THING on a road -- read off
+// what is actually standing there rather than computed from a count, because the
+// two sides advance independently and neither one's ordinal knows how far down
+// the road the other has got.
 //
 // An empty road still has an exit gate: a workspace with nothing in it is still
 // somewhere you can leave.
@@ -110,7 +145,43 @@ export function lastWindowZ(district) {
   return z
 }
 
-export const exitZOf = (district) => lastWindowZ(district) - GATE_GAP
+// A RAMP IS A THING ON THE ROAD, so the gate has to stand past it too.
+//
+// Without this a ramp built far down a long road becomes unreachable the moment
+// the windows that made the road long are closed: the gate moves back up, the
+// wheel's far stop moves with it, and the marker is left beyond the end of the
+// tarmac you are allowed to drive on. A marker you can see and cannot reach is
+// worse than no marker.
+export function lastRampZ(district) {
+  let z = 0
+  for (const r of rampsOf(district)) z = Math.min(z, dashZ(r.at))
+  return z
+}
+
+export const exitZOf = (district) => Math.min(lastWindowZ(district), lastRampZ(district)) - GATE_GAP
+
+// How many dashes a road needs: enough to run past its own exit gate, and never
+// fewer than enough to carry its furthest ramp. Capped, because the count is a
+// per-frame reconciliation and an absurd road should cost an absurd road's worth
+// of quads and no more.
+export const DASH_MAX = 96
+export function dashCount(district) {
+  const reach = Math.min(exitZOf(district) - GATE_GAP / 2, dashZ(8))
+  return Math.min(DASH_MAX, Math.ceil((DASH_0_Z - reach) / DASH_PITCH) + 1)
+}
+
+// EVERY WINDOW ON A ROAD, in the order you drive past them.
+//
+// Both sides interleaved, because that is the order the road presents them in --
+// the sides are separate for SPACING and were never separate for "where am I in
+// the queue". Out here rather than in either personality because all three
+// callers need the same answer and a second copy of the sort is a second copy
+// that can disagree: RRABBIT moves windows along it, Travel steps between them
+// with the (prev) / (next) controls, and the map lists them in it.
+export const roadOrder = (district) =>
+  [...signs.values()]
+    .filter((s) => s.mesh && s.district === district)
+    .sort((a, b) => windowZ(b.lane, b.side) - windowZ(a.lane, a.side))
 
 // How far ahead of you a gantry sits when you stop in front of it. Measured, not
 // chosen: at 320 units the 58-degree frustum is only 355 units tall about y=105
@@ -150,6 +221,11 @@ export const state = {
   signs: 0,
   adopted: 0,
   frames: 0,
+  // Beats spent braked instead of rendering -- see "the idle backoff". Reported
+  // rather than silent because an abandoned tab of this page once held 3.4 cores
+  // for ten hours and the only number that would have shown it was `frames`
+  // climbing, which reads the same as work.
+  idleBeats: 0,
   decodes: 0,
   suppressed: 0,
   glErrors: 0,
@@ -197,6 +273,28 @@ export const state = {
 // which is why it lives out here rather than with either.
 export const signs = new Map()
 
+// surface key -> the title the client last set for itself.
+//
+// GREENFIELD DOES NOT KEEP THIS. `DesktopSurface.setTitle` only fires
+// `userShell.events.surfaceTitleUpdated` and stores nothing, so a shell that
+// wants to put a name on a window has to be the thing that remembers it. Keyed
+// by the same `client:surface` string `keyOf` builds, because
+// `toCompositorSurface` is made of exactly those two ids -- so the event and the
+// sign meet without a lookup table between them.
+//
+// Out here with `signs` and for the same reason: shell.js is the only place that
+// can hear the event, RRABBIT is the only thing that draws it, and neither owns
+// the other.
+export const titles = new Map()
+
+// surface key -> the name YOU gave this window, which beats the client's.
+//
+// A client names its own window and often names it badly, or all of them the
+// same, or after a file three directories deep. The shell cannot fix that and it
+// can let you overrule it. Session-lifetime on purpose: a window is a live
+// surface, and a name for one that has closed is a name for nothing.
+export const renames = new Map()
+
 // Filled by buildWorld(), then passed to attachTravel()/attachRrabbit().
 export const ctx = {
   renderer: null,
@@ -215,6 +313,21 @@ export const ctx = {
 // once the session is up, which is after the last attach() has run.
 export const hooks = {
   spawnWindow: null, // () => boolean -- open a window on the road you are on
+  // (district, milepost) => asked -- ask the client to close itself. Travel owns
+  // the click on the `X--` control and RRABBIT owns the surface, and Travel
+  // cannot import RRABBIT (RRABBIT imports Travel, for release()). Same shape
+  // and same reason as spawnWindow.
+  closeWindow: null,
+  // (mine: boolean) => void -- take the keyboard, or give it back.
+  //
+  // The map can be open WHILE YOU ARE STANDING IN A WINDOW now, and both of them
+  // want the keys. Greenfield binds keydown/keyup to the CANVAS (browser/input.js)
+  // rather than to window, so this is settled by DOM focus and not by a flag:
+  // blur the canvas and the client stops receiving keystrokes and is correctly
+  // told it lost focus; focus it again and it has them back. Without this,
+  // renaming a workspace from inside a window types the name into the
+  // application as well.
+  shellKeyboard: null,
 }
 
 // Which side of the road the next adopted window stands on.

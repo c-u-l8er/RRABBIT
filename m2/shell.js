@@ -53,6 +53,7 @@ import { createRack } from './tubes.js'
 import {
   state,
   signs,
+  titles,
   ctx,
   hooks,
   sideQueue,
@@ -64,14 +65,18 @@ import {
   SCENE_ID,
   LEDGER_PITCH,
   LEDGER_COLS,
+  windowZ,
 } from './world.js'
 import * as ws from './workspaces.js'
+import * as tracks from './tracks.js'
 import {
   attachTravel,
   districtPose,
   setRange,
   goDistrict,
   goWindow,
+  goTrack,
+  goExit,
   flattenTo,
   release,
   backTarget,
@@ -81,8 +86,25 @@ import {
   stepFlight,
   installInput,
 } from './travel.js'
-import { attachRrabbit, adoptPending, syncPopups, syncPlacement, syncHandles, checkPopupsMapped } from './rrabbit.js'
+import {
+  attachRrabbit,
+  adoptPending,
+  syncPopups,
+  syncPlacement,
+  syncHandles,
+  checkPopupsMapped,
+  flipWindowSide,
+  nudgeWindowAlong,
+  moveWindowTo,
+  reorderWindowTo,
+  tidyRoad,
+  requestCloseWindow,
+  renameWindow,
+  nameOf,
+  syncTitles,
+} from './rrabbit.js'
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
+import { attachRamps, syncRamps, rampReport } from './ramps.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
 // state lives in world.js now; the page and the diagnostics still expect it
@@ -208,11 +230,78 @@ function buildWorld(canvas) {
   attachTravel(ctx)
   attachRrabbit(ctx)
   attachGantry(ctx)
+  attachRamps(ctx)
   attachBack(backTarget)
   syncGantries()
+  syncRamps()
   // The map navigates through Travel rather than doing it itself, the same
   // division the gates keep.
-  attachMap({ window: goWindow, district: (id) => goDistrict(id) })
+  // IF YOU MOVE THE WINDOW YOU ARE STANDING IN, YOU GO WITH IT.
+  //
+  // The map is open over a flattened window now, so "cross to the other side" is
+  // something you can ask for from inside the very window it moves -- and the
+  // camera is parked pixel-exact against a surface that then slides 660 units
+  // sideways. Measured that way once: the window crossed the road and the view
+  // stayed pointed at the empty air it had left.
+  //
+  // TWO FRAMES LATER, not immediately. A move changes three fields on a record
+  // and syncPlacement puts the mesh right on the NEXT frame (that is the whole
+  // mechanism -- see rrabbit.js), while flattenTo reads the mesh's position to
+  // work out where to stand. Re-seating in the same tick would fly the camera to
+  // where the window still was.
+  const follow = (move) => (district, milepost, arg) => {
+    const wasIn = state.mode === 'flat' && state.flatDistrict === district && state.flatMilepost === milepost
+    // AND WHEN YOU ARE DRIVING THE ROAD IT IS ON. Standing in it is the obvious
+    // case and it was the only one handled; out on the road a window you moved
+    // slid 660 units up the tarmac while the camera stayed where it was, which
+    // is the same complaint from one step further back. Only the road you are
+    // actually on -- rearranging a road you are not looking at should not drive
+    // you to it.
+    const wasNear = !wasIn && state.mode !== 'flat' && state.district === district
+    const out = move(district, milepost, arg)
+    if (!out) return out
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        if (wasIn) flattenTo(out.milepost, out.district)
+        else if (wasNear) goWindow(out.district, out.milepost)
+      }),
+    )
+    return out
+  }
+
+  // Travel flies, RRABBIT moves the windows, and the map does neither -- it only
+  // says what was asked for. Both halves of that are wired here for the same
+  // reason: shell.js is the one module that is allowed to know about all three.
+  attachMap({
+    // RELEASE FIRST. Both of these fly the camera somewhere, and the map can now
+    // be open while you are standing IN a window -- so "drive to it" from in
+    // there has to let go of the one you are in, or you end up driving with the
+    // shell still believing it is flattened against a window behind you.
+    window: (d, m) => {
+      release()
+      return goWindow(d, m)
+    },
+    district: (id) => {
+      release()
+      return goDistrict(id)
+    },
+    // Walking the graph by clicking the lit neighbours. Travel's own goExit lets
+    // go of the window first, because the map can be open from inside one.
+    exit: goExit,
+    move: {
+      side: follow(flipWindowSide),
+      along: follow(nudgeWindowAlong),
+      to: follow(moveWindowTo),
+      onto: follow(reorderWindowTo),
+      tidy: tidyRoad,
+    },
+    close: requestCloseWindow,
+    rename: renameWindow,
+    // Clicking a chip is pressing its number, so it goes through the same
+    // function the keyboard does rather than a second path that could disagree.
+    track: goTrack,
+  })
+  hooks.closeWindow = requestCloseWindow
 
   resize()
   window.addEventListener('resize', resize)
@@ -257,15 +346,17 @@ function syncRoads() {
     }
     r.road.position.set(x, -30, -6600)
   }
-  // The status line names the workspace keys, and creating a lane from an exit
-  // gate changes how many there are -- so a line written once at startup starts
-  // lying the first time you use the feature it is describing.
+  // THE STATUS LINE STOPPED DESCRIBING THE KEYBOARD, because the keyboard
+  // changed under it. It said "type a number for a lane (1..n)" and the numbers
+  // are TRACKS now -- ten trails, not n roads -- so the sentence was describing
+  // a feature that no longer exists while sitting above the one that replaced
+  // it. The count still has to be live for the same reason it always did.
   if (want.size !== lastRoadCount) {
     lastRoadCount = want.size
     const el = document.getElementById('status')
     if (el) {
       el.textContent =
-        `${want.size} workspaces -- type a number for a lane (1..${want.size}), 0 for the map. ` +
+        `${want.size} workspaces -- 1..9 switch tracks (1 then 0 for ten), 0 opens the map. ` +
         'Scroll: open windows at the entrance, then the lanes out at the far end.'
     }
   }
@@ -361,6 +452,108 @@ function leaveNeutralVertexState() {
   else if (gl.bindVertexArray) gl.bindVertexArray(null)
 }
 
+// --------------------------------------------------------- the idle backoff
+
+// WHY THE FRAME LOOP HAS A BRAKE, AND WHY IT IS KEYED ON INPUT AND NOTHING ELSE.
+//
+// Measured: three abandoned headless tabs of this page, left behind by earlier
+// agent-browser runs, held ELEVEN OF TWENTY-FOUR CORES for hours -- ~3.4 cores
+// each, all of it in the GPU process, compositing at 15-30fps against
+// swiftshader. They had no server left to talk to (:8911 was long dead) and
+// nobody attached. One had rendered 369,325 frames and logged 358,290 GL errors
+// on the way, one per frame for five hours that no one was ever going to read.
+// The loop's whole contract was "re-arm forever", so that is what it did.
+//
+// THREE CONDITIONS THAT LOOK RIGHT AND ARE ALL WRONG, because each was measured
+// before it was believed:
+//
+// 1. `document.hidden`. All three tabs reported visibilityState 'visible' for
+//    their entire lives -- a `--headless=new` page is never backgrounded. It is
+//    still checked below, because it is free and correct for a real background
+//    tab, but on the case that actually burned the CPU it does nothing.
+//
+// 2. "No windows." `signs.size === 0` never happens here: /m2/ opens its launch
+//    plan on load, so an abandoned tab sits at five.
+//
+// 3. "No new content." There is a real content-arrival hook -- Greenfield's
+//    `Renderer.render()` is commit-driven and ends by calling `gfScene.render`,
+//    which this file overrides and already counts as `state.suppressed`. It was
+//    climbing at ~30/s on a tab nobody had touched in ten minutes, and that is
+//    not a bug: `clients/simple-shm` is the ordinary Wayland demo, so it paints
+//    from a `frame()` callback and commits again forever, five times over. The
+//    scene is GENUINELY never static. A dirty-flag brake can never engage here,
+//    and there is nothing to fix in the client -- animating is its whole job.
+//
+// So content cannot distinguish a shell in use from one abandoned overnight,
+// because both have identical content. Only INPUT can. That is the brake:
+// nothing touched this page in a while, so stop paying full price to composite
+// for nobody. It is the one signal that is about the human rather than the
+// scene, and it is why this is keyed on input alone.
+//
+// Two stages rather than one, because "untouched" spans two different things.
+// Reading output without moving the mouse is normal and must stay watchable, so
+// the first stage only halves-ish the rate. Ten minutes untouched is a tab
+// somebody walked away from, and that one gets the slow beat.
+//
+// And it is a HEARTBEAT, NOT A STOP. Adoption is a poll, not an event
+// (`adoptPending` reads `topLevelViews` every frame), so there is no arrival
+// callback to wake on: a window that appears while we are braked is noticed on
+// the next beat and full rate resumes by itself. Anything this fails to
+// enumerate recovers at WALKED_HZ rather than never, which is the difference
+// between a brake and a bug. Any pointer move, wheel or key restores full rate
+// on the spot -- including a pointermove that merely crosses the page.
+const RESTING_AFTER = 60000 // ms untouched: still being read, cap the rate
+const RESTING_HZ = 10
+const WALKED_AFTER = 600000 // ms untouched: nobody is here
+const WALKED_HZ = 1
+
+let lastInput = 0
+let beat = 0
+
+// Capture phase on `window`, because Greenfield binds its own input to the
+// CANVAS (browser/input.js) and Travel binds its own on top of that. Waking has
+// to happen whoever ends up handling -- or swallowing -- the event.
+for (const ev of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup']) {
+  window.addEventListener(ev, () => wake(), { capture: true, passive: true })
+}
+window.addEventListener('visibilitychange', () => !document.hidden && wake())
+
+function wake() {
+  lastInput = performance.now()
+  if (!beat) return
+  // Do not wait out the rest of a beat to answer a keystroke.
+  clearTimeout(beat)
+  beat = 0
+  requestAnimationFrame(frame)
+}
+
+// The rate this frame is allowed to re-arm at, or 0 for "as fast as the display
+// will take it". Motion the user did not ask for keeps full rate: a flight is a
+// shot in progress and a resize is a gesture, and neither may go choppy just
+// because the pointer happens to be still while it plays.
+function pace(now) {
+  if (state.mode !== 'driving') return 0
+  const quiet = now - lastInput
+  if (quiet > WALKED_AFTER) return WALKED_HZ
+  if (quiet > RESTING_AFTER) return RESTING_HZ
+  return 0
+}
+
+// Re-arming is the loop's only exit, so it is the one place the brake can live.
+function rearm(now) {
+  const hz = pace(now)
+  if (!hz) {
+    beat = 0
+    requestAnimationFrame(frame)
+    return
+  }
+  state.idleBeats++
+  beat = setTimeout(() => {
+    beat = 0
+    frame(performance.now())
+  }, 1000 / hz)
+}
+
 let lastT = 0
 function frame(now = 0) {
   try {
@@ -369,6 +562,11 @@ function frame(now = 0) {
     // tab returning does not teleport the camera.
     const dt = Math.min(0.05, lastT ? (now - lastT) / 1000 : 0.016)
     lastT = now
+    // A hidden tab has nothing to show and rAF is suspended there anyway; this
+    // only matters for the beat, which is a timer and keeps firing. Skipping
+    // before the reconcilers, not after, because a composite nobody can see is
+    // the whole cost being avoided.
+    if (document.hidden) return rearm(now)
     adoptPending()
     syncPopups()
     // The resize grab only exists on the window you are in, and what that is
@@ -383,8 +581,13 @@ function frame(now = 0) {
     // time you land on it.
     syncRoads()
     syncGantries()
+    // After the gantries, because the exit gate stands past the last thing on the
+    // road and a ramp is now one of those things -- so the gate has to have moved
+    // before the dashes are counted out to reach it.
+    syncRamps()
     // After the roads, because this puts the windows back over them.
     syncPlacement()
+    syncTitles()
     stepFlight(dt)
     // THE ARCH IS AN OVERVIEW LABEL, SO IT ONLY EXISTS IN THE OVERVIEW.
     //
@@ -418,7 +621,7 @@ function frame(now = 0) {
   } catch (e) {
     if (!state.frameError) state.frameError = String(e && e.stack ? e.stack : e)
   }
-  requestAnimationFrame(frame)
+  rearm(now)
 }
 
 // ------------------------------------------------------------- the readback
@@ -684,6 +887,44 @@ window.__ws = () => {
 }
 window.__wsReset = () => ws.reset()
 
+// THE MULTI-TENANCY PROOF, and the two claims it has to carry are opposites:
+//
+//   - the ACTIVE network's roads are laid and its lanes still sit exactly where
+//     the single-network arithmetic put them (`__ws` above proves that half, and
+//     it proves it of whichever network is active);
+//   - every OTHER network's roads are NOT laid, and every window standing on one
+//     is hidden AND out of the raycast -- which is the half nothing on screen
+//     would tell you about, because a window that is quietly stacked at x=0
+//     underneath the middle road looks exactly like a window that is not there.
+//
+// `hiddenMatchesForeign` is the one that matters. It compares what is hidden
+// against what the graph says belongs elsewhere, rather than counting either one
+// on its own.
+window.__tenants = () => {
+  const foreign = [...signs.values()].filter((s) => s.mesh && !ws.inActive(s.district))
+  const home = [...signs.values()].filter((s) => s.mesh && ws.inActive(s.district))
+  return {
+    ...ws.report(),
+    standingIn: state.district,
+    standingInIsActive: ws.inActive(state.district),
+    roadsLaid: [...roads.keys()],
+    roadsAreAllActive: [...roads.keys()].every((id) => ws.inActive(id)),
+    windows: {
+      onThisNetwork: home.length,
+      onOthers: foreign.length,
+      // The two directions of the same claim, so neither can pass by accident.
+      hiddenMatchesForeign:
+        foreign.every((s) => s.mesh.visible === false) && home.every((s) => s.mesh.visible === true),
+      foreignAddresses: foreign.map((s) => `${s.district}:${s.milepost}`),
+    },
+  }
+}
+
+// WHAT IS PAINTED ON THE ROAD. Read off the instance matrices and the instance
+// colours rather than recomputed from dashZ -- a report that recomputed them
+// would agree with itself whatever the scene contained.
+window.__ramps = () => rampReport()
+
 // The diagnosis, reachable without having to cause the failure. A message that
 // only appears when the shell is already dead is a message nobody can check.
 window.__whyNoContext = (canvas) => whyNoContext(canvas ?? document.createElement('canvas'))
@@ -798,10 +1039,65 @@ window.__pointAtPopup = () => {
 // Takes an id, or an index into the layout for everything written against the
 // old numeric districts (`__district(1)` still means the second road).
 window.__district = (d) => goDistrict(typeof d === 'number' ? ws.at(d)?.id : d)
+
+// TEN TRAILS, AND WHICH ONE YOU ARE ON. `__tracks(n)` switches, `__tracks()`
+// reports -- and the report says where each one is parked and what is behind it,
+// because the whole claim being made is that those differ per track while the
+// road they are on may not.
+window.__tracks = (n) => {
+  if (n !== undefined) goTrack(Number(n))
+  const r = tracks.report()
+  return {
+    ...r,
+    standingOn: state.district,
+    backTarget: backTarget(),
+    tracks: r.tracks.map((t) => ({ ...t, name: t.name || null, on: t.at ? (ws.get(t.at)?.name ?? t.at) : null })),
+  }
+}
+window.__tracksReset = () => tracks.reset()
 window.__map = (openIt) => {
   if (openIt === false) closeMap()
   else if (openIt === true) openMap()
   return mapReport()
+}
+
+// MOVING A WINDOW, PROVED FROM THE SCENE.
+//
+// The three moves change three fields on a record and nothing else -- the mesh
+// is put right by syncPlacement on the next frame. So a report taken from the
+// record would only be telling you that an assignment happened. This waits a
+// frame and reads the MESH, which is the only thing that can say the window
+// actually went anywhere.
+//
+//   __moveWindow('home', 2, 'flip')      cross the road
+//   __moveWindow('home', 2, -1)          one place nearer the entrance
+//   __moveWindow('home', 2, 'build')     onto another road entirely
+window.__moveWindow = (district, milepost, what) => {
+  const before = [...signs.values()].find((s) => s.district === district && s.milepost === milepost && s.mesh)
+  const from = before ? { district, milepost, side: before.side, lane: before.lane, x: Math.round(before.mesh.position.x), z: Math.round(before.mesh.position.z) } : null
+  const asked =
+    what === 'flip'
+      ? flipWindowSide(district, milepost)
+      : typeof what === 'number'
+        ? nudgeWindowAlong(district, milepost, what)
+        : moveWindowTo(district, milepost, what)
+  return new Promise((resolve) =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const s = asked && [...signs.values()].find((x) => x.district === asked.district && x.milepost === asked.milepost && x.mesh)
+        resolve({
+          from,
+          asked,
+          mesh: s ? { x: Math.round(s.mesh.position.x), z: Math.round(s.mesh.position.z), turn: +s.mesh.rotation.y.toFixed(3) } : null,
+          // The claim, checked rather than asserted: the mesh is where the
+          // record now says it should be, and the frame and post came with it.
+          placed: !!s && Math.round(s.mesh.position.z) === Math.round(windowZ(s.lane, s.side)),
+          togetherWithFurniture:
+            !!s && !!s.post && Math.round(s.post.position.x) === Math.round(s.mesh.position.x) && Math.round(s.post.position.z) === Math.round(s.mesh.position.z),
+        })
+      }),
+    ),
+  )
 }
 
 // THE M4 PROOF. Every window must occupy its OWN rect in the ledger, and
@@ -1092,6 +1388,13 @@ async function main() {
     }
     session.userShell.events.surfaceDestroyed = () => {
       state.surfaces--
+    }
+    // THE ONLY PLACE A WINDOW'S NAME EXISTS. Greenfield emits the title and
+    // keeps none of it (see `titles` in world.js), so if this listener is not
+    // here the name board can only ever say "untitled window" -- which is what
+    // it said for every client until it was.
+    session.userShell.events.surfaceTitleUpdated = (cs, title) => {
+      titles.set(`${cs.client.id}:${cs.id}`, String(title ?? ''))
     }
 
     // Greenfield's output IS our canvas, so it gets our context.

@@ -16,10 +16,12 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW } from './world.js'
+import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, roadOrder } from './world.js'
 import * as ws from './workspaces.js'
+import * as tracks from './tracks.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
-import { toggleMap, closeMap, isOpen as mapIsOpen } from './map.js'
+import { rampMeshes, dashActionOf, setRampHover } from './ramps.js'
+import { toggleMap, closeMap, openMap, openMapAt, openMapAtDash, isOpen as mapIsOpen } from './map.js'
 
 let renderer, gl, scene, camera, session
 export function attachTravel(c) {
@@ -49,33 +51,32 @@ const raycaster = new THREE.Raycaster()
 // restores where you were, while taking an EXIT is a junction and puts you at
 // the head of the new road.
 let roadZ = 0
-const roadMemory = new Map()
 
-// WHERE YOU HAVE BEEN, so there is a way back that does not require remembering.
+// WHERE YOU LEFT EACH ROAD IS A FACT ABOUT THE TRACK, not about the road.
 //
-// Only workspace CHANGES go on it -- pressing 2 while already on lane 2 is not a
-// journey -- and it is capped, because this is a trail to retrace and not a log.
-// `goBack` pops rather than pushing, or back would be a place you could go
-// forward to and the button would just oscillate between two roads.
-const HISTORY_MAX = 32
-const history = []
+// This was a Map here, keyed by workspace, shared by everything -- and that was
+// right for exactly as long as there was one of you. Two tracks parked on
+// `home` are two pieces of work that happen to be on the same road, and one of
+// them scrolling the other's view is the same complaint per-workspace memory was
+// introduced to fix, one level up. It lives on the track now (tracks.js), and
+// these two lines are all that is left of it here.
+const parkRoad = (id, z) => tracks.parkRoad(id, z)
+const parkedAt = (id) => tracks.roadOf(id)
+
+// WHERE YOU HAVE BEEN LIVES IN tracks.js NOW, and there are ten of them.
+//
+// There was one history, a module-level array right here, and it was the shell's
+// single idea of where you had been -- so `back` meant back from whatever you
+// last happened to do, whichever piece of work it belonged to. A track is a
+// trail of its own, ten run at once, and `back` follows the one you are on.
+// travel.js keeps the flying and asks tracks.js where it has been.
 let goingBack = false
 
-export function backTarget() {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const id = history[i]
-    if (id !== state.district && ws.get(id)?.open) return id
-  }
-  return null
-}
+export const backTarget = () => tracks.backTarget()
 
 function goBack() {
-  const id = backTarget()
+  const id = tracks.back()
   if (!id) return null
-  // Drop everything from that entry onward, so repeated backs walk the trail
-  // rather than bouncing off its end.
-  const at = history.lastIndexOf(id)
-  history.length = at
   goingBack = true
   const r = goDistrict(id)
   goingBack = false
@@ -83,25 +84,94 @@ function goBack() {
   return r
 }
 
-// The workspace number being typed. 600ms is the pause after which a lone "1"
-// stops being a possible prefix of "12" and becomes a jump to lane 1 -- long
-// enough that a deliberate two-digit number is never split, short enough that a
-// single-digit jump on a big network does not feel like it hung.
+// The track number being typed. 600ms is the pause after which a lone "1" stops
+// being a possible prefix of "10" and becomes track 1 -- long enough that a
+// deliberate two-digit number is never split, short enough that a single-digit
+// switch does not feel like it hung.
 const DIGIT_GAP = 600
 let digits = ''
 let digitTimer = 0
 
+// A DIGIT IS A TRACK, NOT A LANE.
+//
+// It used to be a position in the layout: `2` meant "the second road". That made
+// the number a name for a PLACE, and there were as many of them as there were
+// roads. A track is a name for a piece of WORK -- ten of them, each parked
+// somewhere with its own trail -- so two of them can be on the same road and
+// pressing back on each goes somewhere different. That is the whole change.
+//
+// SWITCHING IS NOT A JOURNEY. `goingBack` is reused for exactly the reason it
+// exists: arriving because you selected a track is a restore, and recording it
+// would put the track's own current road onto its own trail every time you came
+// back to it.
 function commitDigits() {
   clearTimeout(digitTimer)
   digitTimer = 0
   const n = Number(digits)
   digits = ''
-  // A digit is a POSITION IN THE LAYOUT, not an id -- typing 2 means "the second
-  // road", which is what the map numbers. Ids are for the gates, which name
-  // their destinations.
-  const w = n >= 1 ? ws.at(n - 1) : null
-  state.lastLaneKey = { typed: n, went: w?.id ?? null }
-  if (w) goDistrict(w.id)
+  if (n < 1 || n > tracks.COUNT) {
+    state.lastTrackKey = { typed: n, track: null, went: null }
+    return null
+  }
+  leaveTrack()
+  const to = tracks.select(n)
+  state.lastTrackKey = { typed: n, track: n, went: to ?? null }
+  if (!to) return
+  return driveToTrack(to)
+}
+
+// A TRACK SWITCH LETS GO OF THE WINDOW YOU ARE STANDING IN.
+//
+// You cannot be flattened against a surface and be driving somewhere else, and
+// a track is somewhere else even when it is parked on the same road -- that is
+// what makes it a different piece of work. Unlike the map, which draws over the
+// window and gives it back when you shut it, this is leaving.
+//
+// The blur matters as much as the release: Greenfield's key listeners are on the
+// canvas, so a client that still has DOM focus keeps receiving keystrokes while
+// you drive away from it. The plain-Esc path already pairs `release()` with
+// `canvas.blur()` for exactly this reason.
+//
+// One flight, not two. `release()` aims at the road you are on and then this
+// aims at the road you are going to; both read `currentPose()` and no frame runs
+// between them, so the second simply replaces the first.
+function driveToTrack(to) {
+  if (state.mode === 'flat') {
+    release()
+    renderer.domElement.blur()
+  }
+  goingBack = true
+  const r = goDistrict(to)
+  goingBack = false
+  return r
+}
+
+// PARK THE ROAD YOU ARE LEAVING ON THE TRACK YOU ARE LEAVING.
+//
+// It has to happen BEFORE `select`, and it did not: select flips the active
+// track and goDistrict's own "park the road you are leaving" line then wrote the
+// outgoing road's position onto the INCOMING track. Measured: switching from
+// track 1 (on `home`) to track 4 gave track 4 an entry for `home` it had never
+// driven, and track 1 lost the position that was the whole point.
+let switchingTrack = false
+const leaveTrack = () => {
+  if (state.district) tracks.parkRoad(state.district, roadZ)
+  // And tell goDistrict not to park it AGAIN on the way in. Its own "park the
+  // road you are leaving" line is right for every other kind of journey and
+  // wrong for this one, because by the time it runs the active track is the new
+  // one -- so the outgoing road's position landed on the incoming track. That is
+  // the same off-by-one ordering fault as above, one call deeper, and it gave a
+  // never-used track a scroll position it had never set.
+  switchingTrack = true
+}
+
+// Switching tracks from the map, which is the same act as pressing the number.
+export function goTrack(n) {
+  leaveTrack()
+  const to = tracks.select(n)
+  if (!to) return null
+  state.lastTrackKey = { typed: n, track: n, went: to, from: 'map' }
+  return driveToTrack(to)
 }
 
 // The road runs from the head to the EXIT GATE, and the wheel stops at both.
@@ -165,12 +235,12 @@ function setRange(fog, far) {
 //   windows are opened.
 //
 //   otherwise -- you pressed a workspace key, which is a step sideways, and you
-//   are put back exactly where you left THAT road (see roadMemory).
+//   are put back exactly where you left THAT road, on THIS track (tracks.js).
 //
 //   `at` -- a caller that knows exactly where on the road it wants you, which
 //   is the map picking a window. It BEATS the memory, and saying so explicitly
 //   is the fix for a real bug: goWindow used to publish its target by writing it
-//   into roadMemory, and the "park the road you are leaving" line below then
+//   into the road memory, and the "park the road you are leaving" line below then
 //   overwrote it with the current position whenever the destination was the road
 //   you were already on. So picking a window on your OWN lane read the value
 //   back unchanged and nothing moved -- reported as the map not shifting when
@@ -184,21 +254,52 @@ function setRange(fog, far) {
 // a fresh workspace at roadZ -2580 whose far bound was -1800. The clamp still
 // matters with per-road memory, because a road SHRINKS when its last window
 // closes.
+//
+// AND IT IS THE ONE PLACE THE NETWORK CHANGES. Every way of arriving somewhere
+// comes through here -- a gate lane, a ramp, a track, the map, going back -- so
+// putting the switch here means none of them needs to know that networks exist.
+// A destination in another network selects that network on the way in, and
+// everything downstream (the roads laid, the lanes, the layout) reconciles to it
+// on the next frame because it always did.
+//
+// It has to LET GO OF THE WINDOW first. You cannot be flattened against a surface
+// standing on a road that is about to stop being laid; the road you were on
+// belongs to the network you are leaving.
 function goDistrict(id, { atHead = false, at = null } = {}) {
   const w = ws.get(id)
   if (!w || !w.open) return null
-  // Park the road you are leaving before you leave it.
-  if (state.district) roadMemory.set(state.district, roadZ)
-  if (state.district && state.district !== id && !goingBack) {
-    history.push(state.district)
-    if (history.length > HISTORY_MAX) history.shift()
-    state.historyDepth = history.length
+  const crossing = !ws.inActive(id)
+  if (crossing && state.mode === 'flat') {
+    release()
+    renderer.domElement.blur()
   }
+  // Park the road you are leaving before you leave it -- unless the track
+  // switched under us, in which case leaveTrack already did it, onto the track
+  // that was actually leaving. Before the switch, because it is a fact about the
+  // road you are on and that road is about to stop being one of ours.
+  if (state.district && !switchingTrack) parkRoad(state.district, roadZ)
+  if (crossing) {
+    state.lastNetworkChange = { from: ws.activeTenantId(), to: ws.tenantOf(id), at: id }
+    ws.selectTenant(ws.tenantOf(id))
+  }
+  switchingTrack = false
+  // ONTO THE ACTIVE TRACK'S TRAIL, and only if this is a journey. `goingBack` is
+  // true both when retracing and when SELECTING a track -- neither is somewhere
+  // you went, and recording the second would mean a track pushed its own current
+  // road onto its own trail every time you switched back to it.
+  tracks.arrive(id, { record: !goingBack })
+  state.historyDepth = tracks.active()?.history.length ?? 0
+  state.track = tracks.activeIndex()
   const b = roadBoundsOf(id)
-  const want = at !== null ? at : atHead ? b.near : (roadMemory.get(id) ?? b.near)
+  const want = at !== null ? at : atHead ? b.near : (parkedAt(id) ?? b.near)
   roadZ = Math.min(b.near, Math.max(b.far, want))
-  roadMemory.set(id, roadZ)
   state.district = id
+  // So that coming back to this network puts you on the road you left rather than
+  // on its root. Written on arrival rather than on departure: departure does not
+  // know it is one, because leaving a road and leaving a network are the same
+  // call and only the destination tells them apart.
+  ws.noteLast(id)
+  state.network = ws.activeTenantName()
   setRange(FOG_DRIVE, FAR_DRIVE)
   flight = { from: currentPose(), to: districtPose(id), t: 0, target: null }
   state.mode = 'flying'
@@ -285,7 +386,13 @@ const ZOOM_MODE = new URLSearchParams(location.search).get('zoom')
 function fitDistance(s) {
   const g = s.mesh.geometry.parameters
   const vTan = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * FIT
-  return Math.max(g.height / (2 * vTan), g.width / (2 * vTan * camera.aspect))
+  // THE WINDOW IS TALLER THAN ITS PICTURE. The name board and the close control
+  // stand above the top edge (rrabbit.js: chromeTop), and the camera looks at
+  // the picture's centre -- so the top of the chrome is the furthest thing from
+  // the look point and it is what decides whether all of the window is on
+  // screen. Leaving it out is what put both of them off the top of the frame.
+  const half = g.height / 2 + (s.chromeTop ?? 0)
+  return Math.max(half / vTan, g.width / (2 * vTan * camera.aspect))
 }
 
 function defaultZoom(s) {
@@ -297,6 +404,23 @@ function defaultZoom(s) {
   return Math.max(hard, fitDistance(s) - base)
 }
 const rememberedZoom = (s) => zoomMemory.get(zoomKey(s.district, s.milepost)) ?? defaultZoom(s)
+
+// A window that MOVES TO ANOTHER ROAD takes a fresh milepost there, so its
+// address changes -- and this memory is keyed by address. Without this the zoom
+// you set on that window is left behind under a key nothing will ever ask for
+// again, and the window arrives at the default the next time you fly into it,
+// which reads as the shell forgetting.
+//
+// "Mileposts are never reissued" is what makes moving the entry safe rather than
+// merely tidy: the key it vacates cannot be claimed by a later window, so there
+// is no way for this to hand one window's zoom to another.
+export function rekeyZoom(fromDistrict, fromMilepost, toDistrict, toMilepost) {
+  const from = zoomKey(fromDistrict, fromMilepost)
+  if (!zoomMemory.has(from)) return false
+  zoomMemory.set(zoomKey(toDistrict, toMilepost), zoomMemory.get(from))
+  zoomMemory.delete(from)
+  return true
+}
 
 function poseFor(s) {
   // A PlaneGeometry faces +Z; after rotation.y = t its normal is (sin t, 0, cos t).
@@ -491,13 +615,63 @@ function setGrabHot(s, hot) {
   if (!s?.handle) return
   const show = !!hot && !!s.handle.userData.armed
   s.handle.visible = show
-  renderer.domElement.style.cursor = show ? 'nesw-resize' : ''
   state.grabHot = show
 }
 
-function handleUnder(ev) {
+// `X--` appears the same way `-->` does, and the two are checked together so
+// that exactly one cursor is set per pointer move. Two independent "hot"
+// functions each writing `style.cursor` means whichever ran second wins, and
+// leaving one control's corner would clear the cursor the other had just set.
+function setCloseHot(s, hot) {
+  if (!s?.closeBtn) return
+  const show = !!hot && !!s.closeBtn.userData.armed
+  s.closeBtn.visible = show
+  state.closeHot = show
+}
+
+function setStepHot(s, which, hot) {
+  const btn = s?.[which === -1 ? 'prevBtn' : 'nextBtn']
+  if (!btn) return false
+  const show = !!hot && !!btn.userData.armed
+  btn.visible = show
+  return show
+}
+
+function setChromeCursor() {
+  renderer.domElement.style.cursor = state.grabHot
+    ? 'nesw-resize'
+    : state.closeHot || state.titleHot || state.stepHot
+      ? 'pointer'
+      : ''
+}
+
+// STEP TO THE WINDOW BEFORE OR AFTER THIS ONE, in road order.
+//
+// Road order interleaves the two sides (world.js), so the next window along is
+// frequently on the OTHER side of the road -- and flattenTo flies you there,
+// across the tarmac, which is the "jump the camera across the lane when it needs
+// to" this was asked for. There is nothing special to do for that case; it falls
+// out of stepping through the order the road is actually in.
+function stepWindow(s, delta) {
+  const road = roadOrder(s.district)
+  const i = road.indexOf(s)
+  const to = road[i + delta]
+  if (i < 0 || !to) return null
+  state.lastStep = { from: s.milepost, to: to.milepost, delta }
+  return flattenTo(to.milepost, to.district)
+}
+
+// Is the pointer over one of the flat window's own controls? `which` names the
+// pad, so there is one raycast routine for all three rather than one per control
+// -- the next one added is a name, not another copy of this.
+//
+// It tests ARMED and not `visible` for the reason syncHandles states: the grab
+// is drawn only when reached for, so a control that could only be hit while it
+// was already being pointed at is a control nobody can ever find.
+function chromeUnder(ev, which) {
   const s = flatSign()
-  if (!s?.handle?.userData?.armed || !s.grabPad) return null
+  const pad = s?.[which]
+  if (!pad?.userData?.armed) return null
   const rect = renderer.domElement.getBoundingClientRect()
   raycaster.setFromCamera(
     new THREE.Vector2(
@@ -506,8 +680,10 @@ function handleUnder(ev) {
     ),
     camera,
   )
-  return raycaster.intersectObject(s.grabPad, false).length ? s : null
+  return raycaster.intersectObject(pad, false).length ? s : null
 }
+
+const handleUnder = (ev) => chromeUnder(ev, 'grabPad')
 
 function startResize(s, ev) {
   // BY SHAPE, NOT BY CLASS NAME. Minification renames constructors and every
@@ -749,10 +925,33 @@ function goWindow(district, milepost) {
   const view = roadViewDistance(s)
   // camera z is 260 + roadZ, and we want (camera z - window z) === view.
   // Handed to goDistrict as an ARGUMENT -- see `at` there for what writing it
-  // into roadMemory instead cost.
+  // into the road memory instead cost.
   const at = s.mesh.position.z + view - 260
   state.lastMapPick = { district, milepost, view: Math.round(view), at: Math.round(at) }
   return goDistrict(district, { at })
+}
+
+// WALKING THE NETWORK FROM THE MAP.
+//
+// The map lights up the workspaces reachable from the one you have selected, and
+// clicking a lit one comes here. It is deliberately the SAME journey a gate lane
+// is -- `atHead`, recorded on the track's trail -- because it is the same journey:
+// you took an exit. The only difference is that you took it by pointing at the
+// destination on a map instead of at a panel on a sign, and a shell in which those
+// two produce different results is a shell with two ideas of what an exit is.
+//
+// It does not close the map. Arriving re-selects the node you arrived on, whose
+// own exits then light, so hops chain: click, click, click, and the trail behind
+// you is real history you can press back through. Closing on the first click would
+// make the second one a second gesture.
+export function goExit(to) {
+  if (state.mode === 'flat') {
+    release()
+    renderer.domElement.blur()
+  }
+  const r = goDistrict(to, { atHead: true })
+  state.lastMapWalk = { to, arrived: r, from: 'map' }
+  return r
 }
 
 // What a panel on a gate does when you click it. The gate hangs the action; this
@@ -776,13 +975,48 @@ function doGantryAction(a) {
     state.lastGantryClick = { kind: 'open', side: a.side, ok }
     return ok
   }
+  if (a.kind === 'map') {
+    // The name board on either gate. Pressing it is pressing 0, and it opens on
+    // the road you are standing on -- which is the road the board names.
+    openMap()
+    state.lastGantryClick = { kind: 'map', to: state.district }
+    return true
+  }
+  if (a.kind === 'ramp') {
+    // TAKING A RAMP IS TAKING AN EXIT, and it lands you at the head of the road
+    // it leads to for exactly the reason a gate lane does: a junction is not a
+    // place you were before, so there is no position on the far road to restore.
+    // goDistrict switches the network if the destination is in another one.
+    const to = ws.get(a.to)
+    state.lastGantryClick = {
+      kind: 'ramp',
+      district: a.district,
+      at: a.at,
+      to: a.to,
+      open: !!to?.open,
+      crossesNetwork: ws.tenantOf(a.to) !== ws.tenantOf(a.district),
+    }
+    // A ramp to a CLOSED workspace is barred rather than followed, the same
+    // refusal a barred gate lane gives: its road is not laid, so arriving would
+    // put you in the air. The board says `closed` so this is not a silent no.
+    return goDistrict(a.to, { atHead: true })
+  }
+  if (a.kind === 'dash') {
+    // A BARE MARKER OPENS THE PLANNER. Building a ramp means naming a network and
+    // a workspace in it, and that is a list -- out here you drive, in there you
+    // plan, which is the division the name board already keeps. The dash is
+    // carried through so the page that opens is about THAT slot.
+    state.lastGantryClick = { kind: 'dash', district: a.district, at: a.at }
+    openMapAtDash(a.district, a.at)
+    return true
+  }
   if (a.kind === 'back') return goBack()
   if (a.kind === 'reloop') {
     // Back to the head of THIS road. Not a workspace change, so it is not a
     // journey and does not go on the history -- you have not been anywhere.
     const b = roadBoundsOf(state.district)
     roadZ = b.near
-    roadMemory.set(state.district, roadZ)
+    parkRoad(state.district, roadZ)
     state.lastGantryClick = { kind: 'reloop', to: state.district }
     flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
     state.mode = 'flying'
@@ -874,16 +1108,18 @@ function scenePointFromEvent(ev) {
     -((ev.clientY - rect.top) / rect.height) * 2 + 1,
   )
   raycaster.setFromCamera(ndc, camera)
+  // Only the windows of the network that is laid -- see liveSigns in installInput
+  // for why `visible` has to be tested here rather than trusted.
   // RECURSIVE: popup quads are children of their sign, and a menu is the thing
   // you most need to be able to click. A non-recursive pick made every popup
   // decorative.
-  const meshes = [...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)
+  const meshes = [...signs.values()].filter((s) => s.mesh && s.mesh.visible).map((s) => s.mesh)
   const hits = raycaster.intersectObjects(meshes, true)
   // The resize grab is a child of the sign, so a RECURSIVE pick finds it -- and
   // it is not part of the surface. Left in, a click on the corner would resolve
   // to no view at all, which reads to overFlatSurface as "outside the window"
   // and would have made grabbing the handle the gesture that leaves.
-  const hit = hits.find((h) => h.uv && !h.object.userData.resizeHandle)
+  const hit = hits.find((h) => h.uv && !h.object.userData.chrome)
   if (!hit) return null
 
   // A popup carries its OWN view, and therefore its own rect in the ledger. Its
@@ -967,6 +1203,18 @@ function sendButton(ev, released) {
 function installInput() {
   const canvas = renderer.domElement
 
+  // WHO HAS THE KEYBOARD, published for map.js to call.
+  //
+  // Greenfield binds keydown/keyup to this canvas (browser/input.js), and its
+  // `focus`/`blur` handlers are what tell the client it gained or lost the
+  // keyboard -- so DOM focus IS the answer to the question, and moving it is the
+  // whole implementation. The map calls this when it opens over a flattened
+  // window and again when it shuts.
+  hooks.shellKeyboard = (mine) => {
+    if (mine) canvas.blur()
+    else canvas.focus()
+  }
+
   // CAPTURE phase on window, so this runs before Greenfield's own target-phase
   // listeners on the canvas. stopPropagation then keeps them from seeing a
   // pointer position that means nothing in a perspective scene.
@@ -974,11 +1222,19 @@ function installInput() {
   // `passive` is explicit for the wheel. A wheel listener on `window` is PASSIVE
   // BY DEFAULT in Chrome, so `ev.preventDefault()` inside it is silently ignored
   // -- the shell would refuse the scroll and the page would scroll anyway.
+  //
+  // AND IT STANDS ASIDE WHILE THE MAP IS OPEN. The map can be open while you are
+  // STANDING IN a window now -- that is what pressing 0 in there does -- and it
+  // is a DOM overlay above this canvas. Swallowing every pointer event in the
+  // capture phase would stop all of them reaching it, so the map would draw
+  // perfectly and not respond to a single click. The earlier build dodged that
+  // by leaving the window first; being asked to stay is what makes the rule
+  // explicit: flat mode owns the pointer only while nothing of ours is over it.
   const swallow = (type, handler, opts) =>
     window.addEventListener(
       type,
       (ev) => {
-        if (state.mode === 'flat') {
+        if (state.mode === 'flat' && !mapIsOpen()) {
           ev.stopPropagation()
           handler?.(ev)
         }
@@ -988,7 +1244,14 @@ function installInput() {
 
   swallow('pointermove', (ev) => {
     if (resizing) return stepResize(ev)
-    setGrabHot(flatSign(), !!handleUnder(ev))
+    const on = flatSign()
+    setGrabHot(on, !!handleUnder(ev))
+    setCloseHot(on, !!chromeUnder(ev, 'closePad'))
+    state.titleHot = !!chromeUnder(ev, 'platePad')
+    const prevHot = setStepHot(on, -1, !!chromeUnder(ev, 'prevPad'))
+    const nextHot = setStepHot(on, 1, !!chromeUnder(ev, 'nextPad'))
+    state.stepHot = prevHot || nextHot
+    setChromeCursor()
     sendMotion(ev)
   })
   // A click on the window is the application's. A click on anything else --
@@ -1020,6 +1283,37 @@ function installInput() {
         /* synthetic events have no real pointer to capture; the drag still works */
       }
       state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'grab' }
+      return
+    }
+    // The other two controls on the frame, checked in the same place and for the
+    // same reason: they are the shell's, not the application's, and neither of
+    // them is a click outside asking to leave.
+    const shut = chromeUnder(ev, 'closePad')
+    if (shut) {
+      ev.preventDefault()
+      const asked = hooks.closeWindow?.(shut.district, shut.milepost) ?? null
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'close', asked: !!asked }
+      return
+    }
+    for (const [pad, delta] of [
+      ['prevPad', -1],
+      ['nextPad', 1],
+    ]) {
+      const on = chromeUnder(ev, pad)
+      if (!on) continue
+      ev.preventDefault()
+      const went = stepWindow(on, delta)
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: delta < 0 ? 'prev' : 'next', to: went }
+      return
+    }
+    const board = chromeUnder(ev, 'platePad')
+    if (board) {
+      ev.preventDefault()
+      // WITHOUT LEAVING. The board is a menu bar on the window, and clicking one
+      // does not shut the thing it is attached to. `swallow` standing aside
+      // while the map is open is what makes the overlay clickable from in here.
+      openMapAt(board.district, board.milepost)
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'title' }
       return
     }
     if (!overFlatSurface(ev)) {
@@ -1117,7 +1411,7 @@ function installInput() {
       // deltaY is NEGATIVE when the wheel rolls away from you, which everything
       // else in the world treats as forward/closer -- so it adds, not subtracts.
       roadZ = Math.min(near, Math.max(far, roadZ + ev.deltaY * 0.6))
-      roadMemory.set(state.district, roadZ)
+      parkRoad(state.district, roadZ)
       const p = districtPose(state.district)
       camera.position.copy(p.pos)
       camera.lookAt(p.look)
@@ -1152,7 +1446,7 @@ function installInput() {
     roadZ,
     ...roadBounds(),
     cameraZ: camera.position.z,
-    parked: Object.fromEntries([...roadMemory].map(([k, v]) => [k, Math.round(v)])),
+    parked: tracks.report().tracks[tracks.activeIndex() - 1]?.roads ?? {},
   })
 
   // What the GPU is actually holding. A shell that gets slower with every
@@ -1176,6 +1470,14 @@ function installInput() {
   // One raycast over both, sorted by distance, so the answer is simply whatever
   // is nearest -- a gantry that stands in front of a window really does take the
   // click, the way anything else in the world would.
+  // A WINDOW ON ANOTHER NETWORK'S ROAD IS HIDDEN AND STILL RAYCASTABLE. three
+  // tests neither `visible` nor the material's when you hand it a mesh directly,
+  // which is the same trap the gantry's scrolled-off panels hit -- and here it
+  // would mean clicking through the road you are on into a window belonging to a
+  // network that is not laid. `.visible` is set by syncPlacement, so this filter
+  // and that assignment are the two halves of one rule.
+  const liveSigns = () => [...signs.values()].filter((s) => s.mesh && s.mesh.visible).map((s) => s.mesh)
+
   const aim = (ev) => {
     const rect = canvas.getBoundingClientRect()
     raycaster.setFromCamera(
@@ -1185,15 +1487,24 @@ function installInput() {
       ),
       camera,
     )
-    const meshes = [...gantryMeshes(), ...[...signs.values()].filter((s) => s.mesh).map((s) => s.mesh)]
+    // The road markings join the same single raycast, so a dash under a gantry
+    // upright loses to the upright and a ramp board in front of a window takes the
+    // click -- whatever is nearest wins, which is what everything else in a world
+    // does.
+    const meshes = [...gantryMeshes(), ...rampMeshes(), ...liveSigns()]
     return raycaster.intersectObjects(meshes, false)[0] ?? null
   }
+
+  // A hit is one of four things now, in the order they are asked: a dash or a ramp
+  // (which are instances and a mesh respectively, so the dash pads need the
+  // instanceId and nothing else does), a gate panel, or a window.
+  const actionAt = (hit) => (hit ? (dashActionOf(hit) ?? actionOf(hit.object)) : null)
 
   canvas.addEventListener('pointerdown', (ev) => {
     if (state.mode !== 'driving' || mapIsOpen()) return
     const hit = aim(ev)
     if (!hit) return
-    const action = actionOf(hit.object)
+    const action = actionAt(hit)
     if (action) return doGantryAction(action)
     flattenTo(signs.get(hit.object.userData.signKey).milepost)
   })
@@ -1202,11 +1513,17 @@ function installInput() {
   canvas.addEventListener('pointermove', (ev) => {
     if (state.mode !== 'driving') {
       setHovered(null)
+      setRampHover(null)
       return
     }
     const hit = aim(ev)
+    const action = actionAt(hit)
+    // Two hover owners because they light two different kinds of thing: the gantry
+    // recolours a panel it owns, the centre line recolours an instance nobody
+    // owns. Both are told on every move, including that it is not them.
     setHovered(hit && actionOf(hit.object) ? hit.object : null)
-    canvas.style.cursor = hit ? 'pointer' : ''
+    setRampHover(hit)
+    canvas.style.cursor = hit && (action || hit.object.userData.signKey) ? 'pointer' : ''
   })
 
   // THE ESCAPE HATCH (invariant 8). Capture phase, or the focused client's
@@ -1215,46 +1532,99 @@ function installInput() {
   //
   // NOT Esc+CapsLock: CapsLock is a lock, not a modifier, so it would steal Esc
   // from vi whenever the light is on, and the page cannot see the light.
-  // District keys. Deliberately NOT live while flat: a digit typed into a
-  // focused application must reach the application, not move you to another
-  // workspace.
-  window.addEventListener('keydown', (ev) => {
-    if (state.mode === 'flat' || ev.ctrlKey || ev.altKey || ev.metaKey) return
-    if (ev.key === 'Escape' && mapIsOpen()) return void closeMap()
-    // A FIELD YOU ARE TYPING IN OWNS ITS KEYSTROKES. The map has a name box and
-    // a lane box now, and without this a workspace called "build 2" would fly
-    // you to lane 2 while you named it, and a zero would shut the map you were
-    // editing in. Escape is deliberately above this line, because leaving is the
-    // one thing that should still work from inside a field.
-    if (ev.target?.closest?.('#map input, #map select')) return
-    if (ev.key === 'o' || ev.key === 'O') return void toggleMap()
-    if (!/^[0-9]$/.test(ev.key)) return
+  // THE NUMBER KEYS ARE THE SHELL'S, INCLUDING FROM INSIDE A WINDOW.
+  //
+  // They were the application's while flat, on the rule that a key typed into a
+  // focused program must reach the program. That was right when a digit meant
+  // "fly me to the second road" -- nobody wants typing `2` in an editor to move
+  // them -- and it stopped being right when a digit became a TRACK. A track is
+  // the thing you switch between while working, so a track key that only works
+  // when you are not working is not a track key.
+  //
+  // `0` was taken first and 1..9 were left behind, which made the keyboard
+  // inconsistent in the worst possible way: one number did something and the
+  // other nine looked broken. Reported twice.
+  //
+  // THE COST, STATED PLAINLY: no digit reaches a focused application any more.
+  // That is a real loss and a bigger one than `0` alone -- you cannot type a
+  // number into a terminal in a flattened window. It is the price of ten tracks
+  // being reachable without a chord, it was asked for twice, and the honest fix
+  // when a client that needs digits actually ships is the one written down for
+  // Esc below: a modifier, or a double-tap, so both can have them.
+  //
+  // CAPTURE PHASE, and stopImmediatePropagation on the keys we take. A focused
+  // surface's own listener is on the canvas and would otherwise eat them; the
+  // two sibling listeners on `window` in this same phase would otherwise still
+  // run, which is exactly how one Esc both shut the map and left the window.
+  window.addEventListener(
+    'keydown',
+    (ev) => {
+      if (ev.ctrlKey || ev.altKey || ev.metaKey) return
+      const flat = state.mode === 'flat'
 
-    // TYPING 1 THEN 2 MEANS LANE 12, NOT LANE 1 AND THEN LANE 2.
-    //
-    // One digit per lane worked while there were three of them and stopped the
-    // moment the exit gate could make more: lane 12 was simply unreachable from
-    // the keyboard, and the two keystrokes that ought to reach it drove you
-    // somewhere else on the way. So digits accumulate.
-    //
-    // ZERO IS STILL THE MAP, but only as the FIRST digit -- the roads are
-    // numbered from 1, so a leading zero can never be part of a lane number,
-    // while the 0 in "10" always is. That is the whole rule, and it is why the
-    // test is on the buffer being empty rather than on a mode.
-    if (ev.key === '0' && digits === '') return void toggleMap()
+      // ESCAPE SHUTS THE MAP FIRST. Plain Esc belongs to the application
+      // (invariant 8 forwards it, which is why the way out is a chord) -- but
+      // not while a menu of ours is open over it, because there Esc is aimed at
+      // the menu, like it is everywhere else in computing.
+      if (ev.key === 'Escape' && mapIsOpen()) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        closeMap()
+        return
+      }
 
-    digits += ev.key
-    clearTimeout(digitTimer)
+      // A FIELD YOU ARE TYPING IN OWNS ITS KEYSTROKES. The map has name boxes and
+      // a lane box, and without this naming a workspace "build 2" switches you to
+      // track 2 while you type it and a zero shuts the map you are editing in.
+      // Above the flat branch as well as below it, because the map can be open
+      // over a flattened window now.
+      if (ev.target?.closest?.('#map input, #map select')) return
 
-    // COMMIT AS SOON AS THE NUMBER CANNOT GROW. With five workspaces, "3" can
-    // only ever mean 3 -- 30-something does not exist -- so it goes immediately
-    // and single-digit jumps feel exactly as they always did. Only a prefix that
-    // could still become a bigger valid lane waits, and then only for as long as
-    // someone might plausibly still be typing it.
-    const count = ws.list().length
-    if (Number(digits) * 10 > count) commitDigits()
-    else digitTimer = setTimeout(commitDigits, DIGIT_GAP)
-  })
+      if (!flat && (ev.key === 'o' || ev.key === 'O')) return void toggleMap()
+      if (!/^[0-9]$/.test(ev.key)) return
+      if (flat) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+      }
+
+      // ZERO IS THE MAP, but only as the FIRST digit -- tracks are numbered from
+      // 1, so a leading zero can never be part of a track number while the zero
+      // in "10" always is. That is the whole rule, and it is why the test is on
+      // the buffer being empty rather than on a mode.
+      //
+      // From inside a window it opens the map ON that window AND LEAVES YOU IN
+      // IT: a menu does not close the document in order to open itself.
+      if (ev.key === '0' && digits === '') {
+        if (!flat) return void toggleMap()
+        if (mapIsOpen()) return void closeMap()
+        openMapAt(state.flatDistrict, state.flatMilepost)
+        return
+      }
+
+      // TYPING 1 THEN 0 MEANS TRACK 10, NOT TRACK 1 AND THEN THE MAP.
+      //
+      // Digits accumulate, and they always have -- the rule was written for lane
+      // numbers when a road network could grow past nine, and it is what makes a
+      // tenth track reachable without inventing a key for it.
+      digits += ev.key
+      clearTimeout(digitTimer)
+
+      // COMMIT AS SOON AS THE NUMBER CANNOT GROW. `2` can only ever mean track 2
+      // -- there is no track 20 -- so it goes immediately and nine of the ten
+      // switch on one keystroke. Only `1` waits, because it could still become
+      // 10, and then only for as long as someone might plausibly still be typing.
+      //
+      // THE BOUND IS THE TRACK COUNT NOW, AND IT WAS THE WORKSPACE COUNT. Left as
+      // `ws.list().length` it read 3, so `1 * 10 > 3` committed track 1 on the
+      // spot and the following `0` was a fresh leading zero -- which is the map.
+      // Measured exactly that: `1` `0` selected track 1 and opened the map, and
+      // track 10 could not be reached at all.
+      if (Number(digits) * 10 > tracks.COUNT) commitDigits()
+      else digitTimer = setTimeout(commitDigits, DIGIT_GAP)
+      return void 0
+    },
+    { capture: true },
+  )
 
   // TWO chords, because the first one is not always ours to receive.
   //
@@ -1292,8 +1662,21 @@ function installInput() {
   // and when a client that needs it actually ships, the honest fix is
   // double-tap-Esc -- first press to the application, a second within ~400ms to
   // the shell -- which keeps both. Nothing shipping today needs it.
+  //
+  // NOT WHILE THE MAP IS OVER IT. Esc belongs to the innermost thing that is
+  // open, and once the map can be open on top of a flattened window that is the
+  // map. Without this guard both handlers fire on one keystroke -- they are
+  // separate listeners on `window` in the same phase, so the earlier one's
+  // stopPropagation does not reach the later one -- and Esc shut the map AND
+  // threw you out of the window, which is the opposite of staying put.
   const isPlainEscape = (ev) =>
-    ev.key === 'Escape' && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey && state.mode === 'flat'
+    ev.key === 'Escape' &&
+    !ev.ctrlKey &&
+    !ev.altKey &&
+    !ev.shiftKey &&
+    !ev.metaKey &&
+    state.mode === 'flat' &&
+    !mapIsOpen()
 
   window.addEventListener(
     'keydown',
