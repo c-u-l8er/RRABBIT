@@ -30,7 +30,7 @@ import * as tracks from './tracks.js'
 // division applied to the windows: the map is where you decide a window belongs
 // somewhere else, and RRABBIT -- the one who IS the windows -- is the only thing
 // that moves one.
-let go = { window: null, district: null, exit: null, dash: null, move: null, close: null, track: null, rename: null }
+let go = { window: null, enter: null, district: null, exit: null, dash: null, move: null, close: null, track: null, rename: null }
 export function attachMap(handlers) {
   go = { ...go, ...handlers }
 }
@@ -104,6 +104,42 @@ let rampNet = null
 // about ALL of them and there is nothing for it to be selected on.
 let netPage = false
 
+// WHICH CLOSE HAS BEEN ASKED FOR BUT NOT ANSWERED, as `district|milepost`.
+//
+// Closing is the one control in here that cannot be undone -- a road can be
+// re-entered, a window moved back, a ramp rebuilt, but a client that has exited is
+// gone with whatever was in it. It was a single click, and on the row it was a
+// single click on a small `×` sitting between two arrows you press all the time.
+//
+// A question you are part-way through answering rather than a fact about anything,
+// so it lives beside `ramp` and `rampNet` and is cleared the same way.
+let confirmShut = null
+
+// The control, in whichever of its two states it is in. One function for both
+// places it appears -- the row's `×` and the window page's full-width button --
+// because two copies of a two-state control is how one of them ends up able to
+// close without asking.
+//
+// `wide` is the page's version. Same three data attributes, same order, different
+// words: on a row there is no space for a sentence and the row itself says which
+// window; on the page there is nothing else the question could be about.
+function shutPrompt(addr, live, wide = false) {
+  if (confirmShut !== addr) {
+    return wide
+      ? `<button class="danger" data-shut="${addr}">ask it to close</button>`
+      : `<button class="mini shut" data-shut="${addr}"${live ? '' : ' disabled'} title="ask this window to close">&times;</button>`
+  }
+  // THE CANCEL IS FIRST AND THE CLOSE IS SECOND, deliberately. The pointer is
+  // already where the control was, and putting the irreversible half under it is
+  // how a double-click closes a window nobody meant to close.
+  return wide
+    ? '<div class="shutting"><span class="note">Close it? The client exits and anything unsaved in it goes with it.</span>' +
+        `<button class="mini" data-shutno="1">keep it</button>` +
+        `<button class="danger" data-shutyes="${addr}">close it</button></div>`
+    : `<button class="mini" data-shutno="1" title="leave it open">keep</button>` +
+        `<button class="mini shut" data-shutyes="${addr}" title="close it for real">close</button>`
+}
+
 // Everything the panel can be about, cleared together. Five mutually exclusive
 // pages reached from six places is exactly the shape that grows a bug where two
 // of them are open at once and the last one written wins.
@@ -112,6 +148,10 @@ function onlyPage(which) {
   focus = which === 'window' ? focus : null
   ramp = which === 'ramp' ? ramp : null
   netPage = which === 'networks'
+  // Leaving the page the question was asked on is an answer of "no". A prompt that
+  // survived a navigation would be waiting on a window you are no longer looking at,
+  // and the next thing you pressed would be answering it.
+  confirmShut = null
 }
 
 export const isOpen = () => open
@@ -389,6 +429,11 @@ const keyOfSign = (s) => s?.mesh?.userData?.signKey ?? ''
 const myName = (s) => renames.get(keyOfSign(s)) ?? ''
 const clientName = (s) => titles.get(keyOfSign(s)) || 'untitled window'
 const titleOf = (s) => myName(s) || clientName(s)
+// SHOWN in brackets, HELD without them -- rrabbit's labelOf says why, and this is
+// the same rule so the board over the window and the list in here cannot drift.
+// The rename box binds to `myName`, never to this, or the brackets would be typed
+// back into the name.
+const labelOf = (s) => `(${titleOf(s)})`
 
 // THE PANEL IS TWO PANELS, and which one you get is which thing you last
 // pointed at: a workspace, or a window.
@@ -448,7 +493,7 @@ function panel() {
             `<li class="${isFocus ? 'focus' : ''}"${live ? ` data-drag="${addr}"` : ''} data-onto="${addr}">` +
             `<div class="row"><span class="grip">&#8942;&#8942;</span>` +
             `<span class="pick" data-win="${addr}">` +
-            `<span class="addr">${esc(titleOf(s))}</span>` +
+            `<span class="addr">${esc(labelOf(s))}</span>` +
             `<span class="meta">${esc(n.name)}:${s.milepost} &middot; ${s.side > 0 ? 'right' : 'left'} &middot; ${size}${flat ? ' &middot; you are in this one' : ''}</span>` +
             '</span></div>' +
             '<div class="moves">' +
@@ -458,7 +503,13 @@ function panel() {
             // The same request the `X--` control on the window makes, from the
             // panel that lists every window -- because closing the fourth one
             // down a road should not require flying into it first.
-            `<button class="mini shut" data-shut="${addr}"${live ? '' : ' disabled'} title="ask this window to close">&times;</button>` +
+            //
+            // AND IT ASKS FIRST. The `×` is the smallest control on the row and it
+            // sits between two arrows you press repeatedly to shuffle a window
+            // along; the two things either side of it are undoable and it is not.
+            // In place rather than as a dialog: the answer belongs on the row the
+            // question was asked about, or you have to look away from it to answer.
+            shutPrompt(addr, live) +
             (elsewhere.length
               ? `<select data-dest="${addr}"${live ? '' : ' disabled'}><option value="">move to&hellip;</option>` +
                 elsewhere.map((w) => `<option value="${esc(w.id)}">${esc(w.name)}</option>`).join('') +
@@ -474,14 +525,26 @@ function panel() {
   // The order here IS the order of the lanes on the exit gate, left to right,
   // so the arrows are not a tidying-up affordance -- they are how you decide
   // which way you reach for without looking.
+  // A LANE IS NAMEABLE HERE, because the gate is where you read the name and this
+  // is where everything about a road is edited. The row shows the connection as the
+  // gate shows it -- `{name} --to-->` -- so what you are typing and what you will
+  // see standing at the end of the road are the same string in the same notation.
+  //
+  // The box holds only what you typed (`exitOwnName`), never the destination's name
+  // filled in on your behalf: a placeholder that is also a value is a box you cannot
+  // tell "unnamed" from "named the same as the target" in, and clearing it would
+  // then be indistinguishable from typing that name.
   const exitRows = exits.length
     ? exits
         .map(
           (e, i) =>
-            `<li><span class="ord">${i + 1}</span><span>${esc(ws.get(e).name)}</span>` +
+            `<li><span class="ord">${i + 1}</span>` +
+            `<span class="conn"><b>{${esc(ws.exitName(selected, e))}}</b> <span class="to">--${esc(ws.get(e).name)}--&gt;</span></span>` +
             `<button class="mini" data-move="${esc(selected)}|${esc(e)}|-1"${i === 0 ? ' disabled' : ''} title="move left on the gate">&#9650;</button>` +
             `<button class="mini" data-move="${esc(selected)}|${esc(e)}|1"${i === exits.length - 1 ? ' disabled' : ''} title="move right on the gate">&#9660;</button>` +
-            `<button class="mini" data-cut="${esc(selected)}|${esc(e)}" title="remove this exit">&times;</button></li>`,
+            `<button class="mini" data-cut="${esc(selected)}|${esc(e)}" title="remove this exit">&times;</button>` +
+            `<span class="naming"><input class="exit-name" data-for="${esc(selected)}|${esc(e)}" value="${esc(ws.exitOwnName(selected, e))}" maxlength="24" placeholder="${esc(ws.get(e).name)}" />` +
+            `<button class="mini" data-exitname="${esc(selected)}|${esc(e)}">name it</button></span></li>`,
         )
         .join('')
     : '<li class="empty">No exits. This road leads nowhere.</li>'
@@ -792,7 +855,7 @@ function rampPanel() {
         if (here?.kind === 'window') {
           return (
             `<p class="note">${name}: <b>window ${here.milepost}</b> stands here. ` +
-            `<button class="mini" data-win="${esc(ramp.district)}|${here.milepost}">open its page</button></p>`
+            `<button class="mini" data-enterwin="${esc(ramp.district)}|${here.milepost}">open its page</button></p>`
           )
         }
         if (!free) {
@@ -902,7 +965,7 @@ function windowPanel() {
   return (
     '<aside class="detail">' +
     `<button class="back" data-back="${esc(s.district)}">&larr; ${esc(home?.name ?? s.district)}</button>` +
-    `<h2>${esc(titleOf(s))}</h2>` +
+    `<h2>${esc(labelOf(s))}</h2>` +
     (inIt ? '<p class="here">You are standing in this window. Closing the map puts you back in it.</p>' : '') +
     // NAME IT YOURSELF. A client names its own window and often names it badly,
     // or names five of them the same thing. Empty falls back to whatever the
@@ -932,11 +995,26 @@ function windowPanel() {
       : '<p class="note">There is nowhere else open to move it to.</p>') +
     '<p class="note">Or drag its row, or this window, onto a workspace on the map.</p>' +
 
+    // THE PAIR IS "BACK INTO IT" AND "OPEN ITS PAGE", and both end up in the
+    // window. This one said "drive to it" and put you on the tarmac outside with
+    // the thing you had just been reading about still shut -- asked for twice now,
+    // once here and once on the dash page, so it is the same control with the same
+    // words as that one rather than a second vocabulary for one act.
+    //
+    // WHAT THIS COSTS, PLAINLY: the road view of a chosen window -- standing back
+    // far enough to see it among its neighbours, which `goWindow` computes from the
+    // sign's own geometry -- is no longer reachable from the map at all. This was
+    // its last button. `goWindow` itself is untouched and still live: moving a
+    // window while you are driving its road follows it (shell.js), which is the
+    // case it was written for. The `[data-win]` branch below is what it was wired
+    // to from here, and nothing in here now emits one outside the `.wins` rows --
+    // where the earlier branch claims it first. Left standing rather than deleted
+    // because `go.window` is part of the handler contract shell.js fills in.
     '<h3>and what to do with it</h3>' +
     (inIt
       ? '<button class="goto" data-shutmap="1">back into it</button>'
-      : `<button class="goto" data-win="${addr}">drive to it</button>`) +
-    `<button class="danger" data-shut="${addr}">ask it to close</button>` +
+      : `<button class="goto" data-enterwin="${addr}">open its page</button>`) +
+    shutPrompt(addr, true, true) +
     '</aside>'
   )
 }
@@ -956,6 +1034,11 @@ function sig() {
     // graph -- so without these the poll would put the old page back over the new
     // one on its next tick.
     `${ws.activeTenantId()}#${netPage ? 'nets' : ''}#${ramp ? `${ramp.district}:${ramp.at}:${ramp.side ?? ''}` : ''}#${rampNet ?? ''}`,
+    // The unanswered close, for the same reason as the pages above it: the graph
+    // does not move when a question is asked, so a signature that could not see it
+    // would let the 700ms poll put the plain `×` back over the prompt -- and the
+    // click that was about to answer would land on "ask" again.
+    confirmShut ?? '',
     ws.tenantList().map((t) => `${t.id}=${t.name}`).join(','),
     // A rename changes nothing about the graph, so without this the panel that
     // renamed it goes on showing the old name until something else moves.
@@ -964,7 +1047,7 @@ function sig() {
       .list()
       .map(
         (n) =>
-          `${n.id}:${n.pos}:${n.name}:${n.open}:${n.exits.join('>')}:${windowsOf(n.id).length}` +
+          `${n.id}:${n.pos}:${n.name}:${n.open}:${n.exits.map((e) => `${e}=${ws.exitName(n.id, e)}`).join('>')}:${windowsOf(n.id).length}` +
           // Ramps are drawn in the panel and counted on the page, and building one
           // changes nothing else about the graph -- so a signature that could not
           // see them left the list you had just added to unchanged.
@@ -1166,6 +1249,14 @@ const CSS = `
 #map .detail .danger { margin-top: 6px; width: 100%; cursor: pointer; background: #2a1418;
   border: 1px solid #ff6b6b; color: #ff6b6b; padding: 8px 10px; font: inherit; }
 #map .detail .danger:hover { background: #3a1a20; }
+/* The prompt that stands where the close button was. Boxed in the same red as the
+   button it replaced, so it reads as that control having changed its mind rather
+   than as a new thing that has appeared somewhere. */
+#map .detail .shutting { margin-top: 6px; border: 1px solid #ff6b6b; background: #1a0f13;
+  padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#map .detail .shutting .note { flex: 1 1 100%; margin: 0; color: #e6a0a0; }
+#map .detail .shutting .mini { flex: 1 1 0; }
+#map .detail .shutting .danger { margin-top: 0; flex: 1 1 0; width: auto; padding: 4px 8px; }
 #map .wins li.focus { outline: 1px solid #f2c14e; outline-offset: 4px; }
 #map .wins li.focus .addr { color: #f2c14e; }
 #map .wins .row { display: flex; align-items: stretch; }
@@ -1209,6 +1300,17 @@ const CSS = `
 #map .exits .mini { padding: 3px 7px; }
 #map .exits .mini:disabled { opacity: .3; cursor: default; border-color: #24304a; }
 #map .exits li.empty { color: #6b7689; }
+/* The row wraps: the connection and its three buttons on one line, the name box on
+   the next. Wrapping rather than shrinking, because a name box narrow enough to sit
+   beside four other controls is one you cannot read what you typed in. */
+#map .exits li { flex-wrap: wrap; }
+#map .exits .conn { flex: 1 1 auto; min-width: 0; }
+#map .exits .conn b { color: #e8edf6; font-weight: 700; }
+#map .exits .conn .to { color: #f2c14e; }
+#map .exits .naming { flex: 1 1 100%; display: flex; gap: 6px; padding-left: 24px; }
+#map .exits .naming input { flex: 1 1 auto; min-width: 0; background: #0b1220;
+  border: 1px solid #24304a; color: #cfe3ff; font: inherit; padding: 3px 6px; }
+#map .exits .naming input::placeholder { color: #4d5a72; }
 #map .tidy { margin-top: 4px; width: 100%; cursor: pointer; background: #16233a;
   border: 1px solid #24304a; color: #9fb0c8; padding: 6px 10px; font: inherit; }
 #map .tidy:hover { border-color: #2de2e6; color: #f3ead4; }
@@ -1251,14 +1353,43 @@ function install() {
       go.move?.along?.(district, Number(mp), Number(d))
       return render(true)
     }
+    // ASK, ANSWER, ANSWER. Three attributes rather than one that toggles, so a
+    // stray click can only ever move this one step in one direction: `data-shut`
+    // raises the question, and nothing but `data-shutyes` closes anything.
     const shut = ev.target.closest('[data-shut]')
     if (shut) {
-      const [district, mp] = shut.dataset.shut.split('|')
+      confirmShut = shut.dataset.shut
+      return render(true)
+    }
+    if (ev.target.closest('[data-shutno]')) {
+      confirmShut = null
+      return render(true)
+    }
+    const shutYes = ev.target.closest('[data-shutyes]')
+    if (shutYes) {
+      const [district, mp] = shutYes.dataset.shutyes.split('|')
+      confirmShut = null
       go.close?.(district, Number(mp))
-      // No re-render: the window has been ASKED, not closed. It leaves the list
-      // when its surface actually goes, which the 700ms poll picks up -- and a
-      // row that vanished on the click would be claiming the client agreed.
-      return
+      // Re-render so the prompt goes, but NOT because the window went: it has been
+      // ASKED, not closed. It leaves the list when its surface actually goes, which
+      // the 700ms poll picks up -- a row that vanished on the click would be
+      // claiming the client agreed.
+      return render(true)
+    }
+    // Naming a lane. The box is found by walking UP TO THE ROW and back down,
+    // never by id or by matching its address: there is one of these per exit, so a
+    // `#exit-name` would match the first row and rename the wrong edge -- and an
+    // attribute selector built from the address needs escaping, which is how this
+    // first shipped and how it first broke. (`CSS.escape` does not exist in every
+    // browser this shell runs in, and a click handler that throws stops handling
+    // everything after it in the same listener.) The row is the relationship the
+    // markup already encodes; asking it is both shorter and unbreakable.
+    const exitname = ev.target.closest('[data-exitname]')
+    if (exitname) {
+      const [from, to] = exitname.dataset.exitname.split('|')
+      const box = exitname.closest('li')?.querySelector('.exit-name')
+      ws.nameExit(from, to, box?.value ?? '')
+      return render(true)
     }
     const tidy = ev.target.closest('[data-tidy]')
     if (tidy) {
@@ -1471,6 +1602,21 @@ function install() {
       const [district, mp] = pick.dataset.win.split('|')
       focus = { district, milepost: Number(mp) }
       return render(true)
+    }
+    // "OPEN ITS PAGE" MEANS THE PAGE THE WINDOW IS SHOWING, not the road outside it.
+    //
+    // This button carried `data-win`, which is the map's "drive to it" -- so the one
+    // control that says OPEN parked you on the tarmac beside the window with the
+    // thing it named still shut. Reported. `goWindow` is deliberately the road view
+    // and travel.js says why; that stays the answer for a window row's own "drive to
+    // it", where seeing it stand among its neighbours is the point. Here the noun is
+    // the page, so this one flattens into it.
+    const enter = ev.target.closest('[data-enterwin]')
+    if (enter) {
+      const [district, mp] = enter.dataset.enterwin.split('|')
+      closeMap()
+      go.enter?.(district, Number(mp))
+      return
     }
     const win = ev.target.closest('[data-win]')
     if (win) {

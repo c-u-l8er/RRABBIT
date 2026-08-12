@@ -102,6 +102,46 @@ const gates = new Map()
 
 // ------------------------------------------------------------- the lane panel
 
+// One slot's worth of canvas, and the two type sizes the panel draws at. Shared
+// with `spanFor`, which has to measure in exactly the units drawPanel draws in --
+// two copies of a font string is how a sign ends up sized for a face it is not
+// written in.
+const PANEL_CANVAS_W = 512
+const PANEL_CANVAS_H = 256
+const PANEL_PAD = 56
+const TITLE_PX = 70
+const SUB_PX = 36
+const MAX_SPAN = 3
+
+// HOW MANY SLOTS THIS LANE WANTS, 1 to 3.
+//
+// Shrinking a long name to fit one slot was the first answer and it is the wrong
+// one on its own: a gate is read at a distance from a moving camera, and the name
+// you chose is the whole reason the lane is named -- so the name that most needs
+// reading is the one that would end up smallest. Asked for the other way round, and
+// it is right: a lane that has more to say TAKES MORE OF THE ROW.
+//
+// Three is the cap because the row still has to be a row. A lane spanning the whole
+// gate is not a lane any more, and at four slots a second lane can no longer sit
+// beside it on any gate narrow enough to need scrolling. Past three the fit above
+// takes over -- shrink, then elide -- so a very long name is still readable, just
+// not at full size.
+//
+// Measured against the SAME canvas the drawing uses, so "does it fit" is asked in
+// the units it will be answered in. Sub-line too: `--somewhere-long-->` can be the
+// wider of the two lines even when the title is short.
+let measurer = null
+function spanFor(p) {
+  if (!measurer) measurer = document.createElement('canvas').getContext('2d')
+  const g = measurer
+  g.font = `bold ${TITLE_PX}px ui-monospace, monospace`
+  const titleW = g.measureText(p.title ?? '').width
+  g.font = `${SUB_PX}px ui-monospace, monospace`
+  const subW = g.measureText(p.sub ?? '').width
+  const room = PANEL_CANVAS_W - PANEL_PAD
+  return Math.max(1, Math.min(MAX_SPAN, Math.ceil(Math.max(titleW, subW) / room)))
+}
+
 function drawPanel(canvas, p) {
   const g = canvas.getContext('2d')
   const W = canvas.width
@@ -117,10 +157,38 @@ function drawPanel(canvas, p) {
 
   g.textAlign = 'center'
   g.fillStyle = live ? '#ffffff' : '#8b93a3'
-  g.font = 'bold 70px ui-monospace, monospace'
-  g.fillText(p.title, W / 2, H * 0.44)
-  g.font = '36px ui-monospace, monospace'
-  g.fillText(p.sub, W / 2, H * 0.72)
+
+  // A WIDER PANEL IS A WIDER CANVAS, which is why `room` is read off the canvas
+  // rather than being a constant: a lane that takes two slots has a 1024-wide
+  // canvas on a quad twice as wide, so the glyphs land at exactly the same size on
+  // the sign and twice as many of them fit. See `spanFor`.
+  //
+  // SHRINK, THEN CUT, and only once the extra slots have run out. A panel's title
+  // was drawn at a fixed 70px and centred, which is fine while every title is a
+  // workspace name of a few characters and stops being fine the moment a lane can be
+  // CALLED something: `{where the logs are}` drew straight out through both edges of
+  // its own panel and off the sign -- measured, the panel read `ack to home` with
+  // the braces past the frame.
+  //
+  // Same two-stage fit the gate board and the ramp board already use, and the same
+  // order for the same reason: shrinking keeps the whole name and costs legibility,
+  // cutting keeps legibility and costs the end of the name, so shrinking is tried
+  // first and only what will not fit at the floor gets cut. The ellipsis is what
+  // says a cut happened -- a name silently truncated is a name read wrong.
+  const fit = (text, max, min, room, weight = 'bold') => {
+    let px = max
+    const set = (n) => (g.font = `${weight} ${n}px ui-monospace, monospace`)
+    set(px)
+    while (px > min && g.measureText(text).width > room) set((px -= 2))
+    if (g.measureText(text).width <= room) return text
+    let cut = text
+    while (cut.length > 1 && g.measureText(cut + '…').width > room) cut = cut.slice(0, -1)
+    return cut + '…'
+  }
+  const room = W - PANEL_PAD
+
+  g.fillText(fit(p.title, TITLE_PX, 34, room), W / 2, H * 0.44)
+  g.fillText(fit(p.sub, SUB_PX, 22, room, ''), W / 2, H * 0.72)
 
   if (p.tone === 'barred') {
     // A CLOSED WORKSPACE IS A BARRED EXIT, not a missing one. Leaving it off the
@@ -303,7 +371,7 @@ function makePanelTex(cw, ch, w, h) {
 
 // Panels are a unit quad and get their real size from placePanels, so a scroll
 // or a re-wrap never has to touch geometry.
-const makePanel = () => makePanelTex(512, 256, 1, 1)
+const makePanel = () => makePanelTex(PANEL_CANVAS_W, PANEL_CANVAS_H, 1, 1)
 
 // ------------------------------------------------------------- what to show
 //
@@ -337,15 +405,38 @@ function enterRow() {
   return row
 }
 
+// A LANE IS A NAMED CONNECTION, AND THE SIGN SAYS BOTH HALVES OF THAT.
+//
+// It said the destination's name in big letters and the destination's window count
+// underneath. Two facts about the same box, and neither of them was about the EDGE
+// -- so a gate with three lanes told you three things you could equally have read
+// off the map, and nothing about why you would take one.
+//
+// Now the big line is the connection's own name in `{braces}` and the small line is
+// where it goes, in the arrow notation every other sign in the shell already writes
+// a road with. Braces because the shell has a mark for each kind of thing it names
+// and this one had none: `--road-->`, `[network]`, `(window)`, and now `{connection}`.
+// An unnamed lane falls back to the destination's name (ws.exitName), so a gate you
+// have never edited reads as it always did, in braces.
+//
+// THE WINDOW COUNT IS GONE ON PURPOSE. It was live -- it moved as windows opened --
+// which made it the most eye-catching thing on a sign whose job is to say where a
+// lane leads. Where it leads does not change, and that is what a road sign is for.
+// The count is still on the map, on the node, where an inventory belongs.
 function exitRow(id) {
   const row = ws.exitsOf(id).map((to) => {
     const dest = ws.get(to)
-    const n = countIn(to)
+    const label = ws.exitName(id, to)
     return {
-      key: `exit:${to}:${dest.open}:${n}:${dest.name}`,
+      // The NAME, not the count. A key holding a live count rebuilt this panel
+      // every time a window opened anywhere on the road it points at.
+      key: `exit:${to}:${dest.open}:${label}:${dest.name}`,
       action: { kind: 'exit', to },
-      title: dest.name,
-      sub: dest.open ? (n === 1 ? '1 window' : `${n} windows`) : 'closed',
+      title: `{${label}}`,
+      // Closed still says so in words rather than in an arrow: the bar drawn across
+      // a barred panel is loud, and it is the one case where where-it-goes is not
+      // the thing you need to know first.
+      sub: dest.open ? `--${dest.name}-->` : 'closed',
       tone: dest.open ? 'exit' : 'barred',
     }
   })
@@ -407,37 +498,78 @@ function buildGate(kind) {
 // scroll, and again with the width the bar leaves if there is. Once, not until
 // it settles -- narrowing can only ever add rows, so a second pass cannot take
 // the bar away again, and a loop would be solving a problem that does not exist.
-function layoutIn(usable, n) {
-  const cols = Math.max(1, Math.min(n, Math.floor(usable / PANEL_MIN_W)))
+// A SLOT IS THE UNIT, NOT A PANEL, now that a panel can be two or three slots
+// wide. `units` is what the row has to hold; the column count still comes from how
+// many PANEL_MIN_W fit across the beam, so the width of a slot is unchanged by
+// anything a lane is called -- a long name takes more slots, it does not make
+// everything else narrower.
+function layoutIn(usable, units) {
+  const cols = Math.max(1, Math.min(units, Math.floor(usable / PANEL_MIN_W)))
   const pw = Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, usable / cols))
-  return { cols, pw, ph: Math.max(PANEL_MIN_H, pw / 2), rows: Math.ceil(n / cols) }
+  return { cols, pw, ph: Math.max(PANEL_MIN_H, pw / 2) }
 }
 
-function grid(n) {
+// Fill the row left to right and wrap when the next lane will not fit whole. A
+// spanned lane is never split across two rows -- half a name at the end of one row
+// and half at the start of the next is worse than the wrap it was avoiding -- and
+// one wider than the whole gate is clamped to the gate rather than dropped, since a
+// lane you cannot see is a lane you cannot take.
+function packInto(spans, cols) {
+  const rows = []
+  let row = { items: [], used: 0 }
+  spans.forEach((want, i) => {
+    const w = Math.max(1, Math.min(want, cols))
+    if (row.items.length && row.used + w > cols) {
+      rows.push(row)
+      row = { items: [], used: 0 }
+    }
+    row.items.push({ i, c: row.used, w })
+    row.used += w
+  })
+  if (row.items.length) rows.push(row)
+  return rows
+}
+
+function grid(spans) {
+  const units = spans.reduce((a, b) => a + b, 0)
   const full = BEAM_W * 0.95
-  let g = layoutIn(full, n)
-  const bar = g.rows > VISIBLE_ROWS
-  if (bar) g = layoutIn(full - BAR_TOTAL, n)
-  return { ...g, bar, maxScroll: Math.max(0, g.rows - VISIBLE_ROWS) }
+  let g = layoutIn(full, units)
+  let packed = packInto(spans, g.cols)
+  // THE BAR TAKES ITS SPACE FROM THE PANELS, like a scrollbar anywhere else, which
+  // is why this is computed twice: once to find out whether there is anything to
+  // scroll, and again with the width the bar leaves if there is. Once, not until it
+  // settles -- narrowing can only ever add rows, so a second pass cannot take the
+  // bar away again, and a loop would be solving a problem that does not exist.
+  const bar = packed.length > VISIBLE_ROWS
+  if (bar) {
+    g = layoutIn(full - BAR_TOTAL, units)
+    packed = packInto(spans, g.cols)
+  }
+  return { ...g, rows: packed.length, packed, bar, maxScroll: Math.max(0, packed.length - VISIBLE_ROWS) }
 }
 
 // Positioning is separate from building, because scrolling moves panels without
 // changing what any of them says.
 function placePanels(gate) {
-  const g = grid(gate.panels.length)
+  const g = grid(gate.panels.map((p) => p.span ?? 1))
   gate.grid = g
   gate.scroll = Math.min(gate.scroll ?? 0, g.maxScroll)
-  gate.panels.forEach((p, i) => {
-    const r = Math.floor(i / g.cols)
-    const c = i % g.cols
-    // Centre each row on its own count, so a last row of one sits in the middle
-    // rather than hanging off the left upright.
-    const inRow = Math.min(g.cols, gate.panels.length - r * g.cols)
-    const x0 = -(g.pw * inRow) / 2 + g.pw / 2
+  g.packed.forEach((row, r) => {
+    // Centre each row on the slots IT uses, so a last row of one sits in the middle
+    // rather than hanging off the left upright -- and so does a row that came up
+    // short because the next lane needed two slots and only one was left.
+    const x0 = -(g.pw * row.used) / 2
     const shown = r - gate.scroll
-    p.mesh.visible = shown >= 0 && shown < VISIBLE_ROWS
-    p.mesh.scale.set(g.pw, g.ph, 1)
-    p.mesh.position.set(x0 + c * g.pw, BEAM_Y - 18 - g.ph / 2 - shown * (g.ph + ROW_GAP), 6)
+    for (const it of row.items) {
+      const p = gate.panels[it.i]
+      p.mesh.visible = shown >= 0 && shown < VISIBLE_ROWS
+      p.mesh.scale.set(g.pw * it.w, g.ph, 1)
+      p.mesh.position.set(
+        x0 + (it.c + it.w / 2) * g.pw,
+        BEAM_Y - 18 - g.ph / 2 - shown * (g.ph + ROW_GAP),
+        6,
+      )
+    }
   })
   placeBar(gate, g)
 }
@@ -545,6 +677,13 @@ function syncGate(id, kind, z, row) {
       // What a click on this mesh MEANS. Read back by actionOf(); the mesh is
       // the only thing a raycast hands you.
       p.mesh.userData.gantryAction = spec.action
+      // The span and the canvas that carries it, decided here rather than in
+      // placePanels, because both depend on the TEXT and this is the only place the
+      // text is known to have changed. Assigning `canvas.width` also clears the
+      // canvas, which is exactly what a redraw wants.
+      p.span = spanFor(spec)
+      const want = PANEL_CANVAS_W * p.span
+      if (p.canvas.width !== want) p.canvas.width = want
       drawPanel(p.canvas, spec)
       p.tex.needsUpdate = true
     })
@@ -625,14 +764,26 @@ export function scrollGateOf(mesh, delta) {
 // clickable, and there is no cursor out here in the scene -- so the panel
 // brightens instead, which is the same signal a real sign gives when your
 // headlights reach it.
+//
+// AND IT PUTS BACK WHAT WAS THERE, not white. Restoring to 0xffffff is correct for
+// a panel -- white is its rest colour, the one the texture is multiplied by -- and
+// it is only correct because every gate panel happens to be white. A mesh with any
+// other base colour lit once and then stayed lit at full white forever, which is
+// exactly what a ramp deck (0x11131f) did while it was wrongly handed to this. The
+// caller no longer hands one over, and remembering the colour means the next mesh
+// that gets in here cannot be damaged by being pointed at.
 let hovered = null
+let hoveredRest = 0xffffff
 export function setHovered(mesh) {
   if (hovered === mesh) return
-  if (hovered) hovered.material.color.setHex(0xffffff)
+  if (hovered) hovered.material.color.setHex(hoveredRest)
   hovered = mesh && actionOf(mesh) ? mesh : null
   // MeshBasicMaterial multiplies its map by `color`, so >1 is a real brighten
   // rather than a wash -- the texture keeps its own contrast.
-  if (hovered) hovered.material.color.setRGB(1.45, 1.45, 1.45)
+  if (hovered) {
+    hoveredRest = hovered.material.color.getHex()
+    hovered.material.color.setRGB(1.45, 1.45, 1.45)
+  }
 }
 
 // What the gates are actually saying, read off the panels rather than off the
@@ -655,5 +806,17 @@ export const gantryReport = () =>
     shown: gate.panels.filter((p) => p.mesh.visible).length,
     z: Math.round(gate.group.position.z),
     x: Math.round(gate.group.position.x),
-    panels: gate.panels.map((p) => ({ title: p.title, sub: p.sub, tone: p.tone, action: p.action })),
+    // The row as it is actually laid out, not as it was asked for: `slots` is what
+    // the panel wants and `wide`/`x` are read off the MESH, so a lane that wanted
+    // three slots on a gate only two wide reports the two it got.
+    panels: gate.panels.map((p) => ({
+      title: p.title,
+      sub: p.sub,
+      tone: p.tone,
+      action: p.action,
+      slots: p.span ?? 1,
+      wide: +(p.mesh.scale.x / (gate.grid?.pw || 1)).toFixed(2),
+      x: Math.round(p.mesh.position.x),
+      shown: p.mesh.visible,
+    })),
   }))

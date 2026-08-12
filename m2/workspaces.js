@@ -110,6 +110,11 @@ function save() {
             id: n.id,
             name: n.name,
             exits: [...n.exits],
+            // Only the exits that still exist -- see `nameExit` for why a name must
+            // never outlive its edge.
+            exitNames: Object.fromEntries(
+              Object.entries(n.exitNames ?? {}).filter(([to]) => n.exits.includes(to)),
+            ),
             ramps: n.ramps.map((r) => ({ at: r.at, to: r.to, side: r.side })),
             open: n.open,
             pos: n.pos,
@@ -135,6 +140,15 @@ function parseNodes(raw) {
       id: n.id,
       name: typeof n.name === 'string' && n.name ? n.name : n.id,
       exits: Array.isArray(n.exits) ? n.exits.filter((e) => typeof e === 'string') : [],
+      // Names for those exits, cleaned the same way the box that sets them cleans:
+      // a string, trimmed, capped. Anything else is dropped rather than shown, since
+      // what a bad value here looks like is a lane on a gate calling itself
+      // `[object Object]`.
+      exitNames: Object.fromEntries(
+        Object.entries(n.exitNames && typeof n.exitNames === 'object' ? n.exitNames : {})
+          .filter(([to, v]) => typeof to === 'string' && typeof v === 'string' && v.trim())
+          .map(([to, v]) => [to, v.trim().slice(0, 24)]),
+      ),
       // A ramp's `at` is a dash slot on the road (world.js decides where that
       // is); `to` is any workspace in any network; `side` is which way it leaves.
       // Kept as a list rather than a map keyed by slot because the order is the
@@ -198,6 +212,7 @@ function install(loaded) {
         tenant: t.id,
         name: n.name ?? n.id,
         exits: [...(n.exits ?? [])],
+        exitNames: { ...(n.exitNames ?? {}) },
         ramps: [...(n.ramps ?? [])],
         open: n.open !== false,
         // NOT persisted, and deliberately so: mileposts number the windows
@@ -223,6 +238,16 @@ function install(loaded) {
   // could contain.
   for (const n of nodes.values()) {
     n.exits = n.exits.filter((e) => nodes.get(e)?.tenant === n.tenant && e !== n.id)
+    // Names follow their edges out. Filtered AFTER the exits are, so the one rule
+    // about which exits survive is written once.
+    //
+    // `?? {}` even though every constructor above sets it. This runs at LOAD, and a
+    // throw here is not a bug you can see -- it is a shell that will not start, on a
+    // machine whose saved graph is the thing making it throw, which is the one
+    // failure a reload cannot get you out of. The guard costs nothing and the
+    // absence of one costs the whole session.
+    n.exitNames = n.exitNames ?? {}
+    for (const to of Object.keys(n.exitNames)) if (!n.exits.includes(to)) delete n.exitNames[to]
     n.ramps = dedupeRamps(
       n.ramps.filter((r) => nodes.has(r.to) && r.to !== n.id).map((r) => ({ ...r, side: r.side === -1 ? -1 : 1 })),
     )
@@ -365,6 +390,7 @@ export function addTenant(name) {
     tenant: id,
     name: 'home',
     exits: [],
+    exitNames: {},
     ramps: [],
     open: true,
     next: 1,
@@ -498,6 +524,11 @@ export function add({ id, name, exits = [], open = true, tenant: t = activeTenan
     tenant: t,
     name: name || key,
     exits: exits.filter((e) => nodes.get(e)?.tenant === t),
+    // Every node carries the map, even empty. A node built here and a node built by
+    // `load` have to be the same shape or the difference shows up somewhere far
+    // away -- this is the `+ lane` path, so it is the shape most of the graph ends
+    // up having.
+    exitNames: {},
     ramps: [],
     open,
     next: 1,
@@ -531,9 +562,50 @@ export function disconnect(from, to) {
   const i = a.exits.indexOf(to)
   if (i < 0) return false
   a.exits.splice(i, 1)
+  // The name goes with the edge. A name kept past the edge it named comes back
+  // silently the next time the same two roads are connected, and calls the new
+  // connection something you meant about the old one.
+  delete a.exitNames?.[to]
   touched()
   return true
 }
+
+// AN EXIT CAN BE NAMED, AND THE NAME IS THE EDGE'S, NOT THE DESTINATION'S.
+//
+// A lane on the gate said the name of the road it lands on, which is the one thing
+// about that lane you can already find out by taking it. What it could not say is
+// what the connection is FOR -- `home -> build` is "deploy" on one road and "where
+// the logs are" from another, and the two are different edges into the same box.
+// That is exactly the distinction the graph already draws and the sign could not.
+//
+// Stored per FROM-node, keyed by destination, because that is what an exit is: a
+// property of the road you are leaving. The same pair named from the other end is a
+// different edge and gets its own name, which is the honest answer -- an exit is
+// one-way and always has been.
+export function nameExit(from, to, name) {
+  const a = nodes.get(from)
+  if (!a || !a.exits.includes(to)) return false
+  const clean = String(name ?? '').trim().slice(0, 24)
+  a.exitNames = a.exitNames ?? {}
+  const had = a.exitNames[to] ?? ''
+  if (clean === had) return false
+  // Empty CLEARS rather than storing an empty string, so "no name" is one state
+  // and not two -- the same rule the window rename box keeps.
+  if (clean) a.exitNames[to] = clean
+  else delete a.exitNames[to]
+  touched()
+  return true
+}
+
+// What the lane is called: yours if you have named it, the destination's otherwise.
+// One function so the gate, the map and every report agree -- the same arrangement
+// `nameOf` keeps for windows.
+export const exitName = (from, to) =>
+  nodes.get(from)?.exitNames?.[to] || nodes.get(to)?.name || to
+
+// Only the part you typed, for the box you type it in. Never falls back, or the
+// destination's name would be typed back in as an override of itself.
+export const exitOwnName = (from, to) => nodes.get(from)?.exitNames?.[to] ?? ''
 
 export function setOpen(id, open) {
   const n = nodes.get(id)

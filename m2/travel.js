@@ -19,6 +19,7 @@ import { createAxisEventFromWheelEvent } from '@gfld/compositor'
 import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, roadOrder, dashZ } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
+import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
 import { rampMeshes, dashActionOf, setRampHover } from './ramps.js'
 import { toggleMap, closeMap, openMap, openMapAt, openMapAtDash, isOpen as mapIsOpen } from './map.js'
@@ -117,7 +118,7 @@ function commitDigits() {
   const to = tracks.select(n)
   state.lastTrackKey = { typed: n, track: n, went: to ?? null }
   if (!to) return
-  return driveToTrack(to)
+  return driveToTrack(to, tracks.flatOf(n))
 }
 
 // A TRACK SWITCH LETS GO OF THE WINDOW YOU ARE STANDING IN.
@@ -135,7 +136,23 @@ function commitDigits() {
 // One flight, not two. `release()` aims at the road you are on and then this
 // aims at the road you are going to; both read `currentPose()` and no frame runs
 // between them, so the second simply replaces the first.
-function driveToTrack(to) {
+// AND IT PUTS YOU BACK IN THE WINDOW THE TRACK WAS IN.
+//
+// Letting go is still right on the way OUT -- you cannot be pressed against one
+// surface and driving to another. What was wrong was that letting go was the whole
+// story: the track you left kept its road and its scroll position and forgot the
+// one thing you were actually looking at, so switching away and straight back was
+// not a round trip. Reported.
+//
+// STILL ONE FLIGHT. `release`, `goDistrict` and `flattenTo` all read `currentPose()`
+// and no frame runs between them, so each simply replaces the last one's target --
+// what plays is a single flight from where you are to the window.
+//
+// A WINDOW THAT IS NO LONGER THERE IS NOT AN ERROR. Clients die, get closed, and
+// never survive a reload; `flattenTo` answers null when there is no sign for the
+// address, and the road view it was already flying to is the honest place to be
+// left. The stale address is dropped at that point rather than kept to fail again.
+function driveToTrack(to, want) {
   if (state.mode === 'flat') {
     release()
     renderer.domElement.blur()
@@ -143,6 +160,10 @@ function driveToTrack(to) {
   goingBack = true
   const r = goDistrict(to)
   goingBack = false
+  if (want && want.district === to) {
+    const landed = flattenTo(want.milepost, want.district)
+    if (!landed) tracks.parkFlat(null)
+  }
   return r
 }
 
@@ -156,6 +177,11 @@ function driveToTrack(to) {
 let switchingTrack = false
 const leaveTrack = () => {
   if (state.district) tracks.parkRoad(state.district, roadZ)
+  // The window, on the same side of `select` and for the same reason: after it,
+  // `active()` is the track you are going TO.
+  tracks.parkFlat(
+    state.mode === 'flat' ? { district: state.flatDistrict, milepost: state.flatMilepost } : null,
+  )
   // And tell goDistrict not to park it AGAIN on the way in. Its own "park the
   // road you are leaving" line is right for every other kind of journey and
   // wrong for this one, because by the time it runs the active track is the new
@@ -171,7 +197,7 @@ export function goTrack(n) {
   const to = tracks.select(n)
   if (!to) return null
   state.lastTrackKey = { typed: n, track: n, went: to, from: 'map' }
-  return driveToTrack(to)
+  return driveToTrack(to, tracks.flatOf(n))
 }
 
 // The road runs from the head to the EXIT GATE, and the wheel stops at both.
@@ -536,6 +562,15 @@ function holdFlatScale() {
     // One last apply at the size that actually arrived, then let go -- the zoom
     // it lands on is now this window's, remembered like any other.
     if (!arrived) state.resizeGaveUp = { asked: [settling.w, settling.h], got: [s.size.width, s.size.height] }
+    // AND THE SHAPE IS REMEMBERED HERE, at the one moment the answer is known.
+    //
+    // Not in endResize: that is where the drag stops, and what the drag ASKED for
+    // is not what the window is -- a client may clamp to its own minimum, or refuse
+    // outright, and a remembered size that the surface never reached would put the
+    // window back wrong on every future load. `s.size` at this line is the size the
+    // surface actually settled at, refusal included, which is the only shape worth
+    // keeping. See layout.js for what the address can and cannot promise.
+    layout.remember(s.district, s.milepost, s.size.width, s.size.height)
     settling = null
     return
   }
@@ -684,6 +719,63 @@ function chromeUnder(ev, which) {
 }
 
 const handleUnder = (ev) => chromeUnder(ev, 'grabPad')
+
+// THE CLOSE ASKS FIRST, and the answers are their own targets.
+//
+// `X--` used to close on the press. It is a small quad at a corner you also reach
+// for to grab and to read the board, it is the only control on a window that cannot
+// be undone -- the client exits and takes whatever was in it -- and it sat one
+// misjudged pixel away from two controls that can. Asked for, and the shape is the
+// one the rest of computing uses: press once to ask, and the second press is yes.
+//
+// `X--` CANNOT BE THE YES, and that is the whole guard.
+//
+// A second press on it used to close, on the argument that pressing one control
+// twice is what a two-stage button means everywhere else. Asked to remove it, and
+// the ask is right: that shape stops a stray click and nothing more. A double-click
+// is a SINGLE gesture -- one decision, two presses -- and it went through the guard
+// as if it were two. So the only yes is `close--X`, on the other side of the board:
+// the pointer has to be moved somewhere to give it, and the movement is the second
+// decision. Pressing `X--` again takes the question back, because the control that
+// asked is the natural place to unask, and because an impatient double-click then
+// lands on cancel rather than on anything irreversible.
+//
+// ANYTHING ELSE IS A NO. Not a list of controls that cancel: every other press
+// does, including one into the application itself, because a question left standing
+// over a window you have gone back to working in is a question whose yes is one
+// stray click away. That is why this runs before every other branch -- each of them
+// either returns or begins a gesture, so a cancel written after them is one a
+// resize, a step or a click into the client would skip.
+//
+// Returns whether the press was spent here.
+function closeClick(ev) {
+  const shut = chromeUnder(ev, 'closePad')
+  const answer = shut ? null : chromeUnder(ev, 'keepPad') ? 'keep' : chromeUnder(ev, 'shutPad') ? 'close' : null
+  if (!shut && !answer) {
+    if (state.closeAsking) state.closeAsking = null
+    return false
+  }
+  ev.preventDefault()
+  const s = shut ?? flatSign()
+  const at = s ? `${s.district}:${s.milepost}` : null
+  const seen = [Math.round(ev.clientX), Math.round(ev.clientY)]
+  // Nothing below this line can close a window unless the press landed on
+  // `close--X` AND that window is the one already being asked about.
+  if (answer === 'close' && at && state.closeAsking === at) {
+    state.closeAsking = null
+    const asked = hooks.closeWindow?.(s.district, s.milepost) ?? null
+    state.lastFlatClick = { at: seen, went: 'close', asked: !!asked }
+    return true
+  }
+  if (shut && at && state.closeAsking !== at) {
+    state.closeAsking = at
+    state.lastFlatClick = { at: seen, went: 'close?', asked: false }
+    return true
+  }
+  state.closeAsking = null
+  state.lastFlatClick = { at: seen, went: 'keep' }
+  return true
+}
 
 function startResize(s, ev) {
   // BY SHAPE, NOT BY CLASS NAME. Minification renames constructors and every
@@ -1313,6 +1405,13 @@ function installInput() {
     // work" can be any of them -- the grab missing, the click reaching the
     // application, or the click being read as "outside" and leaving the window
     // entirely. Guessing between them from a description is what this replaces.
+    // THE CLOSE QUESTION IS SETTLED BEFORE ANYTHING ELSE IS CONSIDERED, because
+    // every other branch below either returns or begins a gesture -- so a "no"
+    // written after them is a no that a resize, a step or a click into the
+    // application would skip, leaving the prompt standing over a window you had
+    // gone back to using.
+    if (closeClick(ev)) return
+
     const grab = handleUnder(ev)
     if (grab && startResize(grab, ev)) {
       // TAKE THE GESTURE PROPERLY, or the browser takes it back. An unprevented
@@ -1332,16 +1431,9 @@ function installInput() {
       state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'grab' }
       return
     }
-    // The other two controls on the frame, checked in the same place and for the
-    // same reason: they are the shell's, not the application's, and neither of
-    // them is a click outside asking to leave.
-    const shut = chromeUnder(ev, 'closePad')
-    if (shut) {
-      ev.preventDefault()
-      const asked = hooks.closeWindow?.(shut.district, shut.milepost) ?? null
-      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'close', asked: !!asked }
-      return
-    }
+    // The other controls on the frame, checked in the same place and for the same
+    // reason: they are the shell's, not the application's, and none of them is a
+    // click outside asking to leave.
     for (const [pad, delta] of [
       ['prevPad', -1],
       ['nextPad', 1],
@@ -1547,6 +1639,25 @@ function installInput() {
   // instanceId and nothing else does), a gate panel, or a window.
   const actionAt = (hit) => (hit ? (dashActionOf(hit) ?? actionOf(hit.object)) : null)
 
+  // WHAT IS UNDER A GIVEN PIXEL, answered by the same `aim` the pointer uses. A
+  // probe that raycast its own copy of the mesh list could aim somewhere the real
+  // handler does not, and "nothing lit" would then mean "the ray missed" and
+  // "the highlight is fixed" indistinguishably -- which is the exact ambiguity
+  // this was written to remove.
+  window.__aim = (clientX, clientY) => {
+    const hit = aim({ clientX, clientY })
+    if (!hit) return null
+    return {
+      action: actionAt(hit),
+      isSign: !!hit.object.userData.signKey,
+      // A ramp's tarmac and its board give the same action, and telling them apart
+      // is the whole question when the claim is "the sign lights, the road does
+      // not". The board is the one carrying a texture.
+      textured: !!hit.object.material?.map,
+      distance: Math.round(hit.distance),
+    }
+  }
+
   canvas.addEventListener('pointerdown', (ev) => {
     if (state.mode !== 'driving' || mapIsOpen()) return
     const hit = aim(ev)
@@ -1587,7 +1698,15 @@ function installInput() {
     // Two hover owners because they light two different kinds of thing: the gantry
     // recolours a panel it owns, the centre line recolours an instance nobody
     // owns. Both are told on every move, including that it is not them.
-    setHovered(hit && actionOf(hit.object) ? hit.object : null)
+    //
+    // A RAMP IS NOT THE GANTRY'S TO LIGHT, and that was the bug: the deck and the
+    // board carry a `gantryAction` -- that is how pressing the tarmac drives you
+    // down it -- and handing the hit to setHovered on that basis painted the TARMAC,
+    // which the ramp's own hover owner deliberately leaves alone (ramps.js, "the
+    // sign lights, the road does not"). Filtering on the action's kind rather than
+    // on the mesh keeps one rule: whoever owns the hover for a kind owns all of it.
+    const gantryHit = hit ? actionOf(hit.object) : null
+    setHovered(gantryHit && gantryHit.kind !== 'ramp' ? hit.object : null)
     setRampHover(hit)
     canvas.style.cursor = hit && (action || hit.object.userData.signKey) ? 'pointer' : ''
   })

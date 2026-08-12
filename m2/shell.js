@@ -103,9 +103,10 @@ import {
   renameWindow,
   nameOf,
   syncTitles,
+  layoutReport,
 } from './rrabbit.js'
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
-import { attachRamps, syncRamps, rampReport } from './ramps.js'
+import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
 // state lives in world.js now; the page and the diagnostics still expect it
@@ -127,6 +128,81 @@ const roads = new Map()
 let lastRoadCount = -1
 const forgetStatus = () => {
   lastRoadCount = -1
+}
+
+// THE CONTEXT CAN BE TAKEN AWAY WHILE YOU ARE USING IT, AND THAT IS NOT SURVIVABLE
+// HERE. This is the one line that has to be believed.
+//
+// `whyNoContext` already covers the context you never got. This is the other one:
+// the GPU process dies mid-session, the browser fires `webglcontextlost`, and every
+// GL object made before that moment belongs to a context that no longer exists.
+//
+// three HANDLES THIS AND THAT IS WHAT MAKES IT WORSE. WebGLRenderer calls
+// preventDefault on the loss, which asks the browser for a fresh context, and then
+// rebuilds its own objects on it -- so three comes back. Greenfield does not. Its
+// compositor holds its own programs and textures on that same canvas (Program.js,
+// Texture.js, SceneShader.js) and has no restore path, so the frame after "Context
+// Restored" is a frame where half the scene is talking to a context it was not born
+// in. Reported, and the log is unmistakable:
+//
+//     WebGL: CONTEXT_LOST_WEBGL: loseContext: context lost
+//     THREE.WebGLRenderer: Context Lost.  /  Context Restored.
+//     WebGL: INVALID_OPERATION: bindTexture: object does not belong to this context   (x150)
+//     WebGL: INVALID_OPERATION: texSubImage2D: no texture bound to target             (x100)
+//     Program.js BUG? use gl program failed.                                          (x40)
+//     WebGL: too many errors, no more errors will be reported for this context
+//
+// That storm is not the damage report, it IS the damage: several hundred failing GL
+// calls per frame, forever, on a tab that now looks frozen and is busier than it has
+// ever been. The old behaviour was to keep running into it.
+//
+// SO THE SHELL STOPS. The loop is halted at the top of the next frame, the polls are
+// cancelled, and the status line says what happened and what to do about it. A
+// reload rebuilds everything -- clients included, since none of them survive a
+// reload anyway -- so "reload" is the honest instruction rather than a shrug.
+//
+// NOT A `preventDefault` OF OUR OWN, either way: three has already asked for the
+// restore by the time this runs, and whether the browser grants it changes nothing
+// here. What matters is that we stop drawing.
+let contextLost = false
+let sayLine = () => {}
+const timers = []
+function loseContext(reason) {
+  if (contextLost) return
+  contextLost = true
+  state.contextLost = reason
+  for (const t of timers) clearInterval(t)
+  timers.length = 0
+  // AND THE COMPOSITOR'S LOOP, WHICH IS NOT OURS TO SCHEDULE.
+  //
+  // Stopping the frame loop stopped OUR drawing and the storm carried on anyway --
+  // reported, with the stack that names the owner:
+  //
+  //     use @ SceneShader.js -> render @ Scene.js -> render @ Renderer.js
+  //       -> onCommit @ XdgToplevel.js -> commit @ Surface.js -> messagePort.onmessage
+  //
+  // Greenfield renders on COMMIT. Every frame a client draws arrives over the
+  // Wayland message port and turns straight into a draw call, so its loop is driven
+  // by five programs that know nothing about a lost context and will go on
+  // committing forever. Nothing on our side can pace that; the only thing that can
+  // is making the render a no-op.
+  //
+  // Both levels, because either one alone leaves a path open: `renderer.render` is
+  // what the commit calls, and a scene's own `render` is what the renderer walks to.
+  // The shell already stubs the latter for its own scene at startup (see initScene)
+  // for a different reason -- to stop Greenfield compositing over the road -- which
+  // is proof the seam is a supported one to cut.
+  try {
+    if (session?.renderer) {
+      session.renderer.render = () => {}
+      for (const s of Object.values(session.renderer.scenes ?? {})) s.render = () => {}
+    }
+  } catch {
+    // A compositor that cannot be quietened is still better stopped than not: the
+    // frame loop is already halted and the message below still goes up.
+  }
+  sayLine(`the GPU dropped this page (${reason}) -- reload to come back. Your roads and windows are saved.`)
+  console.error(`[rrabbit] ${reason}: halting the frame loop. Reload the page.`)
 }
 
 // ---------------------------------------------------------------- the world
@@ -194,6 +270,14 @@ function buildWorld(canvas) {
   // reason. Every one of these is recoverable and none of them is a bug in this
   // file, so the shell has to say which one it is.
   if (!gl) throw new Error(whyNoContext(canvas))
+  // Bound BEFORE three's own listener, so this runs first and the loop is already
+  // stopping by the time three starts asking for a replacement context.
+  canvas.addEventListener('webglcontextlost', () => loseContext('WebGL context lost'))
+  // And if the browser DOES hand one back, stay stopped: three would be whole and
+  // the compositor would not, which is the state that produced the error storm.
+  canvas.addEventListener('webglcontextrestored', () =>
+    console.error('[rrabbit] context restored, but the compositor cannot be. Reload.'),
+  )
   renderer = new THREE.WebGLRenderer({ canvas, context: gl })
   renderer.setPixelRatio(1)
 
@@ -281,6 +365,16 @@ function buildWorld(canvas) {
     window: (d, m) => {
       release()
       return goWindow(d, m)
+    },
+    // INTO the window, not onto the road outside it -- the dash page's "open its
+    // page" button, which is the only control in the map that names the window's own
+    // surface rather than its place on the road. Release first for the same reason
+    // `window` does: the map can be open while you are standing in a DIFFERENT
+    // window, and flattening from inside one has to let go of that one first, or the
+    // shell flies away still believing it is pressed against a surface behind it.
+    enter: (d, m) => {
+      release()
+      return flattenTo(m, d)
     },
     district: (id) => {
       release()
@@ -561,6 +655,9 @@ function rearm(now) {
 
 let lastT = 0
 function frame(now = 0) {
+  // The one exit from the loop that does not re-arm. Everything below this line
+  // assumes the GL objects it is about to touch still exist.
+  if (contextLost) return
   try {
     // RAVIO: MEASUREMENTS MUST OUTLAST A FRAME, and an eased term driven by a
     // fixed step lies whenever the frame rate moves. Clamp so a backgrounded
@@ -935,6 +1032,89 @@ window.__tenants = () => {
 // would agree with itself whatever the scene contained.
 window.__ramps = () => rampReport()
 
+// WHAT SURVIVES A RELOAD ABOUT A WINDOW. Three separate answers on purpose: what
+// is stored, what is being asked for right now, and what the surfaces actually
+// are -- a shape that is remembered and refused must not read as one that was
+// put back.
+window.__layout = () => layoutReport()
+
+// A HOVER AIMED FOR REAL, because what is being claimed is what the POINTER does.
+//
+// The ramp's tarmac lighting up when pointed at -- and staying lit afterwards --
+// was reported three times, and each earlier attempt was checked by reading the
+// hover state the highlight is drawn from. That state agrees with itself. This
+// aims a genuine pointermove at the deck (or at the sign) through the same canvas
+// listener a mouse goes through, waits for the frame that would repaint, and
+// reports the two MATERIALS either side of it -- including after the pointer has
+// left, which is the half that was broken.
+window.__hoverRamp = async (which = 'deck') => {
+  const canvas = renderer.domElement
+  const rect = canvas.getBoundingClientRect()
+  // The board is the one with a texture on it; the deck is bare tarmac.
+  const mesh = rampMeshes()
+    .filter((m) => m.userData?.gantryAction?.kind === 'ramp')
+    .find((m) => !!m.material.map === (which === 'board'))
+  if (!mesh) return { error: 'no ramp on this road', which }
+  // The board colour is written by syncRamps, once a frame -- so a colour read in
+  // the same tick as the event is the colour from BEFORE it, and would report a
+  // working highlight as broken.
+  const settle = () =>
+    new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+  const colours = () =>
+    rampReport().roads.flatMap((road) =>
+      road.ramps.map((x) => ({ at: x.at, deck: x.deck.color, board: x.boardLit })),
+    )
+  // A POINT ON THE SURFACE THAT THE RAY ACTUALLY REACHES, not the bounding-sphere
+  // centre. The deck is a curved ribbon, so its sphere centre sits BESIDE the
+  // tarmac; and even on the ribbon, the far end can be off-screen or behind a
+  // window. Either way the ray comes back holding nothing, and "nothing lit" reads
+  // exactly like a fixed highlight while being the opposite of a measurement.
+  //
+  // So the deck's own vertices are walked until `__aim` -- the pointer's own aiming
+  // function, not a copy of it -- says the thing under that pixel is this ramp's
+  // tarmac. The board is a plane in clear air and its centre is its centre.
+  const at = (world) => {
+    const v = world.clone().project(camera)
+    return [rect.left + ((v.x + 1) / 2) * rect.width, rect.top + ((1 - v.y) / 2) * rect.height]
+  }
+  const pos = mesh.geometry.attributes.position
+  let clientX, clientY
+  if (mesh.material.map) {
+    ;[clientX, clientY] = at(mesh.getWorldPosition(new THREE.Vector3()))
+  } else {
+    for (let i = 0; i < pos.count; i++) {
+      const [x, y] = at(mesh.localToWorld(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))))
+      const found = window.__aim(x, y)
+      if (found?.action?.kind === 'ramp' && !found.textured) {
+        clientX = x
+        clientY = y
+        break
+      }
+    }
+    if (clientX === undefined) return { error: 'no pixel of this ramp deck is reachable', which }
+  }
+  const before = colours()
+  canvas.dispatchEvent(
+    new PointerEvent('pointermove', { clientX, clientY, bubbles: true, pointerType: 'mouse' }),
+  )
+  await settle()
+  const during = colours()
+  // Out through the same door a real pointer leaves by.
+  canvas.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, pointerType: 'mouse' }))
+  await settle()
+  return {
+    aimedAt: which,
+    screen: [Math.round(clientX), Math.round(clientY)],
+    roadColour: '11131f',
+    // What the ray found there, so "nothing lit up" can be told apart from
+    // "the ray never reached the ramp".
+    underThePointer: window.__aim(clientX, clientY),
+    before,
+    during,
+    after: colours(),
+  }
+}
+
 // The diagnosis, reachable without having to cause the failure. A message that
 // only appears when the shell is already dead is a message nobody can check.
 window.__whyNoContext = (canvas) => whyNoContext(canvas ?? document.createElement('canvas'))
@@ -1234,6 +1414,33 @@ window.__grabPoint = () => {
   const p = handlePoint()
   return p ? [Math.round(p.x), Math.round(p.y)] : null
 }
+
+// WHERE ANY CHROME CONTROL IS ON SCREEN, by the name the input handler knows it by:
+// `grabPad`, `closePad`, `platePad`, `prevPad`, `nextPad`, `keepPad`, `shutPad`.
+//
+// `__grabPoint` answers this for exactly one of the seven, and a control that has to
+// be pressed and then ANSWERED cannot be driven without the other two -- so rather
+// than grow a third one-off, this is the general form. `armed` comes back with the
+// point because a pad that is not armed is not pressable, and "the click did
+// nothing" and "the control was not live" are the two explanations that look
+// identical from outside.
+window.__chromePoint = (which) => {
+  const s = [...signs.values()].find(
+    (x) => x.district === state.flatDistrict && x.milepost === state.flatMilepost,
+  )
+  const pad = s?.[which]
+  if (!pad) return null
+  const v = pad.getWorldPosition(new THREE.Vector3()).project(camera)
+  const rect = renderer.domElement.getBoundingClientRect()
+  return {
+    at: [
+      Math.round(rect.left + ((v.x + 1) / 2) * rect.width),
+      Math.round(rect.top + ((1 - v.y) / 2) * rect.height),
+    ],
+    armed: !!pad.userData.armed,
+    drawn: !!s[which.replace('Pad', 'Btn')]?.visible,
+  }
+}
 window.__resized = () =>
   [...signs.values()]
     .filter((s) => s.district === state.flatDistrict && s.milepost === state.flatMilepost)
@@ -1311,6 +1518,10 @@ async function main() {
   const say = (t) => {
     if (status) status.textContent = t
   }
+  // The same line, reachable from module scope. `loseContext` fires from a canvas
+  // event that has no way into this closure, and a failure nobody can see reported
+  // is the failure this whole mechanism exists to stop being.
+  sayLine = say
   // A read-only handle on the same object the HUD reads. Every measurement in
   // the spec so far had to be taken by editing the shell to print it; this
   // makes the numbers reachable from outside without a rebuild.
@@ -1422,10 +1633,15 @@ async function main() {
 
     session.globals.register()
     installInput()
+    // KEPT, so a lost context can cancel them. Both of these outlive the frame loop
+    // otherwise -- one polls a bridge over the network and one walks the popups --
+    // and neither has anything to do once the scene has stopped being drawable.
+    // `pollTubes` in particular is the loudest thing in a broken tab: it fetches
+    // every two seconds forever and logs its own failure each time.
     // A detector, not a fix -- see checkPopupsMapped. Slow on purpose.
-    setInterval(checkPopupsMapped, 1000)
+    timers.push(setInterval(checkPopupsMapped, 1000))
     pollTubes()
-    setInterval(pollTubes, 2000)
+    timers.push(setInterval(pollTubes, 2000))
     state.compositor = 'up'
 
     // `?remote=/text-editor,/xterm` launches NATIVE applications through

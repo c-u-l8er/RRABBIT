@@ -37,10 +37,13 @@ import {
   DASH_PITCH,
   dashZ,
   dashCount,
+  windowAtOn,
+  canvasTexture,
   RAMP_SPAN,
   RAMP_OUT,
 } from './world.js'
 import * as ws from './workspaces.js'
+import * as tracks from './tracks.js'
 
 let scene = null
 export function attachRamps(c) {
@@ -104,10 +107,13 @@ const RAMP_SEGS = 26
 //
 // It stays a little in FRONT of the dash so you read it and then reach the turn --
 // the same argument GATE_GAP makes for the gates.
-// 214/107 is 2.0, which is the canvas's 512/256 -- see the gate board for why a
-// quad whose ratio does not match its canvas draws squashed text.
-const BOARD_W = 214
-const BOARD_H = 107
+// FOUR LINES NOW, SO THE BOARD IS TALLER RATHER THAN TIGHTER. A fourth row squeezed
+// into the old height would have shrunk the destination -- the one line you read at
+// speed -- to buy room for the one you already know. 216/135 is 1.6, which is the
+// canvas's 512/320: the two ratios MUST match or the text draws squashed, which is
+// the mistake the gate board made first and the reason this line exists at all.
+const BOARD_W = 216
+const BOARD_H = 135
 const BOARD_Y = 40
 const BOARD_STAND_X = 300
 const BOARD_STAND_Z = 70
@@ -122,6 +128,11 @@ const lines = new Map()
 // whatever is under it. Kept as an address rather than a mesh because a ramp's board
 // is rebuilt whenever the ramp is moved or flipped.
 const rampHot = { district: null, at: null }
+
+// AND WHICH DASH THE POINTER IS ON, held the same way and for a stronger reason:
+// a dash is an INSTANCE, so there is no object to hang a highlight on even if we
+// wanted one.
+const dashHot = { district: null, at: null }
 
 // ------------------------------------------------------------------ the line
 
@@ -143,6 +154,28 @@ const DASH_MAX_INSTANCES = 96
 // InstancedMesh is back to a single uniform. `instanceColor` and the three palettes
 // that fed it are gone rather than always-set-to-amber, because a channel nothing
 // writes is a channel somebody re-enables by accident.
+//
+// WHICH LEFT NO WAY TO SEE WHICH DASH YOU ARE AIMING AT, and that was reported: the
+// markers are a grid of addresses you click, and every one of them looks exactly
+// like every other one under the pointer. The cursor turns into a hand, which says
+// "something here is clickable" and not "this one".
+//
+// The answer is the one the paragraph above already names -- "what the pointer is on
+// is the cursor's" job -- taken literally. A CURSOR is drawn, not the marking: a thin
+// open frame around the cell the pointer is in, in the shell's own cream rather than
+// in road amber, so it can never be mistaken for paint. The dash inside it is the
+// same colour it was a moment ago and the same colour as every other dash. Nothing
+// about the road changed; something was added on top of it, and it goes away.
+//
+// THE FRAME IS THE CELL, NOT THE STRIPE. What answers the click is the invisible pad
+// (PAD_W across, most of a pitch long), not the 14-wide painted dash -- so a frame
+// drawn tight around the stripe would advertise a target far smaller than the one
+// that is really there, and every near miss would look like a bug. It is also the
+// footprint a window or a ramp occupies when it stands here, which is what you are
+// aiming at the marker to decide.
+const MARK_PAD = 6
+const MARK_T = 3
+const MARK_COLOUR = 0xf3ead4
 
 function makeLine(district) {
   const n = DASH_MAX_INSTANCES
@@ -164,6 +197,58 @@ function makeLine(district) {
   pads.userData.dashPad = district
   scene.add(pads)
   return { line, pads, count: 0, ramps: new Map() }
+}
+
+// An open rectangle lying flat on the road: four thin bars sharing one geometry,
+// so the cursor is one mesh and one draw call however long the road is. Built in
+// the XZ plane already -- no rotation to keep in step with the dashes.
+//
+// DoubleSide because a flat quad in the ground plane is seen from a camera that can
+// end up fractionally below it during a flight, and a cursor that blinks out when
+// the camera dips is a cursor you stop trusting.
+function frameMesh(w, h, t) {
+  const pos = []
+  const idx = []
+  const bar = (x0, z0, x1, z1) => {
+    const a = pos.length / 3
+    pos.push(x0, 0, z0, x1, 0, z0, x1, 0, z1, x0, 0, z1)
+    idx.push(a, a + 1, a + 2, a, a + 2, a + 3)
+  }
+  const hw = w / 2
+  const hh = h / 2
+  bar(-hw, -hh, hw, -hh + t)
+  bar(-hw, hh - t, hw, hh)
+  bar(-hw, -hh + t, -hw + t, hh - t)
+  bar(hw - t, -hh + t, hw, hh - t)
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setIndex(idx)
+  return new THREE.Mesh(
+    g,
+    new THREE.MeshBasicMaterial({ color: MARK_COLOUR, side: THREE.DoubleSide, toneMapped: false }),
+  )
+}
+
+// ONE cursor for the whole world, not one per road. There is exactly one pointer.
+let mark = null
+
+// The cursor's own reconcile, called from syncRamps for the same reason everything
+// else in here is: the hover can change between frames without this module being
+// told, and the map can open on top of it.
+function syncMark() {
+  if (!mark) {
+    mark = frameMesh(PAD_W + MARK_PAD * 2, DASH_PITCH * 0.9 + MARK_PAD * 2, MARK_T)
+    mark.frustumCulled = false
+    mark.renderOrder = 2
+    scene.add(mark)
+  }
+  // Only on the road you are standing on, which is also the only road whose pads
+  // are raycast (rampMeshes) -- so this is belt and braces rather than a second
+  // rule that could disagree with the first.
+  const on =
+    !state.mapOpen && dashHot.district === state.district && Number.isInteger(dashHot.at)
+  mark.visible = on
+  if (on) mark.position.set(ws.laneX(state.district), LINE_Y + 0.4, dashZ(dashHot.at))
 }
 
 const M = new THREE.Matrix4()
@@ -195,9 +280,12 @@ function placeLine(entry, district, x) {
 
 // THE EXIT SIGN SPEAKS THE SAME LANGUAGE AS THE GATE BOARD.
 //
-//     --home-->
-//     [open sentience]
-//     exit 7
+//     1:2-2 [main]              1:2-2 [main]
+//     --home-->                  <--home--
+//     [open sentience]         [open sentience]
+//     exit 7                       exit 7
+//
+//     a ramp on the right      the same ramp, left
 //
 // It was three plain lines -- network, road, exit number -- which said the right
 // things in the wrong grammar, and in a different grammar from the board hanging
@@ -209,6 +297,56 @@ function placeLine(entry, district, x) {
 // THE NETWORK IS ALWAYS PRINTED, even for a ramp that stays put. `home` in a
 // network you are not looking at is not identified by its name, and a sign that
 // only names the network sometimes makes you work out which case you are in.
+//
+// AND SO IS THE ONE YOU ARE LEAVING, which is the row on top. Asked for, and the
+// reason is the same one the destination row already stands on, pointed the other
+// way: a bracketed name on its own says WHICH network, never WHOSE side of the move
+// it is on, so a sign carrying exactly one of them makes you supply the other from
+// memory -- and the whole point of a ramp is that it is the one control in the shell
+// whose two ends can be in different networks.
+//
+// THE ARROW IS WHAT SAYS WHICH WAY, so the row carries no `from`. It was `from
+// [main]`, on the argument that two bracketed names stacked together are a pair you
+// have to work out the direction of -- and that argument forgot what is stacked
+// BETWEEN them. `--home-->` already points, and once the three rows are read as one
+// line the label is a word doing a job the punctuation was doing better. Asked for,
+// and it leaves the sign written in one notation instead of a notation plus a
+// caption.
+//
+// AND THE ROW IS THE GATE BOARD'S ROW, `1:2-2 [main]` -- track 1, at window 2 of 2,
+// in the network `main`. Asked for, and it is the better version of the same idea:
+// the gantry hanging over this road already answers "where am I" in exactly that
+// format, and a second sign twenty feet away answering the same question in a
+// shorter format would be two vocabularies for one fact. Now the two signs agree
+// word for word, and the ramp board's top row is simply the gate board's bottom row
+// repeated where you need it -- at the turn, where the gate is behind you.
+//
+// IT IS MUTED AND NOT COOL, which is the one place this deviates from that board.
+// Cool is "which of several" over there; on THIS sign cool already means "the ramp
+// leaves this network", which is the single distinction the sign exists to draw. A
+// cool top row would spend the only colour that carries meaning here on the row that
+// carries the least.
+//
+// AND IT REPAINTS AS YOU DRIVE, once per window you pass -- `at` is the first thing
+// on a ramp board that moves without anything being edited. The gate board already
+// accepted that cost for the same field and says so; the difference is that a road
+// can carry several ramps, so it is one repaint per ramp per window passed rather
+// than one. Still not per frame: the key only moves when the count does.
+//
+// WHEN THE TWO NETWORKS MATCH, SEEING THE SAME NAME TWICE IS THE ANSWER. A ramp
+// inside one network is legal -- it is a shortcut past the exit gate -- and `[main]`
+// over `[main]` says so at a glance, which no single row can.
+//
+// One function for the row, used by the painter AND by the redraw key, so a board
+// cannot go on saying something the key has stopped noticing.
+const whereRow = (district) =>
+  `${tracks.activeIndex()}:${windowAtOn(district)}-${[...signs.values()].filter((s) => s.district === district).length}` +
+  ` [${ws.tenant(ws.tenantOf(district))?.name ?? '?'}]`
+//
+// It is the from-ROAD's network, not the active one. They are the same thing while
+// you are looking at this sign, and reading it off the ramp is what keeps this row
+// and the `crosses` test two views of one fact rather than two facts that can
+// disagree.
 function drawBoard(canvas, r) {
   const to = ws.get(r.to)
   const net = ws.tenant(ws.tenantOf(r.to))
@@ -225,7 +363,7 @@ function drawBoard(canvas, r) {
   g.textAlign = 'center'
   g.textBaseline = 'middle'
 
-  // Shrink to fit rather than truncate where it can: these are three short lines
+  // Shrink to fit rather than truncate where it can: these are four short lines
   // on a wide sign, and a name that has to be cut is cut from its own end.
   const fit = (text, max, room) => {
     let px = max
@@ -243,14 +381,37 @@ function drawBoard(canvas, r) {
   }
   const room = W - 44
 
-  g.fillStyle = ACC_CSS
-  g.fillText(fit(`--${(to?.name ?? r.to)}-->`, 62, room), W / 2, H * 0.26)
-
-  g.fillStyle = crosses ? COOL_CSS : '#8a97ab'
-  g.fillText(fit(`[${net?.name ?? '?'}]`, 52, room), W / 2, H * 0.55)
-
-  g.fillStyle = '#6b7689'
-  g.fillText(fit(to?.open ? `exit ${r.at + 1}` : 'closed', 34, room), W / 2, H * 0.82)
+  // Where you are, smallest and dimmest of the four: it is the only row on the sign
+  // you could have answered without reading it, so it takes the least of the board.
+  //
+  // The rows are RETURNED as well as painted, so a report can say what the sign
+  // reads without anybody having to read pixels off a canvas -- and it returns what
+  // `fit` actually drew, shrunk or cut, rather than what it was handed.
+  const rows = []
+  const row = (text, size, y, colour) => {
+    g.fillStyle = colour
+    const drawn = fit(text, size, room)
+    g.fillText(drawn, W / 2, H * y)
+    rows.push(drawn)
+  }
+  row(whereRow(r.from), 34, 0.17, '#8a97ab')
+  // THE ARROW POINTS THE WAY THE TARMAC GOES.
+  //
+  // It was `--home-->` on both sides, which is WRL's notation for the edge and says
+  // nothing false -- but a road sign is read while you are deciding which way to
+  // turn, and one that points right above a ramp peeling off to the left is worse
+  // than one that does not point at all. Asked for, and the direction is free: the
+  // ramp already knows which side it is on, the deck's geometry is baked from it,
+  // and the board is turned in toward the driver by the same sign.
+  //
+  // It is still one notation. `<--home--` is the same edge written the other way
+  // round, which is exactly what WRL means by it -- the arrowhead is the end you
+  // arrive at, and on this side of the road you arrive to your left.
+  const name = to?.name ?? r.to
+  row(r.side < 0 ? `<--${name}--` : `--${name}-->`, 58, 0.42, ACC_CSS)
+  row(`[${net?.name ?? '?'}]`, 48, 0.66, crosses ? COOL_CSS : '#8a97ab')
+  row(to?.open ? `exit ${r.at + 1}` : 'closed', 32, 0.87, '#6b7689')
+  return rows
 }
 
 // The ramp's centreline, in the road's own frame: x out to the right, z down the
@@ -326,9 +487,10 @@ function ribbon(widthAt, offset, side, segs = RAMP_SEGS) {
 function makeRamp(district, r) {
   const canvas = document.createElement('canvas')
   canvas.width = 512
-  canvas.height = 256
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.colorSpace = THREE.SRGBColorSpace
+  canvas.height = 320
+  // NOT a bare CanvasTexture: 512x320 is not a power of two, and this board
+  // repaints as you drive. See world.js canvasTexture.
+  const tex = canvasTexture(THREE, canvas)
 
   const action = { kind: 'ramp', district, at: r.at, to: r.to }
   const side = r.side > 0 ? 1 : -1
@@ -400,7 +562,7 @@ function makeRamp(district, r) {
   scene.add(post)
   // The side is remembered on the part because the deck's geometry is BAKED with it
   // -- see syncRamps for why that means a flip is a rebuild and not a reposition.
-  return { deck, edges, board, post, tex, canvas, key: '', side }
+  return { deck, edges, board, post, tex, canvas, key: '', rows: null, side }
 }
 
 function placeRamp(part, district, x, r) {
@@ -419,10 +581,33 @@ function placeRamp(part, district, x, r) {
   // is the kind of cost that does not show up in a frame time until there are
   // eight of them.
   const to = ws.get(r.to)
-  const key = `${r.to}|${to?.name}|${to?.open}|${ws.tenantOf(r.to)}|${ws.tenant(ws.tenantOf(r.to))?.name}|${r.at}`
+  // EVERY NAME THE BOARD PRINTS IS IN THE KEY, including the two it prints about
+  // networks. The from-network was not, and it is a name that can be edited from the
+  // map -- a board keyed on less than it draws is a board that keeps saying the old
+  // thing until something unrelated happens to change.
+  const key = [
+    r.to,
+    to?.name,
+    to?.open,
+    ws.tenantOf(r.to),
+    ws.tenant(ws.tenantOf(r.to))?.name,
+    // The whole top row, not the pieces of it -- the track, how far down the road
+    // you are, the window count and the network name are four things that each move
+    // on their own, and listing them separately is four chances to forget one. The
+    // board redraws when what it SAYS changes.
+    whereRow(district),
+    r.at,
+    // The side, because the arrow points from it now. A flip already drops the part
+    // and rebuilds it -- the deck's vertices are baked with the side (see syncRamps)
+    // -- so a fresh canvas is repainted either way and this line changes nothing
+    // today. It is here so the key stays a description of what the board SAYS
+    // rather than a list that happens to be complete because of a rule two
+    // functions away.
+    r.side,
+  ].join('|')
   if (key !== part.key) {
     part.key = key
-    drawBoard(part.canvas, { ...r, from: district })
+    part.rows = drawBoard(part.canvas, { ...r, from: district })
     part.tex.needsUpdate = true
   }
   // THE SIGN LIGHTS, THE ROAD DOES NOT.
@@ -474,6 +659,7 @@ export function syncRamps() {
   // overlay: while it is up, nothing on the road IS hovered, and that is a fact
   // rather than a display rule.
   if (state.mapOpen) clearHover()
+  syncMark()
   const want = new Set()
   for (const w of ws.openList()) {
     want.add(w.id)
@@ -567,6 +753,8 @@ export function dashActionOf(hit) {
 function clearHover() {
   rampHot.district = null
   rampHot.at = null
+  dashHot.district = null
+  dashHot.at = null
 }
 
 // Hover, so a marker reads as pressable before it is pressed. Held as two
@@ -580,13 +768,42 @@ export function setRampHover(hit) {
   const ramp = action?.kind === 'ramp' ? action : null
   rampHot.district = ramp?.district ?? null
   rampHot.at = ramp ? ramp.at : null
+  // The two halves of the same move, in one owner. They are mutually exclusive by
+  // construction -- one hit, and it is either a pad or it is not -- so a pointer that
+  // slides from a marker onto the ramp beside it puts one out as it lights the other,
+  // which two independent owners could not promise.
+  const dash = action?.kind === 'dash' ? action : null
+  dashHot.district = dash?.district ?? null
+  dashHot.at = dash ? dash.at : null
 }
 
 // What is actually painted on the road, read off the scene rather than off the
 // graph. A report that recomputed the dash positions from `dashZ` would agree
 // with itself no matter what the instance matrices said.
 export const rampReport = () => {
-  const out = { district: state.district, roads: [] }
+  const out = {
+    district: state.district,
+    // WHERE THE CURSOR IS, read off the mesh's own transform rather than off
+    // `dashHot`. The claim is that a frame is drawn around the dash under the
+    // pointer; a report that echoed the address the frame is placed FROM would say
+    // yes even if the mesh were parked at the origin or never added to the scene.
+    hoverMark: mark
+      ? {
+          shown: mark.visible,
+          x: Math.round(mark.position.x),
+          z: Math.round(mark.position.z),
+          // The dash that z belongs to, worked back from the geometry -- so "the
+          // frame is on dash 6" is an answer about the picture.
+          onDash: mark.visible
+            ? [...Array(dashCount(state.district)).keys()].find(
+                (i) => Math.round(dashZ(i)) === Math.round(mark.position.z),
+              ) ?? null
+            : null,
+          colour: mark.material.color.getHexString(),
+        }
+      : null,
+    roads: [],
+  }
   for (const [id, entry] of lines) {
     const m = new THREE.Matrix4()
     const dashes = []
@@ -645,6 +862,8 @@ export const rampReport = () => {
         // variable the highlight is drawn from would agree with itself whatever the
         // board looked like.
         boardLit: part.board.material.color.getHexString(),
+        // What the sign READS, top row first, as painted.
+        says: part.rows ?? null,
         board: [
           Math.round(part.board.position.x),
           Math.round(part.board.position.y),

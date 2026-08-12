@@ -32,6 +32,14 @@ const STORE_KEY = 'rrabbit.tracks.v1'
 //   history  where it has been, oldest first, capped -- a trail to retrace and
 //            not a log
 //   roads    how far along each road this track had driven: { [wsId]: z }
+//   in       the window it was standing IN, `{district, milepost}` or null
+//
+// `in` IS THE SAME ARGUMENT AS `roads`, ONE STEP FURTHER IN. Where you are on a
+// road is part of what a track is; being inside a window is more of that, not less
+// -- it is the state you are most likely to be in when a number key gets pressed,
+// because being in a window is what working looks like. Leaving a track dropped you
+// out onto the road and coming back left you there, so a switch out and straight
+// back was not a round trip. Reported.
 //
 // `roads` WAS ONE SHARED MAP IN travel.js, keyed by workspace. The argument for
 // that was that where you are on a road is a fact about the road -- one copy
@@ -46,7 +54,7 @@ const tracks = []
 let activeId = 1
 
 function blank(id) {
-  return { id, name: '', at: null, history: [], roads: {} }
+  return { id, name: '', at: null, history: [], roads: {}, in: null }
 }
 
 function save() {
@@ -61,6 +69,12 @@ function save() {
           at: t.at,
           history: [...t.history],
           roads: t.roads,
+          // Saved even though a window never survives a reload -- there is no
+          // window store, and the clients are relaunched rather than restored. It
+          // costs two fields, it is dropped on load when the window is not there
+          // (see below), and if session restore is ever built this is already the
+          // half of it that says which track was in what.
+          in: t.in,
         })),
       }),
     )
@@ -98,6 +112,14 @@ function load() {
         if (ws.has(id) && Number.isFinite(z)) t.roads[id] = z
       }
     }
+    // The road has to still exist for the address to mean anything. Whether the
+    // WINDOW is still there is not decidable here -- surfaces arrive after this
+    // module loads -- so that half is checked at the moment of arrival, which is
+    // the only moment it can be answered honestly.
+    t.in =
+      raw.in && ws.has(raw.in.district) && Number.isInteger(raw.in.milepost)
+        ? { district: raw.in.district, milepost: raw.in.milepost }
+        : null
   }
   if (Number.isInteger(data.active) && data.active >= 1 && data.active <= COUNT) activeId = data.active
 }
@@ -180,6 +202,33 @@ export function parkRoad(workspaceId, z) {
 }
 
 export const roadOf = (workspaceId) => active()?.roads?.[workspaceId]
+
+// AND WHICH WINDOW IT WAS STANDING IN, if any.
+//
+// Saved on the ACTIVE track, which is why the caller has to write it before
+// `select` flips which track that is -- the same ordering `parkRoad` needs and the
+// same mistake it already documents. Saved immediately rather than on a timer:
+// unlike a wheel notch this happens once per switch, and it is the fact the switch
+// exists to preserve.
+export function parkFlat(where) {
+  const t = active()
+  if (!t) return false
+  const next =
+    where && ws.has(where.district) && Number.isInteger(where.milepost)
+      ? { district: where.district, milepost: where.milepost }
+      : null
+  const same = (a, b) => (!a && !b) || (!!a && !!b && a.district === b.district && a.milepost === b.milepost)
+  if (same(t.in, next)) return false
+  t.in = next
+  save()
+  return true
+}
+
+// Where the track you are ARRIVING on was standing. Not `active()` in disguise --
+// both callers read it right after `select`, so the active track is already the
+// incoming one; this is written the long way so a future caller cannot be surprised
+// by which track it answers about.
+export const flatOf = (id) => get(id)?.in ?? null
 
 // A JOURNEY on the active track. Only actual changes of road count -- arriving
 // where you already are is not somewhere you have been -- and the trail is
@@ -273,5 +322,10 @@ export const report = () => ({
     at: t.at,
     history: [...t.history],
     roads: Object.fromEntries(Object.entries(t.roads).map(([k, v]) => [k, Math.round(v)])),
+    // The address only. Whether the shell actually got you back inside it is a
+    // question about `state.mode`, not about this record, and the two are reported
+    // separately on purpose -- a track that remembers a window it could not return
+    // to should read as exactly that.
+    in: t.in ? `${t.in.district}:${t.in.milepost}` : null,
   })),
 })

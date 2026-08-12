@@ -292,6 +292,42 @@ export function windowAtOn(district) {
 // 488 tall and the whole structure is in shot.
 export const GANTRY_VIEW = 440
 
+// A CANVAS TEXTURE WEBGL1 WILL NOT SILENTLY REBUILD ON EVERY UPLOAD.
+//
+// This runs on WebGL1, where a texture whose dimensions are not powers of two
+// cannot be mipmapped or repeated -- so three quietly RESIZES it to the nearest
+// powers of two instead. That is not free and it is not once: it happens on every
+// `needsUpdate`, and half the signs in this shell are canvases sized to their own
+// text (the name board, the step controls, the close answers) or to a layout that
+// is not a power of two (the ramp board at 512x320). The console says so, once per
+// upload:
+//
+//     THREE.WebGLRenderer: Texture has been resized from (512x320) to (512x256)
+//
+// A sign that repaints as you drive -- which the ramp board now does, because it
+// carries how far down the road you are -- therefore paid for a full canvas
+// rescale per repaint, per ramp. Measured after one drive: seventeen rescales.
+//
+// The fix is to stop asking for mipmaps. Nothing here is tiled and nothing needs
+// minification filtering beyond linear -- these are flat quads read at reading
+// distance -- so `generateMipmaps: false` plus a linear min filter and clamped
+// wrapping makes a non-power-of-two canvas legal, uploaded as-is, at its own size.
+//
+// THE COST, STATED: no mipmaps means more aliasing on a sign seen from far away.
+// That is the right way round for these -- the previous behaviour paid for its
+// mipmaps by throwing away the resolution first, so a distant sign was being
+// smoothed from an image that had already been squashed.
+export function canvasTexture(THREE, canvas) {
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.generateMipmaps = false
+  tex.minFilter = THREE.LinearFilter
+  tex.magFilter = THREE.LinearFilter
+  tex.wrapS = THREE.ClampToEdgeWrapping
+  tex.wrapT = THREE.ClampToEdgeWrapping
+  return tex
+}
+
 // ---- M4: districts -------------------------------------------------------
 //
 // A district is a workspace. Spec §3 originally said "one Wayland output each";
@@ -331,6 +367,10 @@ export const state = {
   idleBeats: 0,
   decodes: 0,
   suppressed: 0,
+  // Null until the GPU takes the context away mid-session, then the reason. It is
+  // the one state the shell cannot come back from, so it is reported rather than
+  // counted: `null` and "a number that stopped moving" look the same from outside.
+  contextLost: null,
   glErrors: 0,
   lastGlError: 0,
   lastGlErrorFrame: 0,
@@ -339,6 +379,16 @@ export const state = {
   mode: 'driving', // driving | flying | flat
   flatMilepost: null,
   flatDistrict: null,
+  // WHICH WINDOW HAS BEEN ASKED ABOUT AND NOT ANSWERED, as `district:milepost`.
+  //
+  // Closing is the only act on a window that cannot be undone, so `X--` asks before
+  // it does it. The question is asked in travel.js (which owns the pointer) and
+  // drawn in rrabbit.js (which owns the chrome), and those two modules cannot import
+  // each other -- rrabbit already imports travel for `release`. Shared state is how
+  // everything else in that pair is coordinated, and one field beats a second copy
+  // of the answer in each module, which is the arrangement where a window closes
+  // because the two disagreed about whether the question had been asked.
+  closeAsking: null,
   // Non-zero exactly when the flattened window is NOT pixel-exact, which is the
   // only honest way to read a zoom that is now remembered per window.
   flatZoom: 0,

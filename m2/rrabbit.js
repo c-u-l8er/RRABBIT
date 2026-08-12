@@ -14,8 +14,9 @@
 // in this direction only.
 
 import * as THREE from 'three'
-import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, slotFree, nextFreeSlot, nearestFreeSlot, SLOT_FIRST, SLOT_GAP } from './world.js'
+import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, slotFree, nextFreeSlot, nearestFreeSlot, SLOT_FIRST, SLOT_GAP, canvasTexture } from './world.js'
 import * as ws from './workspaces.js'
+import * as layout from './layout.js'
 import { release, rekeyZoom } from './travel.js'
 
 let renderer, gl, scene, camera, session
@@ -104,8 +105,7 @@ function grabTexture() {
   // Twice, so the shadow is dark enough to read against a lit sign.
   g.fillText('-->', 64, 35)
   g.fillText('-->', 64, 35)
-  grabTex = new THREE.CanvasTexture(c)
-  grabTex.colorSpace = THREE.SRGBColorSpace
+  grabTex = canvasTexture(THREE, c)
   return grabTex
 }
 
@@ -167,10 +167,55 @@ function stepTexture(which) {
   // Twice, so the shadow is dark enough to read against a bright window.
   g.fillText(text, c.width / 2, c.height / 2 + 1)
   g.fillText(text, c.width / 2, c.height / 2 + 1)
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
+  const tex = canvasTexture(THREE, c)
   stepTex[which] = { tex, aspect: c.width / c.height }
   return stepTex[which]
+}
+
+// THE TWO ANSWERS, and NEITHER OF THEM IS THE BUTTON YOU JUST PRESSED.
+//
+// A second press on `X--` used to be the yes, on the argument that two presses of
+// one control is what a two-stage button means everywhere else. Asked to remove it,
+// and the ask is right: that shape only guards against a stray click, not against a
+// determined one, and a double-click -- which is a single gesture your hand makes
+// without deciding twice -- went straight through it. The pointer has to TRAVEL to
+// the yes now. Distance is the confirmation; a second click in the same place is
+// not a second decision.
+//
+// `close--X` ends in the glyph of the control that asked, so the answer is visibly
+// the same act as the button you came from; `<--keep` points back the other way.
+// Both wear the arrows the shell uses everywhere for "this leads there".
+//
+// Sized from the text like the step controls, for the same reason: a fixed quad
+// either crops a word or leaves a word swimming in it, and both read as a control
+// somebody forgot to finish.
+const answerTex = {}
+function answerTexture(which) {
+  if (answerTex[which]) return answerTex[which]
+  const text = which === 'keep' ? '<--keep' : 'close--X'
+  const measure = document.createElement('canvas').getContext('2d')
+  measure.font = `bold ${STEP_FONT}px ui-monospace, monospace`
+  const w = Math.ceil(measure.measureText(text).width)
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = Math.round(STEP_FONT * 1.35)
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, c.width, c.height)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = `bold ${STEP_FONT}px ui-monospace, monospace`
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 10
+  // The close answer wears the close control's own red; the cancel wears the name
+  // board's cream, which is this shell's colour for "text that is just telling you
+  // something". Colour is the whole difference between the two, so it is the one
+  // thing about them that is not shared.
+  g.fillStyle = which === 'keep' ? '#f3ead4' : '#ff6b6b'
+  g.fillText(text, c.width / 2, c.height / 2 + 1)
+  g.fillText(text, c.width / 2, c.height / 2 + 1)
+  const tex = canvasTexture(THREE, c)
+  answerTex[which] = { tex, aspect: c.width / c.height }
+  return answerTex[which]
 }
 
 let closeTex = null
@@ -189,8 +234,7 @@ function closeTexture() {
   g.fillStyle = '#ff6b6b'
   g.fillText('X--', 64, 35)
   g.fillText('X--', 64, 35)
-  closeTex = new THREE.CanvasTexture(c)
-  closeTex.colorSpace = THREE.SRGBColorSpace
+  closeTex = canvasTexture(THREE, c)
   return closeTex
 }
 
@@ -245,8 +289,7 @@ function plateTexture(title, width) {
   g.fillText(title, c.width / 2, c.height / 2)
   g.fillText(title, c.width / 2, c.height / 2)
   g.restore()
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
+  const tex = canvasTexture(THREE, c)
   return tex
 }
 
@@ -491,6 +534,41 @@ function makeSign(view, milepost, district, side, dash) {
   platePad.userData.chrome = true
   mesh.add(platePad)
 
+  // THE ANSWER ROW, above the name board and drawn only while the question is open.
+  //
+  // Above rather than beside: the two corner controls own the corners, the step
+  // controls own the side edges, and the row over the board is the only edge of a
+  // window with nothing on it -- so this is the one place a pair of buttons can
+  // appear without covering a control you might have been reaching for instead.
+  //
+  // The board itself asks the question (syncTitles), which is why there is no third
+  // mesh here for the text: the sign that says which window this is, is the sign
+  // that should say which window is about to close.
+  const answer = {}
+  for (const which of ['keep', 'close']) {
+    const dir = which === 'keep' ? -1 : 1
+    const face = answerTexture(which)
+    const aw = STEP_H * face.aspect
+    const btn = new THREE.Mesh(
+      new THREE.PlaneGeometry(aw, STEP_H),
+      new THREE.MeshBasicMaterial({ map: face.tex, transparent: true, toneMapped: false }),
+    )
+    btn.position.set(dir * (aw / 2 + 8), sh / 2 + GRIP_REACH + PLATE_H * 1.15, 3)
+    btn.userData.answerButton = which
+    btn.userData.chrome = true
+    btn.visible = false
+    mesh.add(btn)
+    const pad = new THREE.Mesh(
+      new THREE.PlaneGeometry(aw + 24, PLATE_H * 1.6),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    pad.position.copy(btn.position)
+    pad.userData.answerButton = which
+    pad.userData.chrome = true
+    mesh.add(pad)
+    answer[which] = { btn, pad }
+  }
+
   // `(prev)--` and `--(next)`, on the middle of each side edge, hover-only like
   // the two corner controls. Outside the surface for the same reason all of them
   // are: the thing underneath is somebody else's application.
@@ -538,6 +616,10 @@ function makeSign(view, milepost, district, side, dash) {
     prevPad: step.prev.pad,
     nextBtn: step.next.btn,
     nextPad: step.next.pad,
+    keepBtn: answer.keep.btn,
+    keepPad: answer.keep.pad,
+    shutBtn: answer.close.btn,
+    shutPad: answer.close.pad,
     // HOW FAR THE SHELL'S OWN FURNITURE STICKS UP PAST THE PICTURE, in world
     // units, recorded on the ledger because Travel has to know it and cannot
     // import this module (RRABBIT imports Travel, for release()).
@@ -551,7 +633,12 @@ function makeSign(view, milepost, district, side, dash) {
     //
     // The close control is turned 45 degrees, so its half-extent is GRIP_REACH
     // by that constant's own construction; its top is therefore twice out.
-    chromeTop: Math.max(2 * GRIP_REACH, GRIP_REACH + PLATE_H / 2),
+    //
+    // THE ANSWER ROW IS IN HERE TOO even though it is drawn only while a close is
+    // being asked about. Fitting to it always costs a few units of frame and means
+    // the prompt cannot appear off the top of the screen -- and a confirm you have
+    // to scroll to is a confirm you answer by guessing.
+    chromeTop: Math.max(2 * GRIP_REACH, GRIP_REACH + PLATE_H * 1.15 + STEP_H / 2),
     tex,
     rt,
     size: { width, height },
@@ -900,8 +987,21 @@ export function tidyRoad(district) {
 // So this decides armed and Travel decides shown -- and handleUnder has to test
 // ARMED rather than visible, or the control could only be hit while it was
 // already being pointed at, which is a control nobody can ever find.
+// The ACTION stays one function for both surfaces (requestCloseWindow); the ASKING
+// is per surface, because the map's prompt is two DOM buttons on the row you asked
+// from and this one is two quads over the window, and neither could sensibly be the
+// other. What must not be duplicated is the closing, and it is not. The unanswered
+// question lives in `state.closeAsking` -- see world.js for why it is there and not
+// in either module that uses it.
 function syncHandles() {
   const flatKey = `${state.flatDistrict}:${state.flatMilepost}`
+  // A QUESTION ABOUT A WINDOW YOU ARE NO LONGER IN IS NOT A QUESTION.
+  //
+  // Leaving is an answer of "no", and it is the same fault the ramp hover had: a
+  // state that outlives the thing it was about comes back later attached to
+  // whatever is there now. Here that would be a live confirm sitting over a
+  // DIFFERENT window, one press from closing it.
+  if (state.closeAsking && (state.mode !== 'flat' || state.closeAsking !== flatKey)) state.closeAsking = null
   for (const s of signs.values()) {
     if (!s.handle) continue
     const armed = state.mode === 'flat' && `${s.district}:${s.milepost}` === flatKey
@@ -928,7 +1028,25 @@ function syncHandles() {
       if (o) o.userData.armed = armed
     }
     if (!armed && s.closeBtn) s.closeBtn.visible = false
-    if (s.plate) s.plate.visible = armed
+    // AND "ALWAYS UP" MEANS FROM THE ROAD TOO, which it did not.
+    //
+    // It was drawn on `armed`, and armed is "you are standing IN this window" --
+    // so the one control that says what a window IS could only be read from
+    // inside the one window you had already chosen. Every other window on the
+    // road was a rectangle of somebody's pixels with no name on it, which is the
+    // exact question you are asking while driving past. Asked for, and it is the
+    // same argument the board already made against being hover-only, carried one
+    // step further out.
+    //
+    // ARMED IS UNTOUCHED. It still decides what the pointer can HIT -- clicking a
+    // window from the road flattens you into it, and a name board that took that
+    // click out on the road would put a menu between you and the window instead.
+    // Drawn everywhere, pressable where it always was.
+    //
+    // Windows on another network's road are hidden by clearing `mesh.visible`
+    // (syncPlacement), and three does not draw the children of an invisible
+    // parent -- so this cannot light up a road you are not looking at.
+    if (s.plate) s.plate.visible = true
     // A STEP CONTROL IS ARMED ONLY IF THERE IS SOMEWHERE TO STEP TO. At the ends
     // of a road one of them points at nothing, and a control that is drawn and
     // then does nothing is worse than one that is not there -- you press it
@@ -944,6 +1062,23 @@ function syncHandles() {
         o.userData.armed = live
         p.userData.armed = live
         if (!live) o.visible = false
+      }
+    }
+    // THE ANSWERS ARE DRAWN AND ARMED TOGETHER, which is the opposite of every
+    // other control on the window and is the point of them. The grab and the step
+    // arrows are live before they are drawn, because they answer a pointer that has
+    // gone looking for them; these two answer a question the shell asked, so being
+    // aimable while invisible would mean a click in empty space could close a
+    // window.
+    if (s.keepBtn) {
+      const asking = armed && state.closeAsking === flatKey
+      for (const [o, p] of [
+        [s.keepBtn, s.keepPad],
+        [s.shutBtn, s.shutPad],
+      ]) {
+        o.visible = asking
+        o.userData.armed = asking
+        p.userData.armed = asking
       }
     }
   }
@@ -963,7 +1098,11 @@ function syncHandles() {
 function syncTitles() {
   for (const s of signs.values()) {
     if (!s.plate) continue
-    const want = nameOf(s)
+    // AND WHILE A CLOSE IS BEING ASKED ABOUT, THE BOARD ASKS IT. The board is the
+    // one part of the chrome whose job is words, it is always drawn, and it names
+    // the window -- so putting the question anywhere else would mean printing the
+    // window's name twice to say which one is about to go.
+    const want = state.closeAsking === `${s.district}:${s.milepost}` ? `close ${labelOf(s)}?` : labelOf(s)
     if (s.plateText === want) continue
     s.plateText = want
     s.plate.material.map?.dispose()
@@ -979,6 +1118,20 @@ export function nameOf(sign) {
   const k = sign?.mesh?.userData?.signKey ?? ''
   return renames.get(k) || titles.get(k) || 'untitled window'
 }
+
+// AND HOW IT IS WRITTEN: in round brackets, every time it is SHOWN.
+//
+// `mail` could be an application, a road, a network or a file. `(mail)` is a
+// window -- the same job the shell already gives `--road-->` for a road and
+// `[network]` for a network, and the one noun in that vocabulary that had no
+// mark of its own. Brackets rather than a colour so it survives being read out,
+// written down, or printed on a canvas that has one fill colour.
+//
+// SEPARATE FROM `nameOf` ON PURPOSE. `nameOf` is the window's NAME -- what the
+// rename box is holding, what a report prints, what gets compared. If the
+// brackets lived there they would come back round through the rename box and be
+// saved into the name itself, and the next pass would say `((mail))`.
+export const labelOf = (sign) => `(${nameOf(sign)})`
 
 // NAME IT YOURSELF, and clearing the name falls back to the client's.
 //
@@ -1014,6 +1167,73 @@ export function requestCloseWindow(district, milepost) {
   role.requestClose()
   return { district, milepost, asked: true }
 }
+
+// ASKING IS NOT RESIZING, AND ONE ASK IS NOT ENOUGH.
+//
+// `configureSize` is a request. The client acks it and reallocates in its own time,
+// Greenfield DROPS a queued configure that a newer one supersedes, and a client that
+// is still starting up may do nothing with the first one at all -- which is the
+// state every window is in at exactly the moment this runs. A single fire-and-forget
+// ask would restore the shape on a client that happened to be ready and silently
+// not on one that was not, which is the worst of the two possible behaviours because
+// it looks like the feature working intermittently.
+//
+// So it is re-asked at a rate a client can absorb until the surface is OBSERVED to
+// be the size, or until a deadline decides the client is refusing rather than
+// lagging. That is the same discipline, the same cadence and the same reasoning as
+// the resize drag's own settle loop (travel.js holdFlatScale) -- and a client with a
+// minimum size larger than the remembered one is refusing legitimately, so the
+// deadline has to exist or this would ask forever.
+//
+// The record is dropped either way. A window whose client will not take the size is
+// left at whatever it chose, and the shape stays remembered for the next one to
+// arrive at that address -- forgetting it here would let one stubborn client erase
+// a decision that was never about it.
+const RESTORE_EVERY = 220
+const RESTORE_FOR = 6000
+const restoring = new Map()
+
+function askForRememberedSize(k, view, district, milepost, size) {
+  const want = layout.sizeOf(district, milepost)
+  if (!want) return false
+  if (size && size.width === want.w && size.height === want.h) return false
+  const role = view?.surface?.role
+  // BY SHAPE, NOT BY CLASS NAME -- minification renames constructors and every
+  // check keyed on one was dead in the shipped bundle. Same test startResize makes.
+  if (typeof role?.configureSize !== 'function') return false
+  role.configureSize({ width: want.w, height: want.h })
+  restoring.set(k, { w: want.w, h: want.h, sentAt: performance.now(), until: performance.now() + RESTORE_FOR })
+  return true
+}
+
+function restoreSizes() {
+  if (!restoring.size) return
+  const now = performance.now()
+  for (const [k, job] of [...restoring]) {
+    const s = signs.get(k)
+    // Arrived, gone, or out of time. A surface that was destroyed mid-restore takes
+    // its job with it rather than leaving one that can never finish.
+    if (!s || !s.size || (s.size.width === job.w && s.size.height === job.h) || now > job.until) {
+      restoring.delete(k)
+      continue
+    }
+    if (now - job.sentAt < RESTORE_EVERY) continue
+    job.sentAt = now
+    s.view?.surface?.role?.configureSize?.({ width: job.w, height: job.h })
+  }
+}
+
+// What the shell is holding, and what it is in the middle of asking for. Read off
+// the store and the live jobs rather than recomputed, so "it remembered" and "it
+// actually put it back" are two separate answers -- a size that is remembered and
+// refused must not report as a size that was restored.
+export const layoutReport = () => ({
+  remembered: layout.report(),
+  restoring: [...restoring].map(([k, j]) => ({ at: k, want: [j.w, j.h], got: signs.get(k)?.size ?? null })),
+  live: [...signs.values()]
+    .filter((s) => s.size)
+    .map((s) => ({ at: `${s.district}:${s.milepost}`, size: [s.size.width, s.size.height] })),
+})
 
 // A surface's size is not known when it is created -- the first buffer decides
 // it, and renderStates are only built once the view intersects the scene. So
@@ -1089,7 +1309,13 @@ function adoptPending() {
         : { milepost, district, slot, side, dash, view },
     )
     if (built) built.mesh.userData.signKey = k
+    // PUT IT BACK THE SHAPE IT WAS. A window that arrives at an address the shell
+    // has a remembered size for is asked for that size the moment it is adopted --
+    // which is the only moment it can be, because until a surface has a buffer
+    // there is nothing to configure and no sign to hang the request on.
+    askForRememberedSize(k, view, district, milepost, built?.size)
   }
+  restoreSizes()
   for (const [k, s] of signs) {
     const v = views.find((x) => keyOf(x) === k)
     if (v) s.view = v
@@ -1124,7 +1350,7 @@ function dropSign(k, forget = false) {
   // and leaves its geometry and material behind. One per resize is not much and
   // a drag makes a lot of them. (The texture is shared and outlives every sign,
   // which is why it is not disposed here.)
-  for (const o of [s.handle, s.grabPad, s.closeBtn, s.closePad, s.plate, s.platePad, s.prevBtn, s.prevPad, s.nextBtn, s.nextPad]) {
+  for (const o of [s.handle, s.grabPad, s.closeBtn, s.closePad, s.plate, s.platePad, s.prevBtn, s.prevPad, s.nextBtn, s.nextPad, s.keepBtn, s.keepPad, s.shutBtn, s.shutPad]) {
     if (!o) continue
     o.geometry.dispose()
     o.material.dispose()
