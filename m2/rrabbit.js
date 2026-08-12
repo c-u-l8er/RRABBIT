@@ -46,14 +46,14 @@ const SIGN_OFFSET = 330
 // The `-->` is wider than it is tall, so the grab is not square. HANDLE is the
 // hit-area unit; the visible text gets its own proportions.
 const HANDLE = 34
-const GRIP_W = 58
-const GRIP_H = 29
+const GRIP_W = 40
+const GRIP_H = 20
 // Turned 45 degrees, so `-->` points the way dragging it actually takes the
 // corner: up and out. How far out it has to sit is then not a taste -- a
 // rectangle rotated 45 degrees has an axis-aligned half-extent of
 // (w + h) / 2 / sqrt(2), and anything less than that overlaps the surface again.
 const GRIP_REACH = (GRIP_W / 2 + GRIP_H / 2) / Math.SQRT2 + 1
-const PAD = 80
+const PAD = 66
 
 // The grab's face: the text `-->`, and nothing else.
 //
@@ -274,11 +274,20 @@ function makeSign(view, milepost, district, side, lane) {
 // every frame, and reconciling beats remembering: the flattened window changes
 // under this from four different places (flatten, release, a window dying, a
 // resize rebuilding the sign) and none of them should have to know about it.
+// ARMED IS NOT VISIBLE. The grab is live on the window you are standing in; it
+// is only DRAWN when the pointer is near it, because an arrow parked permanently
+// beside a window is one more thing between you and looking at the window.
+//
+// So this decides armed and Travel decides shown -- and handleUnder has to test
+// ARMED rather than visible, or the control could only be hit while it was
+// already being pointed at, which is a control nobody can ever find.
 function syncHandles() {
   const flatKey = `${state.flatDistrict}:${state.flatMilepost}`
   for (const s of signs.values()) {
     if (!s.handle) continue
-    s.handle.visible = state.mode === 'flat' && `${s.district}:${s.milepost}` === flatKey
+    const armed = state.mode === 'flat' && `${s.district}:${s.milepost}` === flatKey
+    s.handle.userData.armed = armed
+    if (!armed) s.handle.visible = false
   }
 }
 

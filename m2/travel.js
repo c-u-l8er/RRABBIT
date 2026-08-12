@@ -439,7 +439,7 @@ function surfacePerScreenPx(s) {
 // the same pixels a hand would.
 function handlePoint() {
   const s = flatSign()
-  if (!s?.handle?.visible || !s.grabPad) return null
+  if (!s?.handle?.userData?.armed || !s.grabPad) return null
   const v = s.grabPad.getWorldPosition(new THREE.Vector3()).project(camera)
   return {
     x: ((v.x + 1) / 2) * renderer.domElement.clientWidth,
@@ -452,15 +452,15 @@ function handlePoint() {
 // is there before you press it.
 function setGrabHot(s, hot) {
   if (!s?.handle) return
-  if (hot) s.handle.material.color.setRGB(1.6, 1.6, 1.6)
-  else s.handle.material.color.setHex(0xffffff)
-  renderer.domElement.style.cursor = hot ? 'nesw-resize' : ''
-  state.grabHot = !!hot
+  const show = !!hot && !!s.handle.userData.armed
+  s.handle.visible = show
+  renderer.domElement.style.cursor = show ? 'nesw-resize' : ''
+  state.grabHot = show
 }
 
 function handleUnder(ev) {
   const s = flatSign()
-  if (!s?.handle?.visible || !s.grabPad) return null
+  if (!s?.handle?.userData?.armed || !s.grabPad) return null
   const rect = renderer.domElement.getBoundingClientRect()
   raycaster.setFromCamera(
     new THREE.Vector2(
