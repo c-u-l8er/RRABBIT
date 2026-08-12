@@ -311,6 +311,22 @@ export function rename(id, name) {
 // renumbers roads the person did not mention -- and the numbers are keyboard
 // shortcuts, so quietly moving three of them to satisfy one is the worst of the
 // options. A swap changes exactly two things and both of them are visible.
+// EXIT ORDER IS THE PANEL ORDER. `exits` has always been an array and the exit
+// gate lays its lanes out left to right in that order, so the sequence was
+// already meaningful and simply had no way to be changed -- it was whatever
+// order the edges happened to be added in. Moving one is a splice.
+export function moveExit(from, to, delta) {
+  const a = nodes.get(from)
+  if (!a) return false
+  const i = a.exits.indexOf(to)
+  const j = i + Math.sign(delta)
+  if (i < 0 || j < 0 || j >= a.exits.length) return false
+  const [moved] = a.exits.splice(i, 1)
+  a.exits.splice(j, 0, moved)
+  touched()
+  return true
+}
+
 export function setPos(id, want) {
   const n = nodes.get(id)
   const p = Math.round(Number(want))

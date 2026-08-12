@@ -212,11 +212,16 @@ function panel() {
     : '<li class="empty">No windows on this road yet. Its enter gate opens them.</li>'
 
   const exits = ws.exitsOf(selected)
+  // The order here IS the order of the lanes on the exit gate, left to right,
+  // so the arrows are not a tidying-up affordance -- they are how you decide
+  // which way you reach for without looking.
   const exitRows = exits.length
     ? exits
         .map(
-          (e) =>
-            `<li><span>${esc(ws.get(e).name)}</span>` +
+          (e, i) =>
+            `<li><span class="ord">${i + 1}</span><span>${esc(ws.get(e).name)}</span>` +
+            `<button class="mini" data-move="${esc(selected)}|${esc(e)}|-1"${i === 0 ? ' disabled' : ''} title="move left on the gate">&#9650;</button>` +
+            `<button class="mini" data-move="${esc(selected)}|${esc(e)}|1"${i === exits.length - 1 ? ' disabled' : ''} title="move right on the gate">&#9660;</button>` +
             `<button class="mini" data-cut="${esc(selected)}|${esc(e)}" title="remove this exit">&times;</button></li>`,
         )
         .join('')
@@ -244,7 +249,7 @@ function panel() {
     `<input id="ws-pos" type="number" min="1" max="${ws.list().length}" value="${n.pos}" data-id="${esc(selected)}" />` +
     `<button class="mini" data-pos="${esc(selected)}">set</button>` +
     '<span class="note">swaps with whichever lane holds it</span></div>' +
-    `<h3>exits <span class="note">from ${esc(n.name)}</span></h3>` +
+    `<h3>exits <span class="note">from ${esc(n.name)} &middot; in gate order</span></h3>` +
     `<ul class="exits">${exitRows}</ul>` +
     (candidates
       ? '<div class="field"><select id="ws-add">' + candidates + '</select>' +
@@ -333,6 +338,9 @@ const CSS = `
 #map .exits { list-style: none; margin: 0 0 8px; padding: 0; }
 #map .exits li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 #map .exits li span { flex: 1 1 auto; }
+#map .exits .ord { flex: 0 0 16px; color: #6b7689; }
+#map .exits .mini { padding: 3px 7px; }
+#map .exits .mini:disabled { opacity: .3; cursor: default; border-color: #24304a; }
 #map .exits li.empty { color: #6b7689; }
 #map .goto { margin-top: 12px; width: 100%; cursor: pointer; background: #0b6b3a;
   border: 1px solid #fff; color: #fff; padding: 8px 10px; font: inherit; }
@@ -370,6 +378,12 @@ function install() {
     const pos = ev.target.closest('[data-pos]')
     if (pos) {
       ws.setPos(pos.dataset.pos, el.querySelector('#ws-pos')?.value)
+      return render(true)
+    }
+    const move = ev.target.closest('[data-move]')
+    if (move) {
+      const [from, to, d] = move.dataset.move.split('|')
+      ws.moveExit(from, to, Number(d))
       return render(true)
     }
     const cut = ev.target.closest('[data-cut]')
