@@ -33,7 +33,7 @@
 // that already has an owner.
 
 import * as THREE from 'three'
-import { signs, ACC, COOL, ENTER_Z, exitZOf } from './world.js'
+import { signs, ACC, COOL, ENTER_Z, exitZOf, windowAtOn } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
 
@@ -50,10 +50,20 @@ export function attachGantry(c) {
 }
 
 // The beam sits lower than it used to, to make room ABOVE it for the name board.
-// At 440 units away the frustum top is y=349, so a board hung over a beam at 300
-// would have been clipped -- the same trap the first gantry fell into.
-const BEAM_Y = 262
-const BOARD_H = 46
+// At GANTRY_VIEW (440 away) the frustum is 488 tall about y=105, so its top edge is
+// y=349 -- and a board hung over a beam at 300 was clipped, which is the trap the
+// first gantry fell into.
+//
+// IT CAME DOWN AGAIN, 262 -> 234, when the board went to two rows. The board's top
+// edge is BEAM_Y + 12 + BOARD_H = 328, twenty-one units clear; at 262 with a 72-tall
+// board it was 346, which is inside the frustum by three units and reads on screen
+// as a sign jammed against the top of the window.
+const BEAM_Y = 234
+// AND BOARD_H IS BEAM_W / 4, WHICH IS NOT A COINCIDENCE. The board's canvas is
+// 1024x256 -- powers of two, because a WebGL1 texture that is not is refused
+// mipmaps -- so a quad of any other ratio stretches the text. 330/82 is 4.02
+// against the canvas's 4.00, so the glyphs are drawn round and stay round.
+const BOARD_H = 82
 // The gantry spans THE ROAD and nothing wider. It used to be 400 across with
 // 190-wide panels, which put its outer edge over the windows standing beside the
 // road -- see SIGN_OFFSET in rrabbit.js for the measurement. Uprights sit at the
@@ -131,19 +141,67 @@ function drawPanel(canvas, p) {
 // was. It goes on BOTH gates -- the question is just as live when you are
 // leaving -- and pressing it opens the map (see makeBoard).
 //
-// IT NAMES THE TRACK TOO, and that is not decoration. Ten tracks can be parked
-// on the same road, so "which road am I on" stopped being the whole answer to
-// "where am I": switching from track 2 to track 5 while both sit on `home`
-// changes everything about what `back` will do and nothing about the view.
-// Without the track on the board, that switch is invisible -- which is exactly
-// how "the numbers don't work" gets reported about keys that are working.
-// THE NETWORK GOES ON THE RIGHT, opposite the track, for exactly the argument the
-// track won. Two networks can each have a road called `home` with two windows on
-// it, and taking a ramp between them changes every road in the world -- so without
-// the network on the board the biggest journey the shell can make is the one it
-// says least about. Amber stays "where am I", the track is cool on the left, and
-// the network is cool on the right.
-function drawBoard(canvas, name, count, track, network) {
+// IT NAMES THE TRACK AND THE NETWORK TOO, and neither is decoration. Ten tracks
+// can be parked on the same road, so "which road am I on" stopped being the whole
+// answer to "where am I": switching from track 2 to track 5 while both sit on
+// `home` changes everything about what `back` will do and nothing about the view.
+// The network is the same argument one level out -- two networks can each have a
+// road called `home` with two windows on it, and taking a ramp between them
+// changes every road in the world.
+//
+// WHAT THIS COST BEFORE IT WAS MEASURED: each of the three was drawn at its own
+// alignment -- track left at 26, label centred at W/2, network right at W-26. Three
+// independent alignments on one line is not a layout, it is three claims about the
+// same pixels, and the longest one wins. `home · 2 windows` already touched `main`;
+// `open sentience` printed straight through the middle of the label. Reported. See
+// drawBoard for the shape that replaced it.
+
+const widthOf = (g, text, px, weight = 'bold') => {
+  g.font = `${weight} ${px}px ui-monospace, monospace`
+  return g.measureText(text).width
+}
+
+// THE BOARD READS LIKE A WRL LINE, IN TWO COLUMNS OF TWO ROWS.
+//
+//     T&R      --home-->
+//     1:2-2    // main
+//
+// It was `1   home   ·   2 windows   main` -- three facts in the wrong grammar, and
+// the sentence a road sign wants is not a list. Asked for the WRL shape instead,
+// which says strictly more:
+//
+//   T&R        whose road this is
+//   1:2-2      track 1, at window 2 of 2. The middle number is the one that was
+//              missing entirely: how far down the road you have got.
+//   --home-->  the road, in WRL's own edge notation -- an arrow, because a road IS
+//              an edge, and this shell's whole argument is that the road and the
+//              graph are one drawing at two zooms.
+//   // main    the network, after WRL's separator.
+//
+// AND IT IS TWO ROWS BECAUSE ONE ROW CROWDED. On a single line the four fields ran
+// together the moment a road or a network had a long name -- reported -- and no
+// amount of measuring fixes crowding, it only stops it being overprinting. Rows
+// give each field its own space to be long in: the ident column is a fixed width,
+// the route column gets everything else, and the two never share a pixel.
+//
+// The board grew 46 -> 82 units tall to carry them, and the beam came down 262 ->
+// 234 to keep it inside the frame. See BEAM_Y and BOARD_H for the two measurements
+// that decide those numbers; neither is a taste.
+const IDENT = 'T&R'
+const BOARD_PAD_X = 30
+const BOARD_COL_GAP = 34
+const IDENT_FONT = 92
+const NUMS_FONT = 62
+const ROUTE_MAX = 76
+const ROUTE_MIN = 34
+const NET_FONT = 62
+// Where the two rows sit in the canvas. Row one carries the names, row two the
+// numbers and the network -- so reading down the left is "whose, and where in it",
+// and reading down the right is "which road, in which network".
+const ROW_1 = 0.36
+const ROW_2 = 0.79
+
+function drawBoard(canvas, { name, count, at, track, network }) {
   const g = canvas.getContext('2d')
   const W = canvas.width
   const H = canvas.height
@@ -153,33 +211,66 @@ function drawBoard(canvas, name, count, track, network) {
   g.strokeStyle = ACC_CSS
   g.lineWidth = 6
   g.strokeRect(3, 3, W - 6, H - 6)
-  g.textAlign = 'center'
   g.textBaseline = 'middle'
+  g.textAlign = 'left'
+
+  // ---- the ident column. `T&R` dim, because it is the same on every board in the
+  // world; the numbers cool, which is this shell's colour for "which of several".
+  const nums = `${track}:${at}-${count}`
+  const identW = widthOf(g, IDENT, IDENT_FONT)
+  const numsW = widthOf(g, nums, NUMS_FONT)
+  const colW = Math.max(identW, numsW)
+
+  g.fillStyle = '#8a97ab'
+  g.font = `bold ${IDENT_FONT}px ui-monospace, monospace`
+  g.fillText(IDENT, BOARD_PAD_X, H * ROW_1)
+  g.fillStyle = COOL_CSS
+  g.font = `bold ${NUMS_FONT}px ui-monospace, monospace`
+  g.fillText(nums, BOARD_PAD_X, H * ROW_2)
+
+  // A rule between the columns, so they read as two fields rather than as four
+  // words that happen to be near each other.
+  const divX = BOARD_PAD_X + colW + BOARD_COL_GAP / 2
+  g.strokeStyle = '#24304a'
+  g.lineWidth = 3
+  g.beginPath()
+  g.moveTo(divX, 22)
+  g.lineTo(divX, H - 22)
+  g.stroke()
+
+  // ---- the route column, everything that is left. Each row shrinks and elides
+  // into the same width, so a long road name and a long network name cannot reach
+  // each other -- they are on different rows.
+  const left = divX + BOARD_COL_GAP / 2
+  const room = Math.max(80, W - BOARD_PAD_X - left)
+
+  let px = ROUTE_MAX
+  const road = (n) => `--${n}-->`
+  while (px > ROUTE_MIN && widthOf(g, road(name), px) > room) px -= 2
+  let cut = name
+  while (cut.length > 1 && widthOf(g, road(cut + '\u2026'), px) > room) cut = cut.slice(0, -1)
+  if (cut !== name) cut += '\u2026'
   g.fillStyle = ACC_CSS
-  g.font = 'bold 62px ui-monospace, monospace'
-  // The track goes on the LEFT and in the cool colour, so the amber line stays
-  // the answer to "where am I" and the track reads as a separate fact rather
-  // than as part of the road's name.
-  const label = `${name}   ·   ${count === 1 ? '1 window' : `${count} windows`}`
-  g.fillText(label, W / 2, H / 2 + 4)
-  if (track) {
-    g.textAlign = 'left'
-    g.fillStyle = COOL_CSS
-    g.font = 'bold 44px ui-monospace, monospace'
-    g.fillText(track, 26, H / 2 + 4)
-  }
+  g.font = `bold ${px}px ui-monospace, monospace`
+  g.fillText(road(cut), left, H * ROW_1)
+
   if (network) {
-    g.textAlign = 'right'
+    let net = String(network)
+    const tail = (n) => `// ${n}`
+    let npx = NET_FONT
+    while (npx > ROUTE_MIN && widthOf(g, tail(net), npx) > room) npx -= 2
+    while (net.length > 1 && widthOf(g, tail(net + '\u2026'), npx) > room) net = net.slice(0, -1)
+    if (net !== String(network)) net += '\u2026'
     g.fillStyle = COOL_CSS
-    g.font = 'bold 44px ui-monospace, monospace'
-    g.fillText(String(network).slice(0, 14), W - 26, H / 2 + 4)
+    g.font = `bold ${npx}px ui-monospace, monospace`
+    g.fillText(tail(net), left, H * ROW_2)
   }
 }
 
 function makeBoard() {
   const canvas = document.createElement('canvas')
   canvas.width = 1024
-  canvas.height = 128
+  canvas.height = 256
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   const mesh = new THREE.Mesh(
@@ -397,19 +488,32 @@ function syncGate(id, kind, z, row) {
   // The track has to be IN THE KEY or the board never redraws when you switch --
   // the name and the count are both unchanged by switching tracks, which is the
   // whole case this was added for.
-  const trackLabel = tracks.labelOf(tracks.active())
+  // JUST THE NUMBER, not `labelOf`. The board's format is `track:at-total` and a
+  // track that has been named would put a word inside a number.
+  const trackLabel = String(tracks.activeIndex())
   // The network belongs in the key for the same reason the track does, and even
   // more so: two networks can have a road with the same name and the same window
   // count, so a key without it would leave the board naming the network you left.
   const netLabel = ws.activeTenantName()
-  const bkey = `${w?.name}:${here}:${trackLabel}:${netLabel}`
+  // AND `at` HAS TO BE IN THE KEY, which makes this the first thing on the board
+  // that changes while you are merely scrolling. It is one canvas repaint per window
+  // you drive past -- not per frame, because the key only moves when the count does.
+  const at = windowAtOn(id)
+  const bkey = `${w?.name}:${here}:${at}:${trackLabel}:${netLabel}`
   if (bkey !== gate.boardKey) {
     gate.boardKey = bkey
     gate.boardName = w?.name ?? id
     gate.boardCount = here
+    gate.boardAt = at
     gate.boardTrack = trackLabel
     gate.boardNetwork = netLabel
-    drawBoard(gate.board.canvas, gate.boardName, here, trackLabel, netLabel)
+    drawBoard(gate.board.canvas, {
+      name: gate.boardName,
+      count: here,
+      at,
+      track: trackLabel,
+      network: netLabel,
+    })
     gate.board.tex.needsUpdate = true
   }
 

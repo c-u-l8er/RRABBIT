@@ -14,7 +14,7 @@
 // in this direction only.
 
 import * as THREE from 'three'
-import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder } from './world.js'
+import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, rampBlocksLane } from './world.js'
 import * as ws from './workspaces.js'
 import { release, rekeyZoom } from './travel.js'
 
@@ -675,14 +675,34 @@ const rowOf = (district, side) =>
 // standing where an earlier one did -- and appending past every gap is what
 // turns a road that has been worked on into a mile of empty tarmac with the
 // windows at the far end of it.
+//
+// AND A RAMP HOLDS A SLOT TOO. An off-ramp leaves the tarmac on the right and
+// sweeps out through exactly the stretch of verge a right-hand window stands in
+// (world.js rampBlocksLane) -- so a window put there is built into the side of an
+// exit, and the exit's mouth and gore, which are the only parts of it you can read
+// from the road, end up behind a picture. The right-hand ordinal it wants is
+// treated as occupied, by the same rule and in the same set as an occupied one.
 function firstFreeLane(district, side, self) {
   const taken = new Set()
   for (const s of signs.values())
     if (s !== self && s.mesh && s.district === district && s.side === side) taken.add(s.lane)
   let l = 0
-  while (taken.has(l)) l++
+  while (taken.has(l) || rampBlocksLane(district, side, l)) l++
   ws.claimLane(district, side, l)
   return l
+}
+
+// The next ordinal on a side for a window that has just APPEARED, which joins the
+// end of the queue rather than filling a hole (see takeLane). A blocked ordinal is
+// consumed rather than stepped over: the counter has to move past it or the next
+// window lands on it, and leaving a hole behind is harmless -- moves fill holes and
+// `tidyRoad` closes them, so removing the ramp gives the slot back.
+function takeClearLane(district, side) {
+  let lane = ws.takeLane(district, side)
+  for (let guard = 0; guard < 8 && rampBlocksLane(district, side, lane); guard++) {
+    lane = ws.takeLane(district, side)
+  }
+  return lane
 }
 
 const placement = (s) =>
@@ -736,11 +756,12 @@ function freeLaneNear(district, side, want, self) {
   for (const x of signs.values())
     if (x !== self && x.mesh && x.district === district && x.side === side) taken.add(x.lane)
   const l = Math.max(0, want)
+  const free = (n) => !taken.has(n) && !rampBlocksLane(district, side, n)
   for (let step = 0; step <= 512; step++) {
-    if (!taken.has(l + step)) return l + step
-    if (l - step >= 0 && !taken.has(l - step)) return l - step
+    if (free(l + step)) return l + step
+    if (l - step >= 0 && free(l - step)) return l - step
   }
-  return ws.takeLane(district, side)
+  return takeClearLane(district, side)
 }
 
 // ONE PLACE ALONG THE ROAD. delta < 0 is toward the entrance.
@@ -1059,7 +1080,7 @@ function adoptPending() {
     const side = existing?.side ?? sideQueue.shift() ?? (milepost % 2 === 0 ? 1 : -1)
     // The place on that side, taken once and never recomputed -- invariant 6
     // covers this for the same reason it covers the milepost.
-    const lane = existing?.lane ?? ws.takeLane(district, side)
+    const lane = existing?.lane ?? takeClearLane(district, side)
     placeInLedger(view, slot)
     const built = makeSign(view, milepost, district, side, lane)
     // The view is kept so input can be mapped back into the flat output. It is

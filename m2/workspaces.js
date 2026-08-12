@@ -8,7 +8,7 @@
 //
 // So a workspace is a NODE:
 //
-//     { id, tenant, name, exits: [id], ramps: [{at, to}], open }
+//     { id, tenant, name, exits: [id], ramps: [{at, to, side}], open }
 //
 // and `laneX` stops being arithmetic on an index and becomes a LAYOUT over the
 // graph. That is the load-bearing change; the gantry, open/close and the window
@@ -110,7 +110,7 @@ function save() {
             id: n.id,
             name: n.name,
             exits: [...n.exits],
-            ramps: n.ramps.map((r) => ({ at: r.at, to: r.to })),
+            ramps: n.ramps.map((r) => ({ at: r.at, to: r.to, side: r.side })),
             open: n.open,
             pos: n.pos,
           })),
@@ -136,13 +136,17 @@ function parseNodes(raw) {
       name: typeof n.name === 'string' && n.name ? n.name : n.id,
       exits: Array.isArray(n.exits) ? n.exits.filter((e) => typeof e === 'string') : [],
       // A ramp's `at` is a dash slot on the road (world.js decides where that
-      // is); `to` is any workspace in any network. Kept as a list rather than a
-      // map keyed by slot because the order is the order they were built in and
-      // a list survives JSON without stringifying its keys.
+      // is); `to` is any workspace in any network; `side` is which way it leaves.
+      // Kept as a list rather than a map keyed by slot because the order is the
+      // order they were built in and a list survives JSON without stringifying
+      // its keys.
+      //
+      // `side` defaults to RIGHT, which is what every ramp saved before sides
+      // existed was, so an older store loads as the thing it actually described.
       ramps: Array.isArray(n.ramps)
         ? n.ramps
             .filter((r) => r && Number.isInteger(r.at) && r.at >= 0 && typeof r.to === 'string')
-            .map((r) => ({ at: r.at, to: r.to }))
+            .map((r) => ({ at: r.at, to: r.to, side: r.side === -1 ? -1 : 1 }))
         : [],
       open: n.open !== false,
       pos: Number.isInteger(n.pos) ? n.pos : null,
@@ -223,7 +227,9 @@ function install(loaded) {
   // could contain.
   for (const n of nodes.values()) {
     n.exits = n.exits.filter((e) => nodes.get(e)?.tenant === n.tenant && e !== n.id)
-    n.ramps = dedupeRamps(n.ramps.filter((r) => nodes.has(r.to) && r.to !== n.id))
+    n.ramps = dedupeRamps(
+      n.ramps.filter((r) => nodes.has(r.to) && r.to !== n.id).map((r) => ({ ...r, side: r.side === -1 ? -1 : 1 })),
+    )
   }
   activeTenant = tenants.has(loaded.active) ? loaded.active : [...tenants.keys()][0]
   for (const t of tenants.keys()) normalisePositions(t)
@@ -595,10 +601,42 @@ export const rampTargets = (id) => [...new Set(rampsOf(id).map((r) => r.to))]
 // asking for a ramp on an occupied marker is a change of destination and not an
 // error -- refusing would mean removing before rebuilding, which is two gestures
 // for one decision.
-export function addRamp(from, at, to) {
+//
+// ONE RAMP PER DASH, whichever side it leaves on. A left and a right ramp sharing
+// a marker would be one marker you cannot aim at, and the marker is the address.
+export function addRamp(from, at, to, side = 1) {
   const a = nodes.get(from)
   if (!a || !Number.isInteger(at) || at < 0 || !nodes.has(to) || to === from) return false
-  a.ramps = dedupeRamps([...a.ramps.filter((r) => r.at !== at), { at, to }])
+  a.ramps = dedupeRamps([...a.ramps.filter((r) => r.at !== at), { at, to, side: side === -1 ? -1 : 1 }])
+  touched()
+  return true
+}
+
+// MOVING ONE IS CHANGING ITS ADDRESS, and it is what the dash box on the ramp's
+// page does. Refuses onto a dash that already carries a DIFFERENT ramp: `addRamp`
+// replaces, which is right when you are deciding where a ramp goes and wrong when
+// you are dragging one along a road -- there the thing you would destroy is not the
+// thing you were looking at.
+export function moveRamp(from, at, want) {
+  const a = nodes.get(from)
+  if (!a || !Number.isInteger(want) || want < 0) return false
+  const r = a.ramps.find((x) => x.at === at)
+  if (!r || want === at) return false
+  if (a.ramps.some((x) => x.at === want)) return false
+  r.at = want
+  a.ramps = dedupeRamps(a.ramps)
+  touched()
+  return true
+}
+
+// Which way it leaves. Its own function rather than a rebuild through addRamp,
+// because flipping a ramp keeps its destination and that is the whole point.
+export function setRampSide(from, at, side) {
+  const a = nodes.get(from)
+  const r = a?.ramps.find((x) => x.at === at)
+  const s = side === -1 ? -1 : 1
+  if (!r || r.side === s) return false
+  r.side = s
   touched()
   return true
 }
@@ -683,6 +721,7 @@ export const report = () => ({
     ramps: rampsOf(n.id).map((r) => ({
       at: r.at,
       to: r.to,
+      side: r.side > 0 ? 'right' : 'left',
       toName: nodes.get(r.to)?.name ?? null,
       toTenant: tenants.get(nodes.get(r.to)?.tenant)?.name ?? null,
       crossesNetwork: nodes.get(r.to)?.tenant !== n.tenant,

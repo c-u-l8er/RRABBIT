@@ -77,6 +77,7 @@ import {
   goWindow,
   goTrack,
   goExit,
+  goDash,
   flattenTo,
   release,
   backTarget,
@@ -288,6 +289,9 @@ function buildWorld(canvas) {
     // Walking the graph by clicking the lit neighbours. Travel's own goExit lets
     // go of the window first, because the map can be open from inside one.
     exit: goExit,
+    // And standing in front of one dash, which is the same division: the map says
+    // which marker, Travel does the driving.
+    dash: goDash,
     move: {
       side: follow(flipWindowSide),
       along: follow(nudgeWindowAlong),

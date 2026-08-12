@@ -145,7 +145,22 @@ export function lastWindowZ(district) {
   return z
 }
 
-// A RAMP IS A THING ON THE ROAD, so the gate has to stand past it too.
+// ---- the shape of a ramp --------------------------------------------------
+//
+// How far down the road an off-ramp reaches from its dash, and how far out to the
+// side it ends up. Both live here rather than in ramps.js because the rest of the
+// road has to reason about them: the exit gate stands past the ramp's END, and the
+// window row has to leave the ramp's mouth clear.
+//
+// RAMP_OUT is set BY the window row, not chosen: a right-hand window's sign spans
+// x = 180..480, so a board at 980 is the first x at which nothing an off-ramp
+// carries can end up tangled in a window. RAMP_SPAN is then how much z that sweep
+// needs to look like a road rather than a hinge.
+export const RAMP_SPAN = 560
+export const RAMP_OUT = 980
+
+// A RAMP IS A THING ON THE ROAD, so the gate has to stand past it too -- past its
+// far END, not just past the dash it leaves from.
 //
 // Without this a ramp built far down a long road becomes unreachable the moment
 // the windows that made the road long are closed: the gate moves back up, the
@@ -154,8 +169,58 @@ export function lastWindowZ(district) {
 // worse than no marker.
 export function lastRampZ(district) {
   let z = 0
-  for (const r of rampsOf(district)) z = Math.min(z, dashZ(r.at))
+  for (const r of rampsOf(district)) z = Math.min(z, dashZ(r.at) - RAMP_SPAN)
   return z
+}
+
+// WHERE A RAMP CROSSES THE WINDOW ROW, in z.
+//
+// The ramp leaves the tarmac at its dash and sweeps out to RAMP_OUT. Somewhere in
+// between it passes through x = 180..480, which is exactly where a right-hand
+// window stands -- and a window sign turned 24 degrees to the road covers about
+// 122 units of z on its own. So the two want the same stretch of verge, and the
+// one that was there first has to win.
+//
+// The band is the crossing, plus a sign's own depth, plus enough that the mouth
+// and the gore are readable rather than merely unobstructed. It is deliberately
+// NARROWER THAN A MILE, so a ramp costs at most one window slot on its side: a
+// wider band would be tidier to draw and would quietly evict two windows for one
+// exit.
+const RAMP_BAND_NEAR = 140
+const RAMP_BAND_FAR = 520
+
+export function rampBandsOf(district) {
+  return rampsOf(district).map((r) => {
+    const z0 = dashZ(r.at)
+    return { at: r.at, side: r.side > 0 ? 1 : -1, from: z0 - RAMP_BAND_FAR, to: z0 - RAMP_BAND_NEAR }
+  })
+}
+
+// Would a window standing at this ordinal be in a ramp's way?
+//
+// A RAMP ONLY RESERVES ITS OWN SIDE. Ramps can leave either way now, so the side
+// is no longer a constant of the feature -- and a ramp going left must not evict a
+// window on the right, which is 660 units away across the tarmac and cannot be in
+// the way of anything.
+export function rampBlocksLane(district, side, laneIndex) {
+  const s = side > 0 ? 1 : -1
+  const z = windowZ(laneIndex, s)
+  return rampBandsOf(district).some((b) => b.side === s && z >= b.from && z <= b.to)
+}
+
+// And the same question from the other end: is this dash clear of the windows
+// already standing there, on the side the ramp would leave by? Asked by the ramp
+// planner, so it can offer a slot that will not be built into the side of a window.
+export function windowsBlockDash(district, at, side = 1) {
+  const s = side > 0 ? 1 : -1
+  const z0 = dashZ(at)
+  for (const sign of signs.values()) {
+    if (!sign.mesh || sign.district !== district) continue
+    if ((sign.side > 0 ? 1 : -1) !== s) continue
+    const z = windowZ(sign.lane, sign.side)
+    if (z >= z0 - RAMP_BAND_FAR && z <= z0 - RAMP_BAND_NEAR) return true
+  }
+  return false
 }
 
 export const exitZOf = (district) => Math.min(lastWindowZ(district), lastRampZ(district)) - GATE_GAP
@@ -182,6 +247,28 @@ export const roadOrder = (district) =>
   [...signs.values()]
     .filter((s) => s.mesh && s.district === district)
     .sort((a, b) => windowZ(b.lane, b.side) - windowZ(a.lane, a.side))
+
+// WHICH WINDOW YOU ARE AT, as a number, for the gate board's `track:at-total`.
+//
+// Two definitions that have to agree, and do: standing IN a window it is that
+// window's place in road order, and driving it is how many windows you have drawn
+// level with. At the head of a road both answer 0, which is why the board can say
+// `0-2` there and mean something rather than nothing.
+//
+// It reads `state.roadZ`, which travel.js publishes every frame -- the camera is
+// Travel's and this is the one fact about it the furniture needs. `>=` rather than
+// `>` so drawing level with a window counts as being at it.
+export function windowAtOn(district) {
+  const order = roadOrder(district)
+  if (state.mode === 'flat' && state.flatDistrict === district) {
+    const i = order.findIndex((s) => s.milepost === state.flatMilepost)
+    return i < 0 ? 0 : i + 1
+  }
+  const camZ = 260 + (state.roadZ ?? 0)
+  let n = 0
+  for (const s of order) if (windowZ(s.lane, s.side) >= camZ) n++
+  return n
+}
 
 // How far ahead of you a gantry sits when you stop in front of it. Measured, not
 // chosen: at 320 units the 58-degree frustum is only 355 units tall about y=105

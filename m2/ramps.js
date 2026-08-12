@@ -28,7 +28,18 @@
 // without breaking that.
 
 import * as THREE from 'three'
-import { state, signs, ACC, COOL, DASH_LEN, DASH_PITCH, dashZ, dashCount } from './world.js'
+import {
+  state,
+  signs,
+  ACC,
+  COOL,
+  DASH_LEN,
+  DASH_PITCH,
+  dashZ,
+  dashCount,
+  RAMP_SPAN,
+  RAMP_OUT,
+} from './world.js'
 import * as ws from './workspaces.js'
 
 let scene = null
@@ -43,19 +54,44 @@ const PAD_W = 96
 const ROAD_Y = -30
 const LINE_Y = ROAD_Y + 0.6
 
-// The ramp itself: a strip of tarmac peeling off to the right of the centre line,
-// with a board at the end of it naming where it goes.
+// ---- the shape of an off-ramp ---------------------------------------------
 //
-// RIGHT, and it has to be short. Windows stand at x = +/-330 with posts under
-// them, so a ramp long enough to look like a motorway slip road would run through
-// the window row. 240 units of x is as far as it can go and still stop clear of a
-// post; the length and the angle are then decided by that rather than chosen.
-const RAMP_DX = 240
-const RAMP_DZ = -330
-const RAMP_W = 120
-const BOARD_W = 210
-const BOARD_H = 74
-const BOARD_Y = 46
+// IT WAS A ROTATED QUAD 240 UNITS LONG AND IT DID NOT READ AS A ROAD. It also
+// ended its board at x=240, which is inside the window row (a right-hand sign
+// spans x = 180..480) -- so the one thing a ramp has to be able to say, where it
+// goes, was printed on top of a window.
+//
+// So it is built the way a real diverge is built, and the vocabulary is the real
+// one because each part is doing the job it does out there:
+//
+//   TAPER            it starts ON the tarmac in the lane it leaves by, so it reads
+//                    as part of the road you are already driving
+//   DECELERATION RUN a short stretch near-parallel to the road before anything
+//                    turns -- this is what makes it a road leaving rather than a
+//                    branch drawn at an angle
+//   GORE             the wedge that opens between the road and the ramp. Its
+//                    upstream point is the PAINTED NOSE: no width, the moment
+//                    they become two roads. Amber, because it is a marking.
+//   DEPARTURE        the curve away, sweeping past x=480 so the board at the end
+//                    stands clear of every window
+//
+// The deck is a RIBBON sampled along that curve, not a quad: a curve is the whole
+// difference between "a road goes that way" and "something is attached here".
+//
+// It also drops slightly as it goes, which costs nothing and is what an off-ramp
+// does -- and it means the far end can never z-fight with the road plane.
+const RAMP_W_NEAR = 116
+const RAMP_W_FAR = 92
+const RAMP_MOUTH_X = 104
+const RAMP_DROP = 16
+const RAMP_SEGS = 26
+// Where the road and the ramp stop being one surface. A fraction along the curve
+// rather than a z, so it follows if the curve is ever retuned.
+const NOSE_T = 0.3
+
+const BOARD_W = 240
+const BOARD_H = 84
+const BOARD_Y = 52
 
 const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
 const COOL_CSS = '#' + COOL.toString(16).padStart(6, '0')
@@ -78,6 +114,18 @@ const DASH_MAX_INSTANCES = 96
 const DIM = new THREE.Color(ACC)
 const LIT = new THREE.Color(0xffffff)
 const TAKEN = new THREE.Color(COOL)
+
+// THE EXIT ANNOUNCES ITSELF BEFORE YOU ARE LEVEL WITH IT.
+//
+// A road tells you about an exit in advance -- that is what the advance guide sign
+// is for out there -- and a ramp you can only find by already being beside it is
+// one you discover by accident. So the few dashes leading up to a ramp's marker are
+// blended from amber toward cool, strongest nearest the exit. It costs one lerp per
+// dash and nothing on screen when a road has no ramps.
+const APPROACH = 3
+const APPROACH_COLOURS = Array.from({ length: APPROACH }, (_, i) =>
+  new THREE.Color(ACC).lerp(new THREE.Color(COOL), 0.6 - 0.18 * i),
+)
 
 function makeLine(district) {
   const n = DASH_MAX_INSTANCES
@@ -137,7 +185,17 @@ function placeLine(entry, district, x) {
       !state.mapOpen &&
       ((dashHot.district === district && dashHot.at === i) ||
         (rampHot.district === district && rampHot.at === i))
-    entry.line.setColorAt(i, hot ? LIT : byAt.has(i) ? TAKEN : DIM)
+    // Nearest ramp AHEAD of this dash, within the run-up. `at - i` because dashes
+    // number away from the head of the road, so a bigger index is further along.
+    let lead = -1
+    for (const r of ramps) {
+      const gap = r.at - i
+      if (gap >= 1 && gap <= APPROACH && (lead < 0 || gap < lead)) lead = gap
+    }
+    entry.line.setColorAt(
+      i,
+      hot ? LIT : byAt.has(i) ? TAKEN : lead > 0 ? APPROACH_COLOURS[lead - 1] : DIM,
+    )
   }
   entry.line.count = want
   entry.pads.count = want
@@ -179,6 +237,95 @@ function drawBoard(canvas, r) {
   g.fillText(to?.open ? 'exit ' + (r.at + 1) : 'closed', W / 2, H * 0.87)
 }
 
+// The ramp's centreline, in the road's own frame: x out to the right, z down the
+// road. `t` runs 0 (on the tarmac) to 1 (at the board).
+//
+// A cubic, and the control points are the anatomy. P1 sits almost straight ahead
+// of P0 -- that is the deceleration run, and it is what stops the ramp reading as
+// a diagonal line stuck onto the road. P2 is thrown well out to the side so the
+// sweep is already past the window row by the time it gets there, and P3 lands at
+// RAMP_OUT with the curve still opening rather than hooking back.
+const CURVE = new THREE.CubicBezierCurve(
+  new THREE.Vector2(RAMP_MOUTH_X, 0),
+  new THREE.Vector2(RAMP_MOUTH_X + 46, -RAMP_SPAN * 0.42),
+  new THREE.Vector2(RAMP_OUT * 0.63, -RAMP_SPAN * 0.78),
+  new THREE.Vector2(RAMP_OUT, -RAMP_SPAN),
+)
+
+// A flat strip laid along a curve: sample the centreline, step sideways along the
+// normal by half the width, and stitch the two edges into quads.
+//
+// `widthAt`/`offset` are functions so the same builder makes the deck (wide,
+// tapering) and its edge lines (thin, pushed out to each side). One builder means
+// the lines cannot drift off the deck they are drawn on.
+// MIRRORED FOR A LEFT-HAND RAMP, and the winding has to mirror with it. Negating x
+// turns every triangle inside out, `computeVertexNormals` then points them at the
+// ground, and a MeshStandardMaterial lit from above renders that black -- so a left
+// ramp would be built, be clickable, and be invisible. Flipping the index order back
+// is the whole fix and it is why the triangles are emitted twice below.
+function ribbon(widthAt, offset, side, segs = RAMP_SEGS) {
+  const pos = []
+  const idx = []
+  const sx = side > 0 ? 1 : -1
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs
+    const p = CURVE.getPoint(t)
+    const d = CURVE.getTangent(t)
+    // The left-hand normal of a 2D tangent in the x/z plane. Getting this
+    // consistent is what keeps the winding the same all the way along, and a flip
+    // mid-ribbon shows up as a pinch.
+    const n = new THREE.Vector2(-d.y, d.x).normalize()
+    const half = widthAt(t) / 2
+    const c = new THREE.Vector2(p.x + n.x * offset(t), p.y + n.y * offset(t))
+    const y = ROAD_Y + 0.4 - RAMP_DROP * t
+    pos.push(sx * (c.x - n.x * half), y, c.y - n.y * half)
+    pos.push(sx * (c.x + n.x * half), y, c.y + n.y * half)
+    if (i > 0) {
+      const a = (i - 1) * 2
+      if (sx > 0) idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2)
+      else idx.push(a + 2, a + 1, a, a + 2, a + 3, a + 1)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
+// THE GORE. A wedge on the ground between the road's right edge and the ramp's
+// left edge, from the painted nose (no width, where they separate) widening
+// downstream. Drawn as a marking rather than as tarmac: amber, flat, and it is the
+// thing that says "this is an exit" from further away than any text can be read.
+function goreGeometry(side) {
+  const pos = []
+  const idx = []
+  const sx = side > 0 ? 1 : -1
+  const EDGE = 160 // the road's own edge on this side
+  for (let i = 0; i <= 10; i++) {
+    const t = NOSE_T + ((1 - NOSE_T) * 0.55 * i) / 10
+    const p = CURVE.getPoint(t)
+    const d = CURVE.getTangent(t)
+    const n = new THREE.Vector2(-d.y, d.x).normalize()
+    const inner = new THREE.Vector2(p.x - n.x * (RAMP_W_NEAR / 2), p.y - n.y * (RAMP_W_NEAR / 2))
+    const y = ROAD_Y + 0.5
+    // One edge follows the ramp's inner shoulder, the other runs straight down the
+    // road's own edge -- which is exactly the pair of lines a gore lies between.
+    pos.push(sx * EDGE, y, inner.y)
+    pos.push(sx * inner.x, y, inner.y)
+    if (i > 0) {
+      const a = (i - 1) * 2
+      if (sx > 0) idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2)
+      else idx.push(a + 2, a + 1, a, a + 2, a + 3, a + 1)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
 function makeRamp(district, r) {
   const canvas = document.createElement('canvas')
   canvas.width = 512
@@ -186,51 +333,90 @@ function makeRamp(district, r) {
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
 
-  // The deck. Flat like the road and the same colour, so it reads as tarmac
-  // rather than as a panel lying down.
+  const action = { kind: 'ramp', district, at: r.at, to: r.to }
+  const side = r.side > 0 ? 1 : -1
+
+  // THE DECK IS THE SAME COLOUR AS THE ROAD, not a lighter one. It was 0x191c2c
+  // against the road's 0x11131f, meaning to read as "tarmac, but a different
+  // road"; what it actually read as at a grazing angle was a sheet of paper lying
+  // on the ground. A road leaving a road is the same material -- the gore and the
+  // edge lines are what tell them apart, which is true out there too.
   const deck = new THREE.Mesh(
-    new THREE.PlaneGeometry(RAMP_W, Math.hypot(RAMP_DX, RAMP_DZ)),
-    new THREE.MeshStandardMaterial({ color: 0x191c2c, roughness: 0.9 }),
+    ribbon(
+      (t) => RAMP_W_NEAR + (RAMP_W_FAR - RAMP_W_NEAR) * t,
+      () => 0,
+      side,
+    ),
+    // DoubleSide because it is a flat surface seen from a low camera and a winding
+    // mistake would make the whole ramp vanish rather than look wrong -- and a
+    // vanished ramp reads as a ramp that was never built.
+    new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9, side: THREE.DoubleSide }),
   )
-  deck.rotation.x = -Math.PI / 2
-  // Rotated about the world's up axis AFTER the flattening, which for a plane
-  // laid down with rotation.x is rotation.z -- not rotation.y. Getting this wrong
-  // tips the deck up on its edge and it disappears from above.
-  //
-  // NEGATIVE, and the sign is worth the algebra rather than a guess. Euler XYZ
-  // applies Rz first, so the quad spins within its own surface and is then laid
-  // down: local +Y = (0,1,0) becomes (-sin t, 0, -cos t). The deck must run along
-  // (RAMP_DX, 0, RAMP_DZ), so -sin t = DX/len with DX positive -- which needs a
-  // negative angle. Positive puts the ramp out the left side of the road.
-  deck.rotation.z = -Math.atan2(RAMP_DX, -RAMP_DZ)
-  deck.userData.gantryAction = { kind: 'ramp', district, at: r.at, to: r.to }
+  deck.userData.gantryAction = action
+
+  // Edge lines on both shoulders -- the pair of thin strips that tell a deck the
+  // same colour as the road apart from the road. Pale rather than white: an edge
+  // line brighter than the centre line would make the ramp shout louder than the
+  // road it leaves.
+  const edges = new THREE.Group()
+  for (const e of [-1, 1]) {
+    edges.add(
+      new THREE.Mesh(
+        ribbon(
+          () => 5,
+          (t) => (e * (RAMP_W_NEAR + (RAMP_W_FAR - RAMP_W_NEAR) * t)) / 2,
+          side,
+        ),
+        new THREE.MeshBasicMaterial({ color: 0x8a97ab, side: THREE.DoubleSide }),
+      ),
+    )
+  }
+
+  const gore = new THREE.Mesh(
+    goreGeometry(side),
+    new THREE.MeshBasicMaterial({
+      color: ACC,
+      transparent: true,
+      opacity: 0.34,
+      side: THREE.DoubleSide,
+    }),
+  )
 
   const board = new THREE.Mesh(
     new THREE.PlaneGeometry(BOARD_W, BOARD_H),
     new THREE.MeshBasicMaterial({ map: tex, transparent: false }),
   )
-  // Facing back UP the road, turned in toward the driver -- the same 24-degree
-  // family the window signs use, for the same reason: a board square to the road
-  // is edge-on until you are level with it.
-  board.rotation.y = -0.5
-  board.userData.gantryAction = { kind: 'ramp', district, at: r.at, to: r.to }
+  // FACING THE APPROACH. A plane's normal is +Z, and rotation.y maps it to
+  // (sin f, 0, cos f) -- so pointing it back up the road AND inward, at the driver
+  // rather than at the scenery, is one atan2 of the vector from the board to where
+  // the road came from. Square to the ramp would be edge-on until you were level
+  // with it, which is the trap the window signs already solved by turning.
+  board.rotation.y = Math.atan2(-side * RAMP_OUT * 0.5, RAMP_SPAN + 420)
+  board.userData.gantryAction = action
 
   const post = new THREE.Mesh(
-    new THREE.BoxGeometry(6, BOARD_Y, 6),
+    new THREE.BoxGeometry(7, BOARD_Y, 7),
     new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 }),
   )
 
   scene.add(deck)
+  scene.add(edges)
+  scene.add(gore)
   scene.add(board)
   scene.add(post)
-  return { deck, board, post, tex, canvas, key: '' }
+  return { deck, edges, gore, board, post, tex, canvas, key: '' }
 }
 
 function placeRamp(part, district, x, r) {
   const z0 = dashZ(r.at)
-  part.deck.position.set(x + RAMP_DX / 2, ROAD_Y + 0.3, z0 + RAMP_DZ / 2)
-  part.board.position.set(x + RAMP_DX, ROAD_Y + BOARD_Y + BOARD_H / 2, z0 + RAMP_DZ)
-  part.post.position.set(x + RAMP_DX, ROAD_Y + BOARD_Y / 2, z0 + RAMP_DZ)
+  // The deck, its lines and the gore are all built in the ramp's own frame with
+  // the mouth at the origin, so placing a ramp is moving that frame. Nothing is
+  // rebuilt when the road it hangs off moves sideways.
+  for (const m of [part.deck, part.edges, part.gore]) m.position.set(x, 0, z0)
+  const end = CURVE.getPoint(1)
+  const sx = r.side > 0 ? 1 : -1
+  part.board.position.set(x + sx * end.x, ROAD_Y - RAMP_DROP + BOARD_Y + BOARD_H / 2, z0 + end.y)
+  part.post.position.set(x + sx * end.x, ROAD_Y - RAMP_DROP + BOARD_Y / 2, z0 + end.y)
 
   // Redrawn only when what it says changes. A canvas repaint per frame per ramp
   // is the kind of cost that does not show up in a frame time until there are
@@ -251,11 +437,15 @@ function placeRamp(part, district, x, r) {
 }
 
 function dropRamp(part) {
-  for (const m of [part.deck, part.board, part.post]) {
+  // The edge lines are a group of two, so the loop has to walk into it -- a
+  // dispose that misses them leaks a geometry per ramp built and removed, which is
+  // exactly the thing that only shows up after an afternoon of rewiring.
+  for (const m of [part.deck, part.gore, part.board, part.post, ...part.edges.children]) {
     scene.remove(m)
     m.geometry.dispose()
     m.material.dispose()
   }
+  scene.remove(part.edges)
   part.tex.dispose()
 }
 
@@ -324,16 +514,20 @@ export function rampMeshes() {
 // The dash a raycast hit, from the instance it hit. This is the only place an
 // instanceId is turned back into a dash number, and it is why the pads mesh
 // carries the workspace id in userData rather than being looked up by position.
+// THE MARKER IS THE HANDLE; THE RAMP IS THE ROAD.
+//
+// A dash that carries a ramp used to BE that ramp: clicking the marker drove you
+// down it. That made the one thing a built ramp had no control for -- changing it --
+// reachable only through the map's own list, and it made the marker and the deck
+// two ways of doing one thing while nothing did the other. Asked for the other way
+// round, and it is the better division: the mark painted on the centre line is what
+// you press to edit, the tarmac and the board are what you press to drive. So this
+// always answers `dash`, and the page it opens is the edit page when the slot is
+// occupied and the builder when it is not -- which is one page either way.
 export function dashActionOf(hit) {
   const district = hit?.object?.userData?.dashPad
   if (!district || !Number.isInteger(hit.instanceId)) return null
-  const at = hit.instanceId
-  const r = ws.rampAt(district, at)
-  // A dash that carries a ramp IS that ramp -- the deck and the board are the
-  // big targets, and the marker under them must not open the builder for a slot
-  // that is already spoken for.
-  if (r) return { kind: 'ramp', district, at, to: r.to }
-  return { kind: 'dash', district, at }
+  return { kind: 'dash', district, at: hit.instanceId }
 }
 
 // Hover, so a marker reads as pressable before it is pressed. Held as two
@@ -374,6 +568,10 @@ export const rampReport = () => {
         at,
         to: part.deck.userData.gantryAction.to,
         toName: ws.get(part.deck.userData.gantryAction.to)?.name ?? null,
+        // Read off the BOARD's x against the road's, not off the record -- the claim
+        // being made about sides is that the geometry mirrors, and a report that
+        // repeated the stored side would agree with itself either way.
+        side: part.board.position.x > ws.laneX(id) ? 'right' : 'left',
         board: [
           Math.round(part.board.position.x),
           Math.round(part.board.position.y),

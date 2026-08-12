@@ -16,7 +16,7 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, roadOrder } from './world.js'
+import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, roadOrder, dashZ } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
@@ -931,6 +931,46 @@ function goWindow(district, milepost) {
   return goDistrict(district, { at })
 }
 
+// DRIVE TO A DASH. What "go to that dash" on the ramp page has to actually do.
+//
+// It said "go to that dash" and only re-pointed the panel at a different slot,
+// which is a label writing a cheque the button did not cash. Reported. Naming a
+// dash and standing in front of one are two different acts, so they are two
+// controls now, and this is the one that drives.
+//
+// DASH_VIEW is not GANTRY_VIEW. A gate is a flat sign and you want to be far
+// enough back to read it; a dash is a mark on the ground with up to 560 units of
+// ramp sweeping off it, so the shot has to hold the marker AND where it leads. 700
+// puts the dash comfortably into the lower half of the frame with the ramp's board
+// still in shot.
+//
+// The road may not reach: goDistrict clamps to the road's own bounds, so a dash
+// past the exit gate leaves you at the end of the road looking down at it. That is
+// the honest answer rather than a refusal, and building a ramp there moves the gate
+// out to meet it (world.js lastRampZ) -- so the way to reach a dash you cannot
+// reach is to give it a reason to exist.
+const DASH_VIEW = 700
+
+export function goDash(district, at) {
+  const w = ws.get(district)
+  if (!w || !w.open || !Number.isInteger(at)) return null
+  if (state.mode === 'flat') {
+    release()
+    renderer.domElement.blur()
+  }
+  const at_ = dashZ(at) + DASH_VIEW - 260
+  const r = goDistrict(district, { at: at_ })
+  const b = roadBoundsOf(district)
+  state.lastDashDrive = {
+    district,
+    dash: at,
+    dashZ: Math.round(dashZ(at)),
+    roadZ: Math.round(Math.min(b.near, Math.max(b.far, at_))),
+    clampedShort: at_ < b.far,
+  }
+  return r
+}
+
 // WALKING THE NETWORK FROM THE MAP.
 //
 // The map lights up the workspaces reachable from the one you have selected, and
@@ -1046,6 +1086,13 @@ function currentPose() {
 }
 
 function stepFlight(dt) {
+  // WHERE ON THE ROAD WE ARE, published once a frame. The camera is Travel's and
+  // nothing else may move it, but the gate board has to be able to say which window
+  // you are at -- so the number goes out through `state`, the way every other fact
+  // both personalities need already does. Here rather than at each of the six places
+  // that write `roadZ`, because a value published in six places is a value that will
+  // eventually be published in five.
+  state.roadZ = roadZ
   if (!flight) return holdFlatScale()
   // Ease at the same rate family RAVIO uses for camera terms (3.5-4.5); this is
   // a shot, not a thing you push.

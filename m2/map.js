@@ -21,7 +21,7 @@
 // It owns its own stylesheet and its own element's contents, so the network view
 // is one file you could delete.
 
-import { signs, state, titles, renames, hooks, windowZ, dashZ, dashCount } from './world.js'
+import { signs, state, titles, renames, hooks, windowZ, dashZ, dashCount, windowsBlockDash, exitZOf } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
 
@@ -30,7 +30,7 @@ import * as tracks from './tracks.js'
 // division applied to the windows: the map is where you decide a window belongs
 // somewhere else, and RRABBIT -- the one who IS the windows -- is the only thing
 // that moves one.
-let go = { window: null, district: null, exit: null, move: null, close: null, track: null, rename: null }
+let go = { window: null, district: null, exit: null, dash: null, move: null, close: null, track: null, rename: null }
 export function attachMap(handlers) {
   go = { ...go, ...handlers }
 }
@@ -516,7 +516,7 @@ function panel() {
           const crosses = ws.tenantOf(r.to) !== ws.tenantOf(selected)
           return (
             `<li><span class="ord">${r.at}</span>` +
-            `<span>${esc(to?.name ?? r.to)}${crosses ? ` <b class="net">${esc(net?.name ?? '?')}</b>` : ''}</span>` +
+            `<span>${r.side > 0 ? '&rsaquo;' : '&lsaquo;'} ${esc(to?.name ?? r.to)}${crosses ? ` <b class="net">${esc(net?.name ?? '?')}</b>` : ''}</span>` +
             `<button class="mini" data-ramppage="${esc(selected)}|${r.at}" title="what this ramp is and where it goes">edit</button>` +
             `<button class="mini" data-cutramp="${esc(selected)}|${r.at}" title="remove this ramp">&times;</button></li>`
           )
@@ -582,14 +582,35 @@ function reachHint(id) {
   )
 }
 
-// The lowest dash on a road that has no ramp on it, so "build one" has somewhere
-// to start rather than making you pick a number first. Dash 0 is under your front
-// bumper at the head of the road, so it starts a little way in.
-function firstFreeDash(id) {
+// The lowest dash on a road with no ramp on it AND no window in the way, so
+// "build one" has somewhere to start rather than making you pick a number and then
+// find out. Dash 0 is under your front bumper at the head of the road, so it starts
+// a little way in.
+//
+// It gives up and returns a blocked slot rather than nothing: the page it opens
+// says the slot is blocked and offers the alternative, which is a better answer
+// than a button that has quietly stopped working.
+function firstFreeDash(id, side = 1) {
   const taken = new Set(ws.rampsOf(id).map((r) => r.at))
+  const total = dashCount(id)
+  for (let i = 3; i < total; i++) if (!taken.has(i) && !windowsBlockDash(id, i, side)) return i
   let i = 3
   while (taken.has(i)) i++
   return i
+}
+
+// Outward from where they asked, so the suggestion is the nearest change to what
+// they wanted rather than the first slot on the road. Null when the whole road is
+// blocked -- which is a real state on a road with windows down both sides, and the
+// panel says so instead of offering a dash that is no better.
+function nearestClearDash(id, at, total, side = 1) {
+  const taken = new Set(ws.rampsOf(id).map((r) => r.at))
+  const ok = (i) => i >= 0 && i < total && !taken.has(i) && !windowsBlockDash(id, i, side)
+  for (let step = 1; step < total; step++) {
+    if (ok(at + step)) return at + step
+    if (ok(at - step)) return at - step
+  }
+  return null
 }
 
 // -------------------------------------------------------------- the networks
@@ -658,6 +679,15 @@ function rampPanel() {
   if (!road) return ''
   const existing = ws.rampAt(ramp.district, ramp.at)
   const total = dashCount(ramp.district)
+  // Which side the page is about: the ramp's own if there is one, else whatever was
+  // last picked here, else right. Held on `ramp` rather than in its own variable so
+  // that opening a different dash starts the question again.
+  const side = existing ? (existing.side > 0 ? 1 : -1) : (ramp.side ?? 1)
+  // A slot that already carries this ramp is not "blocked by a window" -- the ramp
+  // is why the window is not there.
+  const blocked = !existing && windowsBlockDash(ramp.district, ramp.at, side)
+  const clear = blocked ? nearestClearDash(ramp.district, ramp.at, total, side) : null
+  const past = dashZ(ramp.at) < exitZOf(ramp.district)
   const net = rampNet && ws.tenant(rampNet) ? rampNet : (existing ? ws.tenantOf(existing.to) : defaultRampNet())
   const inNet = ws.everyTenantsNodes().find((g) => g.tenant.id === net)?.nodes ?? []
   const targets = inNet.filter((n) => n.id !== ramp.district)
@@ -671,15 +701,46 @@ function rampPanel() {
     `<dt>where</dt><dd>${ramp.at + 1} of ${total} down the road &middot; z ${Math.round(dashZ(ramp.at))}</dd>` +
     `<dt>carries</dt><dd>${
       existing
-        ? `a ramp to <b>${esc(ws.get(existing.to)?.name ?? existing.to)}</b> in ${esc(ws.tenant(ws.tenantOf(existing.to))?.name ?? '?')}`
+        ? `a ramp off the <b>${existing.side > 0 ? 'right' : 'left'}</b> to <b>${esc(ws.get(existing.to)?.name ?? existing.to)}</b> in ${esc(ws.tenant(ws.tenantOf(existing.to))?.name ?? '?')}`
         : 'nothing yet'
     }</dd>` +
     '</dl>' +
-    // Moving the ramp is changing which dash it is on, which is changing its
-    // address -- so it is the same control as picking a dash in the first place.
+    // THE DASH BOX IS THE RAMP'S ADDRESS, so setting it MOVES THE RAMP.
+    //
+    // It only re-pointed the page, and was reported as doing nothing -- which is
+    // exactly what "the heading changed and my ramp is still where it was" looks
+    // like. On a slot that carries nothing there is nothing to move and it is still
+    // only a way of looking at another slot, so the button says which of the two it
+    // is about to do.
     '<div class="field"><label>dash</label>' +
     `<input id="ramp-at" type="number" min="0" max="${Math.max(0, total - 1)}" value="${ramp.at}" />` +
-    '<button class="mini" data-rampat="1">go to that dash</button></div>' +
+    `<button class="mini" data-rampat="1">${existing ? 'move the ramp there' : 'open that dash'}</button>` +
+    `<button class="mini" data-drivedash="${esc(ramp.district)}|${ramp.at}">drive to dash ${ramp.at}</button>` +
+    (existing ? '<span class="note">the ramp goes with it &middot; a dash that already carries one is refused</span>' : '') +
+    '</div>' +
+    // WHICH WAY IT LEAVES. Two buttons rather than a select, because it is a
+    // two-state fact and the current state should be readable without opening
+    // anything -- the same argument the window's "cross to the left" control wins.
+    '<div class="field"><label>side</label>' +
+    `<button class="mini${side < 0 ? ' on' : ''}" data-rampside="${esc(ramp.district)}|${ramp.at}|-1">&lsaquo; left</button>` +
+    `<button class="mini${side > 0 ? ' on' : ''}" data-rampside="${esc(ramp.district)}|${ramp.at}|1">right &rsaquo;</button>` +
+    (existing
+      ? ''
+      : '<span class="note">which side of the road this one will peel off</span>') +
+    '</div>' +
+    // WHETHER A WINDOW IS ALREADY IN THE WAY. A ramp sweeps out through the stretch
+    // of verge a right-hand window stands in, so a slot can be free of ramps and
+    // still be a bad place to build one -- and the only part of a ramp you read
+    // from the road is its mouth.
+    (blocked
+      ? `<p class="hint warn">A window stands where a ${side < 0 ? 'left' : 'right'}-hand ramp would leave the road here. ` +
+        (clear === null
+          ? 'Every dash on this road is blocked — move or close a window first.'
+          : `Dash <b>${clear}</b> is the nearest one that is clear.`) +
+        (clear === null ? '' : ` <button class="mini" data-ramppage="${esc(ramp.district)}|${clear}">use dash ${clear}</button>`) +
+        '</p>'
+      : '') +
+    (past ? '<p class="hint warn">This dash is past the exit gate, so the road stops short of it. Building a ramp here moves the gate out to meet it.</p>' : '') +
 
     '<h3>where it goes</h3>' +
     '<div class="field"><label>network</label>' +
@@ -701,7 +762,7 @@ function rampPanel() {
       : '<span class="note">This network has nowhere else to land.</span>') +
     '</div>' +
     (targets.length
-      ? `<button class="goto" data-buildramp="${esc(ramp.district)}|${ramp.at}">${existing ? 'point this ramp there' : 'build the ramp'}</button>`
+      ? `<button class="goto" data-buildramp="${esc(ramp.district)}|${ramp.at}|${side}">${existing ? 'point this ramp there' : 'build the ramp'}</button>`
       : '') +
     (existing
       ? `<button class="goto take" data-takeramp="${esc(existing.to)}">take it &mdash; drive to ${esc(ws.get(existing.to)?.name ?? existing.to)}</button>` +
@@ -846,7 +907,7 @@ function sig() {
     // page except the workspace one is invisible to a signature built out of the
     // graph -- so without these the poll would put the old page back over the new
     // one on its next tick.
-    `${ws.activeTenantId()}#${netPage ? 'nets' : ''}#${ramp ? `${ramp.district}:${ramp.at}` : ''}#${rampNet ?? ''}`,
+    `${ws.activeTenantId()}#${netPage ? 'nets' : ''}#${ramp ? `${ramp.district}:${ramp.at}:${ramp.side ?? ''}` : ''}#${rampNet ?? ''}`,
     ws.tenantList().map((t) => `${t.id}=${t.name}`).join(','),
     // A rename changes nothing about the graph, so without this the panel that
     // renamed it goes on showing the old name until something else moves.
@@ -859,7 +920,7 @@ function sig() {
           // Ramps are drawn in the panel and counted on the page, and building one
           // changes nothing else about the graph -- so a signature that could not
           // see them left the list you had just added to unchanged.
-          `:${ws.rampsOf(n.id).map((r) => `${r.at}>${r.to}`).join('+')}`,
+          `:${ws.rampsOf(n.id).map((r) => `${r.at}${r.side > 0 ? 'r' : 'l'}>${r.to}`).join('+')}`,
       )
       .join('|'),
     // WHERE the windows are, not just how many. A window crossing the road or
@@ -1006,6 +1067,11 @@ const CSS = `
 #map .node.go:hover rect { fill: #1a4f66; stroke: #7ef2f5; }
 #map .node .gox { font-size: 11px; font-weight: 700; fill: #2de2e6; }
 #map .detail .hint.lit { color: #cfe6ea; border-left: 2px solid #2de2e6; padding-left: 8px; }
+/* A warning, not an error: the thing you asked for is possible and is a bad idea,
+   and the panel says which slot is better rather than refusing. */
+#map .detail .hint.warn { color: #f2c14e; border-left: 2px solid #f2c14e; padding-left: 8px; }
+#map .detail .hint.warn b { color: #f3ead4; }
+#map .detail .hint.warn .mini { margin-left: 4px; }
 #map .detail .hint.lit b { color: #2de2e6; }
 #map .exits.ramps .net { color: #2de2e6; font-weight: 700; }
 #map .exits .mini.shut, #map .nets-list .mini.shut { color: #ff6b6b; }
@@ -1080,6 +1146,9 @@ const CSS = `
 #map .mini { cursor: pointer; background: #16233a; border: 1px solid #24304a; color: #f3ead4;
   font: inherit; padding: 5px 9px; }
 #map .mini:hover { border-color: #2de2e6; }
+/* The side a ramp leaves by is a two-state fact, so the two buttons show which
+   state it is in rather than making you read it somewhere else. */
+#map .mini.on { background: #123647; border-color: #2de2e6; color: #2de2e6; }
 #map h3 { margin: 14px 0 6px; font-size: 13px; color: #9fb0c8; font-weight: 700; }
 #map .note { color: #6b7689; margin: 0 0 8px; flex-basis: 100%; }
 #map .exits { list-style: none; margin: 0 0 8px; padding: 0; }
@@ -1237,18 +1306,49 @@ function install() {
     }
     const buildramp = ev.target.closest('[data-buildramp]')
     if (buildramp) {
-      const [district, at] = buildramp.dataset.buildramp.split('|')
+      const [district, at, s] = buildramp.dataset.buildramp.split('|')
       const to = el.querySelector('#ramp-to')?.value
-      state.lastRampBuild = { district, at: Number(at), to, ok: !!to && ws.addRamp(district, Number(at), to) }
+      state.lastRampBuild = {
+        district,
+        at: Number(at),
+        to,
+        side: Number(s),
+        ok: !!to && ws.addRamp(district, Number(at), to, Number(s)),
+      }
       return render(true)
     }
     if (ev.target.closest('[data-rampat]')) {
       const want = Number(el.querySelector('#ramp-at')?.value)
-      // The dash number IS the address, so changing it moves this page rather
-      // than moving a ramp. Building on the new dash is the second gesture, and
-      // it has to be: the old ramp is still where it was until you say otherwise.
-      if (Number.isInteger(want) && want >= 0 && ramp) ramp = { ...ramp, at: want }
+      if (!Number.isInteger(want) || want < 0 || !ramp) return render(true)
+      // THE DASH NUMBER IS THE RAMP'S ADDRESS, so this moves the ramp and the page
+      // follows it. On an empty slot there is nothing to move and it is only a way
+      // of looking somewhere else.
+      const carries = ws.rampAt(ramp.district, ramp.at)
+      const moved = carries ? ws.moveRamp(ramp.district, ramp.at, want) : true
+      state.lastRampMove = carries ? { from: ramp.at, to: want, ok: moved } : null
+      // A refused move leaves the page where the ramp still is, so the refusal is
+      // visible as the number snapping back rather than as a silent no.
+      if (moved) ramp = { ...ramp, at: want }
       return render(true)
+    }
+    const rampside = ev.target.closest('[data-rampside]')
+    if (rampside) {
+      const [district, at, s] = rampside.dataset.rampside.split('|')
+      // On a built ramp this flips it; on an empty slot it is only the answer to
+      // "which way would it go", remembered on the page until you build.
+      if (ws.rampAt(district, Number(at))) ws.setRampSide(district, Number(at), Number(s))
+      else if (ramp) ramp = { ...ramp, side: Number(s) }
+      return render(true)
+    }
+    const drivedash = ev.target.closest('[data-drivedash]')
+    if (drivedash) {
+      const [district, at] = drivedash.dataset.drivedash.split('|')
+      // OUT OF THE MAP AND ONTO THE ROAD. Unlike walking the graph, the whole point
+      // of asking for a dash is to LOOK at it -- so this one shuts the map, which is
+      // the same division "drive to it" on a window's page already keeps.
+      closeMap()
+      go.dash?.(district, Number(at))
+      return
     }
     const takeramp = ev.target.closest('[data-takeramp]')
     if (takeramp) {
@@ -1420,8 +1520,13 @@ function install() {
     else if (t.id === 'net-new') ws.addTenant(t.value)
     else if (t.id?.startsWith('net-name-')) ws.renameTenant(t.dataset.id, t.value)
     else if (t.id === 'ramp-at') {
+      // The same act as the button beside it, because they are the same field --
+      // and `set` moves the ramp now, so an Enter that only re-pointed the page
+      // would be the two of them disagreeing about what the box means.
       const want = Number(t.value)
-      if (Number.isInteger(want) && want >= 0 && ramp) ramp = { ...ramp, at: want }
+      if (!Number.isInteger(want) || want < 0 || !ramp) return
+      const carries = ws.rampAt(ramp.district, ramp.at)
+      if (!carries || ws.moveRamp(ramp.district, ramp.at, want)) ramp = { ...ramp, at: want }
     } else return
     ev.preventDefault()
     render(true)
