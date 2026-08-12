@@ -60,6 +60,18 @@ const BOARD_H = 46
 const BEAM_W = 330
 const SPAN_X = 158
 const PANEL_MAX_W = 130
+// A LANE PANEL HAS A FLOOR. It used to be `usable / count`, so every exit added
+// made every panel narrower and there was no number at which the row said "no" --
+// eight exits gave eight slivers with a word in each. A sign you cannot read is
+// not a smaller sign, it is a sign that has stopped working.
+//
+// So the row wraps instead: as many columns as fit at the minimum width, then
+// the next row underneath, up to VISIBLE_ROWS -- and past that it scrolls,
+// because a gate that grows downward eventually grows into the road.
+const PANEL_MIN_W = 96
+const PANEL_MIN_H = 44
+const ROW_GAP = 6
+const VISIBLE_ROWS = 3
 
 const GREEN = '#0b6b3a'
 const BLUE = '#12386e'
@@ -144,18 +156,22 @@ function makeBoard() {
   return { mesh, tex, canvas }
 }
 
-function makePanel() {
+function makePanelTex(cw, ch, w, h) {
   const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 256
+  canvas.width = cw
+  canvas.height = ch
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false }),
   )
   return { mesh, tex, canvas }
 }
+
+// Panels are a unit quad and get their real size from placePanels, so a scroll
+// or a re-wrap never has to touch geometry.
+const makePanel = () => makePanelTex(512, 256, 1, 1)
 
 // ------------------------------------------------------------- what to show
 //
@@ -239,8 +255,74 @@ function buildGate(kind) {
   const board = makeBoard()
   group.add(board.mesh)
 
+  const more = makePanelTex(512, 64, BEAM_W, 22)
+  more.mesh.visible = false
+  group.add(more.mesh)
+
   scene.add(group)
-  return { group, kind, panels: [], board, boardKey: null }
+  return { group, kind, panels: [], board, boardKey: null, more, moreKey: null, scroll: 0 }
+}
+
+// How the row breaks into a grid. Pure arithmetic, so the layout and the thing
+// that draws it cannot disagree.
+function grid(n) {
+  const usable = BEAM_W * 0.95
+  const cols = Math.max(1, Math.min(n, Math.floor(usable / PANEL_MIN_W)))
+  const pw = Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, usable / cols))
+  const ph = Math.max(PANEL_MIN_H, pw / 2)
+  const rows = Math.ceil(n / cols)
+  return { cols, pw, ph, rows, maxScroll: Math.max(0, rows - VISIBLE_ROWS) }
+}
+
+// Positioning is separate from building, because scrolling moves panels without
+// changing what any of them says.
+function placePanels(gate) {
+  const g = grid(gate.panels.length)
+  gate.grid = g
+  gate.scroll = Math.min(gate.scroll ?? 0, g.maxScroll)
+  gate.panels.forEach((p, i) => {
+    const r = Math.floor(i / g.cols)
+    const c = i % g.cols
+    // Centre each row on its own count, so a last row of one sits in the middle
+    // rather than hanging off the left upright.
+    const inRow = Math.min(g.cols, gate.panels.length - r * g.cols)
+    const x0 = -(g.pw * inRow) / 2 + g.pw / 2
+    const shown = r - gate.scroll
+    p.mesh.visible = shown >= 0 && shown < VISIBLE_ROWS
+    p.mesh.scale.set(g.pw, g.ph, 1)
+    p.mesh.position.set(x0 + c * g.pw, BEAM_Y - 18 - g.ph / 2 - shown * (g.ph + ROW_GAP), 6)
+  })
+  const hiddenAbove = gate.scroll
+  const hiddenBelow = Math.max(0, g.rows - VISIBLE_ROWS - gate.scroll)
+  const key = `${hiddenAbove}/${hiddenBelow}`
+  if (gate.more) {
+    // The strip only exists when something is off the gate. A gate that fits has
+    // nothing to say about scrolling.
+    gate.more.mesh.visible = hiddenAbove > 0 || hiddenBelow > 0
+    gate.more.mesh.position.set(0, BEAM_Y - 18 - Math.min(g.rows, VISIBLE_ROWS) * (g.ph + ROW_GAP) - 8, 6)
+    if (gate.more.mesh.visible && key !== gate.moreKey) {
+      gate.moreKey = key
+      drawMore(gate.more.canvas, hiddenAbove, hiddenBelow)
+      gate.more.tex.needsUpdate = true
+    }
+  }
+}
+
+function drawMore(canvas, above, below) {
+  const g = canvas.getContext('2d')
+  const W = canvas.width
+  const H = canvas.height
+  g.clearRect(0, 0, W, H)
+  g.fillStyle = 'rgba(3,4,10,0.8)'
+  g.fillRect(0, 0, W, H)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = 'bold 30px ui-monospace, monospace'
+  g.fillStyle = ACC_CSS
+  const bits = []
+  if (above) bits.push(`^ ${above}`)
+  if (below) bits.push(`v ${below}`)
+  g.fillText(`${bits.join('   ')}   scroll here`, W / 2, H / 2 + 2)
 }
 
 function syncGate(id, kind, z, row) {
@@ -278,13 +360,8 @@ function syncGate(id, kind, z, row) {
         p.tex.dispose()
       }
       gate.panels = []
-      const pw = Math.min(PANEL_MAX_W, (BEAM_W * 0.95) / row.length)
-      const ph = pw / 2
-      const x0 = -(pw * row.length) / 2 + pw / 2
-      row.forEach((_, i) => {
+      row.forEach(() => {
         const p = makePanel()
-        p.mesh.scale.set(pw, ph, 1)
-        p.mesh.position.set(x0 + i * pw, BEAM_Y - 18 - ph / 2, 6)
         gate.group.add(p.mesh)
         gate.panels.push(p)
       })
@@ -299,6 +376,7 @@ function syncGate(id, kind, z, row) {
       p.tex.needsUpdate = true
     })
   }
+  placePanels(gate)
   return gkey
 }
 
@@ -339,11 +417,31 @@ export function syncGantries() {
 
 export function gantryMeshes() {
   const out = []
-  for (const gate of gates.values()) for (const p of gate.panels) out.push(p.mesh)
+  // Only what is ON the gate. three raycasts a mesh you hand it directly whether
+  // or not it is visible, so a scrolled-off lane would still take clicks through
+  // the ones drawn over it.
+  for (const gate of gates.values()) for (const p of gate.panels) if (p.mesh.visible) out.push(p.mesh)
   return out
 }
 
 export const actionOf = (mesh) => mesh?.userData?.gantryAction ?? null
+
+// Scroll the gate a given panel belongs to. Returns false when there is nothing
+// off-screen, so the wheel falls through to driving the road -- a gate that fits
+// must not swallow the scroll that moves you.
+export function scrollGateOf(mesh, delta) {
+  for (const gate of gates.values()) {
+    if (!gate.panels.some((p) => p.mesh === mesh)) continue
+    const max = gate.grid?.maxScroll ?? 0
+    if (max === 0) return false
+    const next = Math.min(max, Math.max(0, (gate.scroll ?? 0) + Math.sign(delta)))
+    if (next === gate.scroll) return false
+    gate.scroll = next
+    placePanels(gate)
+    return true
+  }
+  return false
+}
 
 // Hover. A panel that does nothing when you point at it does not read as
 // clickable, and there is no cursor out here in the scene -- so the panel
@@ -367,6 +465,10 @@ export const gantryReport = () =>
     gate: k,
     kind: gate.kind,
     board: gate.boardKey,
+    rows: gate.grid?.rows ?? 0,
+    cols: gate.grid?.cols ?? 0,
+    scroll: gate.scroll ?? 0,
+    shown: gate.panels.filter((p) => p.mesh.visible).length,
     z: Math.round(gate.group.position.z),
     x: Math.round(gate.group.position.x),
     panels: gate.panels.map((p) => ({ title: p.title, sub: p.sub, tone: p.tone, action: p.action })),

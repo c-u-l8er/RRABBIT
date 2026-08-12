@@ -18,7 +18,7 @@ import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
 import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW } from './world.js'
 import * as ws from './workspaces.js'
-import { gantryMeshes, actionOf, setHovered } from './gantry.js'
+import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
 import { toggleMap, closeMap, isOpen as mapIsOpen } from './map.js'
 
 let renderer, gl, scene, camera, session
@@ -1102,6 +1102,15 @@ function installInput() {
       // is simply not to take the event.
       if (state.mode !== 'driving' || mapIsOpen()) return
       ev.preventDefault()
+      // A GATE WITH MORE LANES THAN IT CAN SHOW TAKES THE WHEEL, and only then.
+      // Same rule the flatten uses -- the wheel belongs to whatever the pointer
+      // is over -- and scrollGateOf refuses when a gate has nothing off-screen,
+      // so pointing at an ordinary gate still drives the road past it.
+      const over = aim(ev)
+      if (over && scrollGateOf(over.object, ev.deltaY)) {
+        state.lastGateScroll = ev.deltaY > 0 ? 'down' : 'up'
+        return
+      }
       const { near, far } = roadBounds()
       // Trackpads emit many small deltas and a wheel a few large ones; scaling
       // by the delta keeps both feeling like the same road.
