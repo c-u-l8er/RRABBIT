@@ -36,6 +36,13 @@ import * as THREE from 'three'
 import { signs, ACC, COOL, ENTER_Z, exitZOf } from './world.js'
 import * as ws from './workspaces.js'
 
+// The enter gate's back panel needs to know where back IS. Travel owns the
+// history; this only reads it, the same way it reads the window counts.
+let backOf = () => null
+export function attachBack(fn) {
+  backOf = fn
+}
+
 let scene = null
 export function attachGantry(c) {
   scene = c.scene
@@ -57,6 +64,9 @@ const PANEL_MAX_W = 130
 const GREEN = '#0b6b3a'
 const BLUE = '#12386e'
 const GREY = '#2a2f3a'
+// Brown, the way a motorway signs a place you turn off for rather than a route
+// you continue on. The reloop is neither an exit nor an entrance.
+const LOOP = '#5a3a1e'
 const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
 
 // `${workspaceId}:${kind}` -> { group, kind, panels: [...] }
@@ -70,7 +80,8 @@ function drawPanel(canvas, p) {
   const H = canvas.height
   const live = p.tone !== 'barred'
   g.clearRect(0, 0, W, H)
-  g.fillStyle = p.tone === 'enter' ? BLUE : p.tone === 'barred' ? GREY : GREEN
+  g.fillStyle =
+    p.tone === 'enter' || p.tone === 'back' ? BLUE : p.tone === 'loop' ? LOOP : p.tone === 'barred' ? GREY : GREEN
   g.fillRect(0, 0, W, H)
   g.strokeStyle = live ? '#ffffff' : '#8b93a3'
   g.lineWidth = 10
@@ -154,12 +165,28 @@ function makePanel() {
 const countIn = (id) => [...signs.values()].filter((s) => s.district === id).length
 
 function enterRow() {
+  const row = []
+  // BACK IS AT THE ENTRANCE because the entrance is where you arrive, and the
+  // moment you most want the road you just left is the moment you realise this
+  // is not it. It names its destination rather than saying "back", so it is a
+  // decision you can make without having to remember the trail.
+  const back = backOf()
+  if (back && ws.get(back)) {
+    row.push({
+      key: `back:${back}:${ws.get(back).name}`,
+      action: { kind: 'back' },
+      title: '‹ back',
+      sub: ws.get(back).name,
+      tone: 'back',
+    })
+  }
   // Left and right, because "insert a window on the left" is the thing that was
   // asked for and a launcher with no side would have to invent one.
-  return [
+  row.push(
     { key: 'open:-1', action: { kind: 'open', side: -1 }, title: '‹ left', sub: 'open window', tone: 'enter' },
     { key: 'open:1', action: { kind: 'open', side: 1 }, title: 'right ›', sub: 'open window', tone: 'enter' },
-  ]
+  )
+  return row
 }
 
 function exitRow(id) {
@@ -174,6 +201,12 @@ function exitRow(id) {
       tone: dest.open ? 'exit' : 'barred',
     }
   })
+  // THE RELOOP. Every other panel here leaves the road; this one is the road
+  // turning back on itself, which is the thing you want when you have driven to
+  // the end of it and the windows are all behind you. It is deliberately the
+  // same shape as an exit, because taking it feels the same -- you pick a lane
+  // and you come out at an entrance. It just happens to be this one's.
+  row.push({ key: 'loop', action: { kind: 'reloop' }, title: '⟲ back', sub: 'to the entrance', tone: 'loop' })
   row.push({ key: 'new', action: { kind: 'newLane' }, title: '+ lane', sub: 'new workspace', tone: 'exit' })
   return row
 }

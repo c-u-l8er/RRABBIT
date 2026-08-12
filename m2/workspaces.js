@@ -56,7 +56,13 @@ function save() {
   try {
     const payload = {
       root: rootId,
-      nodes: [...nodes.values()].map((n) => ({ id: n.id, name: n.name, exits: [...n.exits], open: n.open })),
+      nodes: [...nodes.values()].map((n) => ({
+        id: n.id,
+        name: n.name,
+        exits: [...n.exits],
+        open: n.open,
+        pos: n.pos,
+      })),
     }
     localStorage.setItem(STORE_KEY, JSON.stringify(payload))
   } catch {
@@ -80,6 +86,7 @@ function parse(raw) {
       name: typeof n.name === 'string' && n.name ? n.name : n.id,
       exits: Array.isArray(n.exits) ? n.exits.filter((e) => typeof e === 'string') : [],
       open: n.open !== false,
+      pos: Number.isInteger(n.pos) ? n.pos : null,
     })
   }
   const ids = new Set(clean.map((n) => n.id))
@@ -105,10 +112,40 @@ function install(list, root) {
       // address; these decide position, and they advance independently so that
       // what the left side does cannot move the right side's next window.
       lanes: { l: 0, r: 0 },
+      // WHICH LANE THIS IS -- the number you press to get here, and the slot the
+      // road occupies from left to right. It used to be derived: a breadth-first
+      // walk from the root decided the order and therefore the numbering, which
+      // is fine until someone wants lane 4 to be lane 2. A number you can assign
+      // has to be stored.
+      pos: Number.isInteger(n.pos) ? n.pos : null,
     })
   }
   rootId = root ?? list[0]?.id ?? null
+  normalisePositions()
   orderCache = null
+}
+
+// Positions are 1..n, unique and contiguous, ALWAYS. Anything without one (a
+// seed, a graph saved before positions existed, a node whose number collided)
+// takes the next free slot in insertion order. Doing this on every install means
+// no other code has to cope with a hole or a duplicate.
+function normalisePositions() {
+  const all = [...nodes.values()]
+  const taken = new Set()
+  const settled = []
+  for (const n of all) {
+    if (Number.isInteger(n.pos) && n.pos >= 1 && n.pos <= all.length && !taken.has(n.pos)) {
+      taken.add(n.pos)
+      settled.push(n)
+    }
+  }
+  let next = 1
+  for (const n of all) {
+    if (settled.includes(n)) continue
+    while (taken.has(next)) next++
+    n.pos = next
+    taken.add(next)
+  }
 }
 
 function boot() {
@@ -150,29 +187,15 @@ export const get = (id) => nodes.get(id) ?? null
 export const has = (id) => nodes.has(id)
 export const root = () => rootId
 
-// Layout order: breadth-first from the root, so a workspace sits next to the one
-// it is reached from, then anything the root cannot reach appended in insertion
-// order. An unreachable workspace still gets a lane -- a node you cannot see is
-// indistinguishable from a node that failed to be created, and this is the code
-// that would have to be trusted to tell you which.
+// Lane order is the ASSIGNED NUMBERS, low to high. It was a breadth-first walk
+// from the root, which read nicely and made the numbering a consequence of the
+// graph's shape -- so adding an exit could renumber roads you were not touching.
+// The map still lays its ROWS out by breadth-first depth, because that is a fact
+// about the graph; the lane a road occupies is a fact about your preference.
 function order() {
   if (orderCache) return orderCache
-  const out = []
-  const seen = new Set()
-  const queue = rootId && nodes.has(rootId) ? [rootId] : []
-  while (queue.length) {
-    const id = queue.shift()
-    if (seen.has(id)) continue
-    seen.add(id)
-    const n = nodes.get(id)
-    out.push(n)
-    // The `seen` check is what stops a back-edge (build -> home) from walking
-    // the graph forever.
-    for (const e of n.exits) if (nodes.has(e) && !seen.has(e)) queue.push(e)
-  }
-  for (const n of nodes.values()) if (!seen.has(n.id)) out.push(n)
-  orderCache = out
-  return out
+  orderCache = [...nodes.values()].sort((a, b) => a.pos - b.pos)
+  return orderCache
 }
 
 export const list = () => order()
@@ -225,7 +248,17 @@ export function takeLane(id, side) {
 export function add({ id, name, exits = [], open = true } = {}) {
   const key = id || `ws-${Math.random().toString(36).slice(2, 8)}`
   if (nodes.has(key)) return nodes.get(key)
-  nodes.set(key, { id: key, name: name || key, exits: exits.filter((e) => nodes.has(e)), open, next: 1 })
+  nodes.set(key, {
+    id: key,
+    name: name || key,
+    exits: exits.filter((e) => nodes.has(e)),
+    open,
+    next: 1,
+    lanes: { l: 0, r: 0 },
+    // A new road takes the next lane along. Never an existing one -- adding a
+    // workspace must not renumber the ones already there.
+    pos: nodes.size + 1,
+  })
   if (!rootId) rootId = key
   touched()
   return nodes.get(key)
@@ -262,3 +295,29 @@ export function setOpen(id, open) {
 }
 
 export const exitsOf = (id) => (nodes.get(id)?.exits ?? []).filter((e) => nodes.has(e))
+
+export function rename(id, name) {
+  const n = nodes.get(id)
+  const clean = String(name ?? '').trim().slice(0, 24)
+  if (!n || !clean || clean === n.name) return false
+  n.name = clean
+  touched()
+  return true
+}
+
+// Assigning a number SWAPS with whoever holds it.
+//
+// The alternative is to insert and shuffle everything after it along, which
+// renumbers roads the person did not mention -- and the numbers are keyboard
+// shortcuts, so quietly moving three of them to satisfy one is the worst of the
+// options. A swap changes exactly two things and both of them are visible.
+export function setPos(id, want) {
+  const n = nodes.get(id)
+  const p = Math.round(Number(want))
+  if (!n || !Number.isInteger(p) || p < 1 || p > nodes.size || p === n.pos) return false
+  const other = [...nodes.values()].find((x) => x.pos === p)
+  if (other) other.pos = n.pos
+  n.pos = p
+  touched()
+  return true
+}

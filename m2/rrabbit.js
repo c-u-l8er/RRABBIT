@@ -274,6 +274,31 @@ function makeSign(view, milepost, district, side, lane) {
 // every frame, and reconciling beats remembering: the flattened window changes
 // under this from four different places (flatten, release, a window dying, a
 // resize rebuilding the sign) and none of them should have to know about it.
+// KEEP EVERY SIGN OVER ITS OWN ROAD.
+//
+// A sign's x is `laneX(district) + side * SIGN_OFFSET`, computed once when the
+// window is adopted -- and `laneX` is not a constant. It centres the whole set,
+// so adding a workspace moves EVERY existing lane sideways, and assigning a
+// number moves two of them. The roads follow (syncRoads reconciles them every
+// frame); the windows did not, so they were left hanging over the gap where
+// their road used to be.
+//
+// This is not a breach of invariant 6. The invariant is that a window's ADDRESS
+// -- its workspace, milepost and side -- is never recomputed, and none of that
+// changes here. Only the world position those three currently resolve to does,
+// which is exactly what has to happen when the road moves.
+//
+// It already applied before any of the editing: `+ lane` from an exit gate has
+// been shifting every road by 1300 units since it was built.
+function syncPlacement() {
+  for (const s of signs.values()) {
+    if (!s.mesh) continue
+    const x = ws.laneX(s.district) + s.side * SIGN_OFFSET
+    if (s.mesh.position.x === x) continue
+    for (const o of [s.mesh, s.frame, s.post]) if (o) o.position.x = x
+  }
+}
+
 // ARMED IS NOT VISIBLE. The grab is live on the window you are standing in; it
 // is only DRAWN when the pointer is near it, because an arrow parked permanently
 // beside a window is one more thing between you and looking at the window.
@@ -566,6 +591,7 @@ export {
   adoptSurfaceTexture,
   makeSign,
   adoptPending,
+  syncPlacement,
   syncHandles,
   dropSign,
   isSurface,

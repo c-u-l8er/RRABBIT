@@ -74,14 +74,15 @@ import {
   goWindow,
   flattenTo,
   release,
+  backTarget,
   sendMotion,
   resizeFlatBy,
   handlePoint,
   stepFlight,
   installInput,
 } from './travel.js'
-import { attachRrabbit, adoptPending, syncPopups, syncHandles, checkPopupsMapped } from './rrabbit.js'
-import { attachGantry, syncGantries, gantryReport } from './gantry.js'
+import { attachRrabbit, adoptPending, syncPopups, syncPlacement, syncHandles, checkPopupsMapped } from './rrabbit.js'
+import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
 // state lives in world.js now; the page and the diagnostics still expect it
@@ -207,6 +208,7 @@ function buildWorld(canvas) {
   attachTravel(ctx)
   attachRrabbit(ctx)
   attachGantry(ctx)
+  attachBack(backTarget)
   syncGantries()
   // The map navigates through Travel rather than doing it itself, the same
   // division the gates keep.
@@ -381,6 +383,8 @@ function frame(now = 0) {
     // time you land on it.
     syncRoads()
     syncGantries()
+    // After the roads, because this puts the windows back over them.
+    syncPlacement()
     stepFlight(dt)
     // THE ARCH IS AN OVERVIEW LABEL, SO IT ONLY EXISTS IN THE OVERVIEW.
     //

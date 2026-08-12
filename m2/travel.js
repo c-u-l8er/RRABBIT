@@ -51,6 +51,38 @@ const raycaster = new THREE.Raycaster()
 let roadZ = 0
 const roadMemory = new Map()
 
+// WHERE YOU HAVE BEEN, so there is a way back that does not require remembering.
+//
+// Only workspace CHANGES go on it -- pressing 2 while already on lane 2 is not a
+// journey -- and it is capped, because this is a trail to retrace and not a log.
+// `goBack` pops rather than pushing, or back would be a place you could go
+// forward to and the button would just oscillate between two roads.
+const HISTORY_MAX = 32
+const history = []
+let goingBack = false
+
+export function backTarget() {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const id = history[i]
+    if (id !== state.district && ws.get(id)?.open) return id
+  }
+  return null
+}
+
+function goBack() {
+  const id = backTarget()
+  if (!id) return null
+  // Drop everything from that entry onward, so repeated backs walk the trail
+  // rather than bouncing off its end.
+  const at = history.lastIndexOf(id)
+  history.length = at
+  goingBack = true
+  const r = goDistrict(id)
+  goingBack = false
+  state.lastGantryClick = { kind: 'back', to: id }
+  return r
+}
+
 // The workspace number being typed. 600ms is the pause after which a lone "1"
 // stops being a possible prefix of "12" and becomes a jump to lane 1 -- long
 // enough that a deliberate two-digit number is never split, short enough that a
@@ -157,6 +189,11 @@ function goDistrict(id, { atHead = false, at = null } = {}) {
   if (!w || !w.open) return null
   // Park the road you are leaving before you leave it.
   if (state.district) roadMemory.set(state.district, roadZ)
+  if (state.district && state.district !== id && !goingBack) {
+    history.push(state.district)
+    if (history.length > HISTORY_MAX) history.shift()
+    state.historyDepth = history.length
+  }
   const b = roadBoundsOf(id)
   const want = at !== null ? at : atHead ? b.near : (roadMemory.get(id) ?? b.near)
   roadZ = Math.min(b.near, Math.max(b.far, want))
@@ -739,6 +776,18 @@ function doGantryAction(a) {
     state.lastGantryClick = { kind: 'open', side: a.side, ok }
     return ok
   }
+  if (a.kind === 'back') return goBack()
+  if (a.kind === 'reloop') {
+    // Back to the head of THIS road. Not a workspace change, so it is not a
+    // journey and does not go on the history -- you have not been anywhere.
+    const b = roadBoundsOf(state.district)
+    roadZ = b.near
+    roadMemory.set(state.district, roadZ)
+    state.lastGantryClick = { kind: 'reloop', to: state.district }
+    flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
+    state.mode = 'flying'
+    return true
+  }
   if (a.kind === 'newLane') {
     // A new workspace is created CONNECTED, in both directions. A lane you can
     // drive down and not back up is a road network a graph is allowed to have,
@@ -1163,6 +1212,12 @@ function installInput() {
   window.addEventListener('keydown', (ev) => {
     if (state.mode === 'flat' || ev.ctrlKey || ev.altKey || ev.metaKey) return
     if (ev.key === 'Escape' && mapIsOpen()) return void closeMap()
+    // A FIELD YOU ARE TYPING IN OWNS ITS KEYSTROKES. The map has a name box and
+    // a lane box now, and without this a workspace called "build 2" would fly
+    // you to lane 2 while you named it, and a zero would shut the map you were
+    // editing in. Escape is deliberately above this line, because leaving is the
+    // one thing that should still work from inside a field.
+    if (ev.target?.closest?.('#map input, #map select')) return
     if (ev.key === 'o' || ev.key === 'O') return void toggleMap()
     if (!/^[0-9]$/.test(ev.key)) return
 
@@ -1255,6 +1310,7 @@ export {
   release,
   currentPose,
   goWindow,
+  goBack,
   stepFlight,
   scenePointFromEvent,
   // shell.js's `__pointAt`/`__pointAtPopup` call this. They were written when
