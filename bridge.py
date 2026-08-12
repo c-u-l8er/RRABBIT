@@ -13,8 +13,9 @@ reports 0.97 and declines to say what is at 0.97 is the thing RAVIO's deleted
 idle-sway term was a comment about.
 
 Two readers. Linux is what this is developed on; FreeBSD is what T&R actually
-runs. The FreeBSD reader is written from the documented sysctl names and is
-MARKED UNVERIFIED at the bottom of this file -- it has never been run.
+runs. The FreeBSD reader was written from the documented sysctl names and went
+unrun until 2026-08-09, when it was finally exercised on a booted T&R image --
+see FreeBSDReader's docstring for what that settled and what it did not.
 
 stdlib only, on purpose: this ships inside a distro image.
 """
@@ -273,7 +274,21 @@ class LinuxReader:
 
 
 class FreeBSDReader:
-    """UNVERIFIED -- see the note at the bottom of this file."""
+    """Run for the first time on 2026-08-09, on a booted T&R desktop image.
+
+    Six of seven tubes read real values there: cpu (kern.cp_time), ram, swap,
+    disk, load, and net after the fix below. `net` did NOT survive first
+    contact -- it raised TypeError on a None peak and the rack reported
+    'reader failed', which is the failure mode working as designed rather than
+    a number being invented.
+
+    Still unverified, and not claimable from that run:
+      * temp -- dev.cpu.0.temperature does not exist in a VM (no coretemp /
+        amdtemp), so the branch that parses it has still never executed. What
+        was verified is that its ABSENCE is reported honestly.
+      * every reading came from a guest with one virtio interface and no swap;
+        the swap and multi-NIC paths are still only as good as the docs.
+    """
 
     name = "freebsd"
 
@@ -369,16 +384,30 @@ class FreeBSDReader:
         if prev is None:
             return rating(None, None, "first sample -- no interval to divide by", BARS["net"])
         dt = now - prev[0]
+        if dt <= 0:
+            return rating(None, None, "no time passed between samples", BARS["net"])
         busiest, rate = None, 0.0
         for iface, total in counts.items():
-            r = (total - prev[1].get(iface, total)) / max(dt, 1e-6)
+            r = (total - prev[1].get(iface, total)) / dt
             if r > rate:
                 busiest, rate = iface, r
-        self._net_peak = max(self._net_peak, rate)
+        # Same prior-peak protocol as LinuxReader.net, and for the same measured
+        # reason -- see the long note there. Written from the sysctl docs, this
+        # reader had `max(self._net_peak, rate)` against a `_net_peak` that
+        # starts at None, so the FIRST time it was ever run it raised
+        # TypeError: '>' not supported between instances of 'float' and
+        # 'NoneType', and the rack showed 'reader failed'. Patching only the
+        # crash would have re-introduced the bug the Linux note describes:
+        # folding this sample into the peak pins the gauge at 100% forever
+        # after the first byte.
+        prior_peak = self._net_peak
+        self._net_peak = rate if prior_peak is None else max(prior_peak, rate)
+        if prior_peak is None:
+            return rating(None, f"{rate / 1e6:.2f} MB/s", f"{busiest} -- no busier second seen yet", BARS["net"])
         return rating(
-            rate / self._net_peak,
+            rate / prior_peak if prior_peak > 0 else None,
             f"{rate / 1e6:.2f} MB/s",
-            f"{busiest} -- scaled against the busiest {self._net_peak / 1e6:.2f} MB/s seen",
+            f"{busiest} -- scaled against the busiest {prior_peak / 1e6:.2f} MB/s seen",
             BARS["net"],
         )
 

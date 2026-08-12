@@ -1150,3 +1150,251 @@ and geometry are right — but a large diagonal region of the frame is filled wi
 flat cyan and green that are not xterm's colours at all. That is not a blur or a
 damage-region seam; most of the surface is never written. Unmeasured, and it is
 the next thing to look at in the h264 path.
+
+## 20. The tear, measured — two of it was ours
+
+**2026-08-09.** §18's closing note called this "damage-region or keyframe
+artifacts in the h264 path, unmeasured", and guessed at the encoder. Two of the
+three things wrong were on this side of the wire, in how the shell shares one
+WebGL context with Greenfield.
+
+### 20.1 three left a vertex array bound, and Greenfield has none of its own
+
+Greenfield's YUV→RGB pass converts a decoded frame with a full-screen triangle
+strip: `bindBuffer`, two `vertexAttribPointer` calls, `drawArrays`. It never
+binds a vertex array, because it was written for a context nobody else touches.
+
+three does bind one, and leaves it bound when `render()` returns. The conversion
+runs from a WebCodecs callback in its own task, so it recorded its attribute
+pointers into **three's** VAO and then drew using whatever else three had left
+in it.
+
+| | measurement |
+|---|---|
+| extension present | `OES_vertex_array_object` ✓ |
+| `VERTEX_ARRAY_BINDING_OES` after `render()` returned | **non-null** (before) |
+| same, after `leaveNeutralVertexState()` | **null** |
+
+The visible half of this was a full-canvas artifact — the surface stretched
+across the whole viewport in blurred, magnified glyphs, over the road. It is
+gone. It also silently corrupted the VAO three used next, which nothing was
+looking for.
+
+Greenfield's `Program.use()` reports `BUG? use gl program failed` by calling
+`getError()` straight after `useProgram` — but `getError` returns the first
+error since anyone last asked and clears it, so that message names the wrong
+call. Sampling the flag at a fixed point in our own frame gives `glErrors: 0`
+over thousands of frames: three is not leaving errors behind, and the message is
+Greenfield draining its own.
+
+### 20.2 The decoded texture is bigger than the surface
+
+Measured on a real `xterm`:
+
+| | width | height |
+|---|---|---|
+| surface (`renderState.size`) | 960 | 653 |
+| decoded texture (`renderState.texture.size`) | **1024** | **770** |
+
+A plain three material maps a texture `0..1`, so the sign was showing the
+padding as well as the picture. Which sub-rect holds the picture is not a guess:
+Greenfield's own shader builds its quad from `textureMinU = 1 - width /
+texture.width` running to `1`, so the picture sits at the bottom-right of the
+allocation, and `adoptSurfaceTexture` now samples that same window. For an
+unpadded buffer — every shm client, verified at 250×250 → 250×250 — the maths
+reduces exactly to the previous repeat/offset, flip included, and the web
+clients render unchanged.
+
+### 20.3 What is left is upstream, and it is a shear
+
+With both fixed, the flattened `xterm` is legible and correctly oriented, and a
+**constant-slope diagonal** still divides it: picture above, flat cyan below.
+
+- It is not our sampling. `?uv=full` maps the entire allocation and the boundary
+  survives with the same slope, so it is in the decoded content.
+- Flat cyan is what YUV→RGB gives for chroma left at its default, so the region
+  below the boundary was **never written**, rather than written wrongly.
+- A constant slope is a row-stride artifact, not a partial decode — a partial
+  decode stops on a macroblock row and leaves a horizontal edge.
+
+Not settled, and not fixable from here without patching `@gfld/compositor`'s
+WebCodecs path. The obvious A/B — a different encoder — **could not be run**:
+`vaapih264enc` is not installed (no `gstreamer-vaapi`), and `nvh264` needs the
+NVIDIA node, which is the one gstgl cannot make an EGL context on (§13.5). That
+is a missing measurement, stated as one.
+
+### 20.4 The cyan was chroma read from the wrong offset
+
+**2026-08-09, later.** §20.3 called the remainder "upstream, and a shear". Half
+of that was right. The measurement that settles it is the decoded frame's own
+geometry, read where it arrives:
+
+| | width | height |
+|---|---|---|
+| coded | 1024 | **770** |
+| visible | 1024 | **768** |
+| surface | 960 | 653 |
+
+`VideoFrame.allocationSize()` and `copyTo()` default their `rect` to the
+**visible** rect, so the buffer holds 1024×768. `onComplete` then labels that
+same buffer with the **coded** size. Two rows of difference, and the arithmetic
+downstream is:
+
+- `lumaSize = 1024 * 770 = 788,480`, against 786,432 bytes of luma that exist —
+  so the Y slice eats the first **2,048 bytes of the U plane**;
+- U and V are therefore both read 2,048 bytes — **four chroma rows** — late;
+- V runs **3,072 bytes past the end** of the buffer, where `subarray()` clamps
+  silently and the tail of the chroma texture is never written.
+
+Displaced chroma is the diagonal. Never-written chroma is the flat cyan under
+it. Patched in `patches/greenfield-webcodec-visible-size.patch`: label the
+buffer with the size that was written.
+
+**Result: the cyan is gone.** `renderState.texture.size` now reports
+1024×**768**, matching the bytes, and the region that read flat cyan reads
+neutral. A diagonal boundary remains on the **luma** side, so this was two
+faults wearing one shape, and one of them is fixed.
+
+Two process notes worth more than the fix:
+
+- **I patched the wrong site twice before the right one.** `opaqueOutput` and
+  `alphaOutput` record a `codedSize` that the I420 path never reads —
+  `onComplete` builds its own. Patching them changed nothing and looked exactly
+  like the patch not working.
+- **The dev server served stale transforms for several rounds**, so three
+  measurements that appeared to say "the patch had no effect" were measuring
+  code that was never loaded. `curl` the module through the dev server and grep
+  it before believing any negative result; the built bundle served by
+  `bridge.py` has no such cache and is the honest place to test.
+
+## 21. The reload orphan, closed — and the encode cost, still not priced
+
+### 21.1 A reload no longer strands the client
+
+The session id was the constant `'rrabbit-m1'`. The proxy keys its own session
+off it, so reloading the shell rejoined a proxy session whose client was bound
+to a browser connection that no longer existed: `app: open`, `surfaces: 0`, the
+application still running. The documented workaround was to restart the proxy
+between runs, which is a strange thing to have to do to the machine you are
+developing against.
+
+Each page load now takes a fresh id, and `pagehide` calls `session.terminate()`
+so the old one is reaped rather than left to time out. `?session=<id>` pins one
+for the case where rejoining deliberately is the point.
+
+Measured against a proxy that was **not** restarted between loads:
+
+| load | session id | surfaces |
+|---|---|---|
+| 1 | `rrabbit-msmicobc-fl7jph` | 1 |
+| 2 | `rrabbit-msmid136-d8keme` | 1 |
+| 3 | `rrabbit-msmidq7s-dcllqm` | 1 |
+
+`xterm` process count after all three: **1**. The old clients are closed, not
+accumulated.
+
+### 21.2 The encode cost is still not priced, and now I know why not
+
+§7 asked what a window costs. Two harnesses were built and **neither produced a
+cost model**, which is the honest result rather than a number to quote.
+
+`/busy-xterm` was added to `proxy/applications.json` — a window that never stops
+changing — so the measurement would be of encoding rather than of an idle
+window. Then:
+
+| N windows | proxy CPU | shell fps | browser CPU |
+|---|---|---|---|
+| 0 | — | 60.9 | 7% |
+| 1 | 0.4% | 51.4 | 13% |
+| 2 | 0.4% | 61.0 | 7% |
+| 3 | 0.3% | 60.9 | — |
+| 4 | 0.4% | 60.9 | 7% |
+
+Nothing here is monotonic in N, so none of it is a cost model. Three reasons,
+all worth more than the table:
+
+- **The proxy is not where the money is.** Eight threads, no children, and CPU
+  flat at ~0.4% while Chrome sat at 425%. The expensive half of this pipeline
+  is decode and composite, not encode — so "per-window encode cost" may be the
+  wrong question, or at least not the first one.
+- **Frame rate cannot answer it.** The shell is vsync-capped at ~61 fps, so it
+  reports the same number until it falls off a cliff. Headroom is invisible to
+  it.
+- **The N=0 row is not a baseline.** With no `?remote`, the shell auto-launches
+  its web clients, so that row has five surfaces in it, not zero.
+
+### 21.3 Native launches drop above two
+
+Asking for four `/busy-xterm` instances produced **two surfaces**, twice, with
+no error surfaced in the shell. Three produced three. This was found while
+trying to measure something else and is not diagnosed — but it means the
+multi-window case is not merely unpriced, it is **not reliable**, and any cost
+measurement that ignores that is measuring a smaller fleet than it asked for.
+
+## 22. The seam between Travel and RRABBIT
+
+**2026-08-10.** T&R names two personalities, not two layers. Travel navigates —
+the road, the camera, the flight, the districts; its question is always *where
+am I and how do I get to the other thing*. RRABBIT **is** the windows — the sign
+on the road, the surface that flattens to 1:1 under you, the rect that decides a
+click belongs to it; its question is *what am I and where do I stand*.
+
+`m2/shell.js` held both, at 1,565 lines, with nothing in it marking which was
+which. It is now four files:
+
+| file | who |
+|---|---|
+| `m2/travel.js` | poses, districts, overview, flatten, flight, input |
+| `m2/rrabbit.js` | texture adoption, signs, popups, ledger placement |
+| `m2/world.js` | the stage neither owns: scene handles, the `signs` ledger, `state` |
+| `m2/shell.js` | world construction, the frame, the tubes, the diagnostics |
+
+### 22.1 A cut, not a rewrite
+
+Every function body moved **verbatim**. The bindings they used to close over as
+module-level `let`s are handed across by `attachTravel(ctx)` / `attachRrabbit(ctx)`
+instead, which is why no line inside a moved function changed. `attach()` is
+re-callable rather than one-shot because `session` does not exist at
+`buildWorld()` time — it is created later in `main()`, and the second call is
+what fills it in. Reading through `ctx` on every access would have been tidier
+and would have meant editing every moved line; that trade was refused
+deliberately.
+
+The bundle went from 6,524.50 kB to 6,524.98 kB — the difference is comments.
+
+### 22.2 The conversation is two reads and one call
+
+The reason the seam is drawable at all is that the interface is tiny:
+
+- **Travel → RRABBIT**: nothing. Travel reads the shared `signs` ledger for
+  which sign stands at an address, and `view.regionRect` for the rect it owns.
+  Both are data, not calls.
+- **RRABBIT → Travel**: exactly one call. When a window dies *while you are
+  standing in it*, `adoptPending()` calls `release()`. A window that vanishes
+  under a driver who is inside it has to say so.
+
+### 22.3 Re-measured, not assumed
+
+Everything the old file carried, checked after the cut:
+
+| | measurement |
+|---|---|
+| adoption | `surfaces 5`, `signs 5`, `adopted 5` |
+| ledger (M4) | `placed 7`, five distinct slots across three districts |
+| districts | `__district(1)` → camera at `districtX(1) = 0` |
+| flatten (M2) | `mode flat`, `flatMilepost 1`; release returns to `driving` |
+| flip line | `__calibrate` → `top [0,0,255]`, `bottom [255,0,0]`, `flipped: true` |
+| **input across the seam** | `lastScenePoint [480,338]`, **`lastPickMatched: true`** |
+| native h264 | `surfaces 1`, texture 1024×768 |
+| health | `glErrors 0`, `frameError null`, 0 console errors |
+
+`lastPickMatched` is the one that matters. Travel raycasts the sign, converts
+the hit UV through RRABBIT's ledger rect, and Greenfield's own `pickView` — which
+knows nothing about either personality — resolves that point back to the same
+surface. The two halves agree, and something outside both of them says so.
+
+**A trap worth naming:** `__calibrate` first returned all zeros after the split,
+which reads exactly like a regression. It is not. That diagnostic places its
+test quad at `x = 0`, which was in front of the camera before M4 introduced
+districts and is district 1's road afterwards. Run from district 0 it measures
+empty space. The diagnostic is pre-M4 and nobody had noticed.

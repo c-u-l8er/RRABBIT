@@ -10,13 +10,21 @@
   "/xterm": {
     "name": "XTerm",
     "executable": "xterm",
-    "args": ["-fa", "Monospace", "-fs", "12"],
+    "args": [
+      "-fa",
+      "Monospace",
+      "-fs",
+      "12"
+    ],
     "env": {}
   },
   "/firefox": {
     "name": "Firefox",
     "executable": "firefox",
-    "args": ["--new-instance", "--no-remote"],
+    "args": [
+      "--new-instance",
+      "--no-remote"
+    ],
     "env": {
       "MOZ_ENABLE_WAYLAND": "1"
     }
@@ -25,6 +33,21 @@
     "name": "glxgears",
     "executable": "glxgears",
     "args": [],
+    "env": {}
+  },
+  "/busy-xterm": {
+    "name": "XTerm (busy)",
+    "executable": "xterm",
+    "args": [
+      "-fa",
+      "Monospace",
+      "-fs",
+      "12",
+      "-e",
+      "sh",
+      "-c",
+      "while :; do date +%H:%M:%S.%N; done"
+    ],
     "env": {}
   }
 }

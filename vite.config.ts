@@ -16,6 +16,13 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
+    // The tubes, same-origin in dev too. On the target bridge.py serves the
+    // bundle and /api from one port; without this proxy dev would be the only
+    // place the shell talks to a different origin, and "works in dev" would
+    // stop meaning "works on the target" for exactly this path.
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8913', changeOrigin: false },
+    },
   },
   build: {
     outDir: 'dist',

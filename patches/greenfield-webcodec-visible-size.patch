@@ -1,0 +1,61 @@
+Label a decoded frame with the size that was actually written
+
+VideoFrame.allocationSize() and copyTo() default their `rect` to the frame's
+VISIBLE rect, so the ArrayBuffer holds the visible picture. The dual-plane
+buffer built from it is then labelled `codedSize`, taken straight off the
+VideoFrame. When the two differ, every consumer slices the planes from a label
+that does not describe the bytes.
+
+Measured with x264 through compositor-proxy on a real xterm:
+
+    coded   1024 x 770
+    visible 1024 x 768      <- what copyTo wrote
+
+convertYUVAArrayBufferInto then computes lumaSize = 1024*770 = 788480 against a
+buffer holding only 786432 bytes of luma, so:
+
+  * the Y slice eats the first 2048 bytes of the U plane;
+  * U and V are both read 2048 bytes (4 chroma rows) late;
+  * V runs 3072 bytes past the end, where subarray() silently clamps and the
+    tail of the chroma texture is never written.
+
+Displaced chroma renders as a diagonal; never-written chroma renders as flat
+cyan under it.
+
+The fix is to label the buffer with the visible size, because that is what was
+copied. It is also the size worth showing -- the extra coded rows are padding,
+not picture -- and it keeps the plane arithmetic self-consistent, since that
+code slices chroma with `>> 1` and `>> 2` and only agrees with itself on even
+dimensions.
+
+--- a/src/remote/webcodec-buffer-decoder.ts
++++ b/src/remote/webcodec-buffer-decoder.ts
+@@ onComplete
+                 opaque: {
+                     buffer: new Uint8Array(opaqueBuffer),
+                     codedSize: {
+-                        width: opaqueVideoFrame.codedWidth,
+-                        height: opaqueVideoFrame.codedHeight,
++                        width: opaqueVideoFrame.visibleRect?.width ?? opaqueVideoFrame.codedWidth,
++                        height: opaqueVideoFrame.visibleRect?.height ?? opaqueVideoFrame.codedHeight,
+                     },
+                 },
+@@ onComplete (alpha)
+                 dualPlaneYUVABuffer.alpha = {
+                     buffer: new Uint8Array(alphaBuffer),
+                     codedSize: {
+-                        width: decodeResult.alpha.buffer.codedWidth,
+-                        height: decodeResult.alpha.buffer.codedHeight,
++                        width: decodeResult.alpha.buffer.visibleRect?.width ?? decodeResult.alpha.buffer.codedWidth,
++                        height: decodeResult.alpha.buffer.visibleRect?.height ?? decodeResult.alpha.buffer.codedHeight,
+                     },
+                 }
+@@ opaqueOutput / alphaOutput
+-        const width = buffer.codedWidth;
+-        const height = buffer.codedHeight;
++        const width = buffer.visibleRect?.width ?? buffer.codedWidth;
++        const height = buffer.visibleRect?.height ?? buffer.codedHeight;
+
+NOTE: opaqueOutput/alphaOutput record a codedSize that the I420 path never
+reads -- onComplete rebuilds its own. Both sites are corrected here so the two
+paths cannot disagree, but the I420 one is the one that changes behaviour.
