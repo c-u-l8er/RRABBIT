@@ -1556,6 +1556,25 @@ function installInput() {
     flattenTo(signs.get(hit.object.userData.signKey).milepost)
   })
 
+  // A HOVER HAS TO BE ABLE TO END, and on a canvas that fills the window the ways
+  // it ends are not all pointermoves on the canvas.
+  //
+  // Nothing here is a hover once the pointer is off the drawing: leave the window
+  // entirely, or cross onto the status line, which is a DOM element sitting over the
+  // canvas and eats the moves under it. Both left whatever was last lit still lit --
+  // reported as a highlight that would not go back. `pointerout` covers moving to
+  // another element as well as leaving the window; `pointercancel` covers a pointer
+  // that is taken away from us mid-gesture.
+  const dropHover = () => {
+    setHovered(null)
+    setRampHover(null)
+    canvas.style.cursor = ''
+  }
+  for (const kind of ['pointerout', 'pointerleave', 'pointercancel']) {
+    canvas.addEventListener(kind, dropHover)
+  }
+  window.addEventListener('blur', dropHover)
+
   // Hover, so a lane reads as clickable before you click it.
   canvas.addEventListener('pointermove', (ev) => {
     if (state.mode !== 'driving') {

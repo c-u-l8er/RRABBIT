@@ -69,11 +69,10 @@ const LINE_Y = ROAD_Y + 0.6
 //   DECELERATION RUN a short stretch near-parallel to the road before anything
 //                    turns -- this is what makes it a road leaving rather than a
 //                    branch drawn at an angle
-//   GORE             the wedge that opens between the road and the ramp. Its
-//                    upstream point is the PAINTED NOSE: no width, the moment
-//                    they become two roads. Amber, because it is a marking.
 //   DEPARTURE        the curve away, sweeping past x=480 so the board at the end
-//                    stands clear of every window
+//                    stands clear of every window, with an edge line down each
+//                    shoulder -- see "no gore fill" below for the part that was
+//                    tried and removed
 //
 // The deck is a RIBBON sampled along that curve, not a quad: a curve is the whole
 // difference between "a road goes that way" and "something is attached here".
@@ -85,9 +84,6 @@ const RAMP_W_FAR = 92
 const RAMP_MOUTH_X = 104
 const RAMP_DROP = 16
 const RAMP_SEGS = 26
-// Where the road and the ramp stop being one surface. A fraction along the curve
-// rather than a z, so it follows if the curve is ever retuned.
-const NOSE_T = 0.3
 
 const BOARD_W = 240
 const BOARD_H = 84
@@ -175,16 +171,9 @@ function placeLine(entry, district, x) {
     entry.pads.setMatrixAt(i, M)
     // A hovered ramp lights its own marker as well as its board, because the
     // marker is the part of a ramp that is on the road you are driving.
-    //
-    // AND NOTHING IS HOVERED WHILE THE MAP IS OPEN. The map is a full-screen
-    // overlay, so the canvas stops receiving pointermove and the last hover
-    // freezes -- which is visible the moment you shut the map again, as a white
-    // dash under a pointer that is nowhere near it. Clicking a marker opens the
-    // map, so this is the ordinary path and not an edge case.
     const hot =
-      !state.mapOpen &&
-      ((dashHot.district === district && dashHot.at === i) ||
-        (rampHot.district === district && rampHot.at === i))
+      (dashHot.district === district && dashHot.at === i) ||
+      (rampHot.district === district && rampHot.at === i)
     // Nearest ramp AHEAD of this dash, within the run-up. `at - i` because dashes
     // number away from the head of the road, so a bigger index is further along.
     let lead = -1
@@ -293,38 +282,19 @@ function ribbon(widthAt, offset, side, segs = RAMP_SEGS) {
   return g
 }
 
-// THE GORE. A wedge on the ground between the road's right edge and the ramp's
-// left edge, from the painted nose (no width, where they separate) widening
-// downstream. Drawn as a marking rather than as tarmac: amber, flat, and it is the
-// thing that says "this is an exit" from further away than any text can be read.
-function goreGeometry(side) {
-  const pos = []
-  const idx = []
-  const sx = side > 0 ? 1 : -1
-  const EDGE = 160 // the road's own edge on this side
-  for (let i = 0; i <= 10; i++) {
-    const t = NOSE_T + ((1 - NOSE_T) * 0.55 * i) / 10
-    const p = CURVE.getPoint(t)
-    const d = CURVE.getTangent(t)
-    const n = new THREE.Vector2(-d.y, d.x).normalize()
-    const inner = new THREE.Vector2(p.x - n.x * (RAMP_W_NEAR / 2), p.y - n.y * (RAMP_W_NEAR / 2))
-    const y = ROAD_Y + 0.5
-    // One edge follows the ramp's inner shoulder, the other runs straight down the
-    // road's own edge -- which is exactly the pair of lines a gore lies between.
-    pos.push(sx * EDGE, y, inner.y)
-    pos.push(sx * inner.x, y, inner.y)
-    if (i > 0) {
-      const a = (i - 1) * 2
-      if (sx > 0) idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2)
-      else idx.push(a + 2, a + 1, a, a + 2, a + 3, a + 1)
-    }
-  }
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-  g.setIndex(idx)
-  g.computeVertexNormals()
-  return g
-}
+// THERE IS DELIBERATELY NO GORE FILL.
+//
+// One existed: a translucent amber wedge between the road's edge and the ramp's
+// inner shoulder, from the painted nose widening downstream -- the real anatomy,
+// and the right idea. What it looked like on a near-black road was a patch of brown
+// dirt beside the tarmac, and it was reported as exactly that. Amber at a third
+// opacity over #11131f is mud; there is no opacity at which it is paint.
+//
+// A road marking is a LINE, and the ramp already has two of them along its
+// shoulders. Those carry the diverge on their own -- the curve says a road leaves,
+// the lines say where its edges are -- so the fill was the only part of the
+// anatomy that was decoration rather than information, and it is the part that is
+// gone. If a gore ever comes back it has to come back as strokes.
 
 function makeRamp(district, r) {
   const canvas = document.createElement('canvas')
@@ -339,8 +309,8 @@ function makeRamp(district, r) {
   // THE DECK IS THE SAME COLOUR AS THE ROAD, not a lighter one. It was 0x191c2c
   // against the road's 0x11131f, meaning to read as "tarmac, but a different
   // road"; what it actually read as at a grazing angle was a sheet of paper lying
-  // on the ground. A road leaving a road is the same material -- the gore and the
-  // edge lines are what tell them apart, which is true out there too.
+  // on the ground. A road leaving a road is the same material -- the edge lines are
+  // what tell them apart, which is true out there too.
   const deck = new THREE.Mesh(
     ribbon(
       (t) => RAMP_W_NEAR + (RAMP_W_FAR - RAMP_W_NEAR) * t,
@@ -372,16 +342,6 @@ function makeRamp(district, r) {
     )
   }
 
-  const gore = new THREE.Mesh(
-    goreGeometry(side),
-    new THREE.MeshBasicMaterial({
-      color: ACC,
-      transparent: true,
-      opacity: 0.34,
-      side: THREE.DoubleSide,
-    }),
-  )
-
   const board = new THREE.Mesh(
     new THREE.PlaneGeometry(BOARD_W, BOARD_H),
     new THREE.MeshBasicMaterial({ map: tex, transparent: false }),
@@ -401,18 +361,17 @@ function makeRamp(district, r) {
 
   scene.add(deck)
   scene.add(edges)
-  scene.add(gore)
   scene.add(board)
   scene.add(post)
-  return { deck, edges, gore, board, post, tex, canvas, key: '' }
+  return { deck, edges, board, post, tex, canvas, key: '' }
 }
 
 function placeRamp(part, district, x, r) {
   const z0 = dashZ(r.at)
-  // The deck, its lines and the gore are all built in the ramp's own frame with
-  // the mouth at the origin, so placing a ramp is moving that frame. Nothing is
-  // rebuilt when the road it hangs off moves sideways.
-  for (const m of [part.deck, part.edges, part.gore]) m.position.set(x, 0, z0)
+  // The deck and its lines are both built in the ramp's own frame with the mouth at
+  // the origin, so placing a ramp is moving that frame. Nothing is rebuilt when the
+  // road it hangs off moves sideways.
+  for (const m of [part.deck, part.edges]) m.position.set(x, 0, z0)
   const end = CURVE.getPoint(1)
   const sx = r.side > 0 ? 1 : -1
   part.board.position.set(x + sx * end.x, ROAD_Y - RAMP_DROP + BOARD_Y + BOARD_H / 2, z0 + end.y)
@@ -440,7 +399,7 @@ function dropRamp(part) {
   // The edge lines are a group of two, so the loop has to walk into it -- a
   // dispose that misses them leaks a geometry per ramp built and removed, which is
   // exactly the thing that only shows up after an afternoon of rewiring.
-  for (const m of [part.deck, part.gore, part.board, part.post, ...part.edges.children]) {
+  for (const m of [part.deck, part.board, part.post, ...part.edges.children]) {
     scene.remove(m)
     m.geometry.dispose()
     m.material.dispose()
@@ -457,6 +416,20 @@ function dropRamp(part) {
 // there is no moment at which construction could happen instead.
 export function syncRamps() {
   if (!scene) return
+  // A HOVER THAT IS MASKED IS STILL A HOVER, and that was the bug.
+  //
+  // While the map is open the canvas gets no pointermove, so whatever was last
+  // under the pointer stays under it forever as far as this module knows. Hiding
+  // the highlight for the duration -- which is what this used to do -- fixes the
+  // picture and not the state: shut the map without moving the mouse and the mask
+  // lifts on a hover that is minutes stale, so the marker you pressed lights up
+  // again with the pointer nowhere near it. Reported as a highlight that would not
+  // go back.
+  //
+  // Clearing it is the same one line in a better place. The map is a full-screen
+  // overlay: while it is up, nothing on the road IS hovered, and that is a fact
+  // rather than a display rule.
+  if (state.mapOpen) clearHover()
   const want = new Set()
   for (const w of ws.openList()) {
     want.add(w.id)
@@ -530,6 +503,13 @@ export function dashActionOf(hit) {
   return { kind: 'dash', district, at: hit.instanceId }
 }
 
+function clearHover() {
+  dashHot.district = null
+  dashHot.at = null
+  rampHot.district = null
+  rampHot.at = null
+}
+
 // Hover, so a marker reads as pressable before it is pressed. Held as two
 // addresses rather than as a mesh, because the dashes are instances and there is
 // no mesh to remember.
@@ -572,6 +552,11 @@ export const rampReport = () => {
         // being made about sides is that the geometry mirrors, and a report that
         // repeated the stored side would agree with itself either way.
         side: part.board.position.x > ws.laneX(id) ? 'right' : 'left',
+        // The hover, read off the MATERIAL rather than off `rampHot` -- the claim is
+        // that the highlight follows the pointer, and a report that re-read the
+        // variable the highlight is drawn from would agree with itself whatever the
+        // board looked like.
+        boardLit: part.board.material.color.getHexString(),
         board: [
           Math.round(part.board.position.x),
           Math.round(part.board.position.y),
