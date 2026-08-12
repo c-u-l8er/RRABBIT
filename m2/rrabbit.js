@@ -43,43 +43,48 @@ let nextSlot = 0
 // well inside it.
 const SIGN_OFFSET = 330
 
-// Side of the square resize grab, in world units on a 300-wide sign. Big enough
-// to hit without aiming: at the default flat zoom this is about 56 screen pixels.
+// The `-->` is wider than it is tall, so the grab is not square. HANDLE is the
+// hit-area unit; the visible text gets its own proportions.
 const HANDLE = 34
+const GRIP_W = 58
+const GRIP_H = 29
+// Turned 45 degrees, so `-->` points the way dragging it actually takes the
+// corner: up and out. How far out it has to sit is then not a taste -- a
+// rectangle rotated 45 degrees has an axis-aligned half-extent of
+// (w + h) / 2 / sqrt(2), and anything less than that overlaps the surface again.
+const GRIP_REACH = (GRIP_W / 2 + GRIP_H / 2) / Math.SQRT2 + 1
+const PAD = 80
 
-// The grab's face, drawn once and shared by every sign.
+// The grab's face: the text `-->`, and nothing else.
 //
-// It was a boxed cyan card straddling the corner, and it read as a second window
-// frame floating beside the first -- reported as looking weird, which it did:
-// half of it hung outside the window it belongs to, so it looked like a separate
-// object rather than a part of one.
+// It was a boxed cyan card, then a panel with a diagonal grip, and both were the
+// same mistake in different clothes -- a picture, hung next to a window, which
+// is a thing that draws pictures. Asked for plainly: just show `-->`. It reads
+// as "pull this way", it is the same monospace as every other word in the shell,
+// and there is no panel to be mistaken for a second frame.
 //
-// Now it sits WHOLLY INSIDE the corner, like every resize gripper anywhere else,
-// and it is just the grip: three diagonals pointing the way the corner travels,
-// on a panel dark enough to read over any window content. No border, because the
-// window already has one right beside it and two frames a few pixels apart is
-// what made it look wrong.
+// The only decoration is a shadow, because the glyphs have to survive being over
+// the road, a neighbouring sign, or nothing at all.
 let grabTex = null
 function grabTexture() {
   if (grabTex) return grabTex
   const c = document.createElement('canvas')
-  c.width = c.height = 64
+  c.width = 128
+  c.height = 64
   const g = c.getContext('2d')
-  g.clearRect(0, 0, 64, 64)
-  g.fillStyle = 'rgba(3,4,10,0.66)'
-  g.beginPath()
-  g.roundRect ? g.roundRect(0, 0, 64, 64, 10) : g.rect(0, 0, 64, 64)
-  g.fill()
-  g.strokeStyle = '#2de2e6'
-  g.lineWidth = 5
-  g.lineCap = 'round'
-  // Bottom-left to top-right: the direction dragging this corner makes it grow.
-  for (const o of [14, 26, 38]) {
-    g.beginPath()
-    g.moveTo(o, 52)
-    g.lineTo(52, o)
-    g.stroke()
-  }
+  g.clearRect(0, 0, 128, 64)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  // Sized to FILL the quad. At 46px the glyphs sat in a wide transparent margin,
+  // which put the visible arrow much further from the corner than the mesh
+  // actually is and made it read as floating loose rather than attached.
+  g.font = 'bold 58px ui-monospace, monospace'
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 10
+  g.fillStyle = '#' + ACC.toString(16).padStart(6, '0')
+  // Twice, so the shadow is dark enough to read against a lit sign.
+  g.fillText('-->', 64, 35)
+  g.fillText('-->', 64, 35)
   grabTex = new THREE.CanvasTexture(c)
   grabTex.colorSpace = THREE.SRGBColorSpace
   return grabTex
@@ -225,32 +230,39 @@ function makeSign(view, milepost, district, side, lane) {
   // be a fleck on a distant sign that does nothing, and every pointer path here
   // has to be able to say what it hit.
   const handle = new THREE.Mesh(
-    new THREE.PlaneGeometry(HANDLE, HANDLE),
+    new THREE.PlaneGeometry(GRIP_W, GRIP_H),
     new THREE.MeshBasicMaterial({ map: grabTexture(), transparent: true, toneMapped: false }),
   )
-  // Wholly inside the corner, not straddling it.
-  handle.position.set(sw / 2 - HANDLE / 2 - 5, sh / 2 - HANDLE / 2 - 5, 3)
+  // WHOLLY OUTSIDE THE SURFACE. Its inner corner meets the surface's outer
+  // corner exactly, so it sits on the frame's corner and extends away from the
+  // window: it covers no client pixel at all.
+  //
+  // Inside the corner is where a gripper looks right and it is the wrong place
+  // here, because the thing underneath is somebody else's application. A shell
+  // that draws its own controls over a client's interface has decided its
+  // chrome matters more than the program, and it does not. Reported.
+  handle.rotation.z = Math.PI / 4
+  handle.position.set(sw / 2 + GRIP_REACH, sh / 2 + GRIP_REACH, 3)
   handle.userData.resizeHandle = true
   handle.visible = false
   mesh.add(handle)
 
-  // THE HIT AREA IS BIGGER THAN THE GRIP, and centred ON the corner rather than
-  // inside it, so it reaches out past the window's edge.
-  //
-  // The grip belongs inside the corner because that is where a gripper looks
-  // right; the pointer does not care where it looks right, and the corner of a
-  // window is exactly where a hand aims from OUTSIDE it. Reported as the
-  // indicator not showing when hovering just outside the corner -- which was
-  // true, and would have been true of any target drawn only within the window.
+  // THE HIT AREA IS BIGGER THAN THE GRIP and sits beyond the corner, because
+  // that is where a hand aims when reaching for the edge of a window from
+  // outside it -- reported as the indicator not showing when hovering there.
   //
   // An invisible MATERIAL rather than an invisible object: three skips
   // material.visible === false when drawing and still raycasts the mesh, which
   // is exactly the pair of properties this needs.
   const grabPad = new THREE.Mesh(
-    new THREE.PlaneGeometry(HANDLE * 2.3, HANDLE * 2.3),
+    new THREE.PlaneGeometry(PAD, PAD),
     new THREE.MeshBasicMaterial({ visible: false }),
   )
-  grabPad.position.set(sw / 2, sh / 2, 3)
+  // The pad is bigger than the grip and reaches FURTHER OUT, never further in:
+  // its inner edge is the surface's edge. An invisible target over the client
+  // area obstructs nothing you can see and still eats the click that was meant
+  // for the application, which is the same fault wearing a disguise.
+  grabPad.position.set(sw / 2 + PAD / 2, sh / 2 + PAD / 2, 3)
   grabPad.userData.resizeHandle = true
   mesh.add(grabPad)
 

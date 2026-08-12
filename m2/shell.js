@@ -875,6 +875,51 @@ window.__resize = (dx = 120, dy = 90) => {
 // for this and it is not a read: it starts and ends a real drag, which sends a
 // no-op configure and leaves the pacing believing the client has just caught up.
 // A probe with side effects measures the probe.
+// DOES THE GRAB COVER ANY OF THE APPLICATION? Projects the surface quad and the
+// two grab meshes and intersects their screen boxes, so "it does not obstruct
+// the window" is a measurement rather than a claim. The hit pad is included
+// because an invisible target over the client area still eats the click.
+window.__grabClear = () => {
+  const s = [...signs.values()].find(
+    (x) => x.mesh && x.district === state.flatDistrict && x.milepost === state.flatMilepost,
+  )
+  if (!s) return { found: false }
+  const W = renderer.domElement.width
+  const H = renderer.domElement.height
+  const boxOf = (obj, w, h) => {
+    const pts = [
+      [-0.5, 0.5],
+      [0.5, 0.5],
+      [0.5, -0.5],
+      [-0.5, -0.5],
+    ].map(([u, v]) => {
+      const p = obj.localToWorld(new THREE.Vector3(w * u, h * v, 0)).project(camera)
+      return [((p.x + 1) / 2) * W, ((1 - p.y) / 2) * H]
+    })
+    const xs = pts.map((p) => p[0])
+    const ys = pts.map((p) => p[1])
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map((n) => +n.toFixed(1))
+  }
+  const overlap = (a, b) => {
+    const w = Math.min(a[2], b[2]) - Math.max(a[0], b[0])
+    const h = Math.min(a[3], b[3]) - Math.max(a[1], b[1])
+    return w > 0.5 && h > 0.5 ? [+w.toFixed(1), +h.toFixed(1)] : null
+  }
+  const g = s.mesh.geometry.parameters
+  const surface = boxOf(s.mesh, g.width, g.height)
+  const grip = s.handle ? boxOf(s.handle, s.handle.geometry.parameters.width, s.handle.geometry.parameters.height) : null
+  const pad = s.grabPad ? boxOf(s.grabPad, s.grabPad.geometry.parameters.width, s.grabPad.geometry.parameters.height) : null
+  return {
+    found: true,
+    surface,
+    grip,
+    pad,
+    gripOverlapsSurface: grip ? overlap(surface, grip) : null,
+    padOverlapsSurface: pad ? overlap(surface, pad) : null,
+    clear: !(grip && overlap(surface, grip)) && !(pad && overlap(surface, pad)),
+  }
+}
+
 window.__grabPoint = () => {
   const p = handlePoint()
   return p ? [Math.round(p.x), Math.round(p.y)] : null
