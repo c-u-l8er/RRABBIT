@@ -14,7 +14,7 @@
 // in this direction only.
 
 import * as THREE from 'three'
-import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, rampBlocksLane } from './world.js'
+import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, slotFree, nextFreeSlot, nearestFreeSlot, SLOT_FIRST, SLOT_GAP } from './world.js'
 import * as ws from './workspaces.js'
 import { release, rekeyZoom } from './travel.js'
 
@@ -319,7 +319,7 @@ function adoptSurfaceTexture(rs, view) {
   return { rt, tex }
 }
 
-function makeSign(view, milepost, district, side, lane) {
+function makeSign(view, milepost, district, side, dash) {
   const rs = view.renderStates[SCENE_ID]
   if (!rs || !rs.texture || !rs.texture.texture) return null
   const { width, height } = rs.size
@@ -371,7 +371,7 @@ function makeSign(view, milepost, district, side, lane) {
   // opened with, because "open one on the left" is a thing you can ask for from
   // the enter gantry -- and, since windows can be moved, whatever it was last
   // put on. Parity is still the default when nobody said.
-  positionSign({ mesh, frame, post }, district, side, lane)
+  positionSign({ mesh, frame, post }, district, side, dash)
 
   // THE RESIZE GRAB, at the TOP-right corner of the surface.
   //
@@ -576,10 +576,10 @@ function makeSign(view, milepost, district, side, lane) {
 // surface's height, once, in makeSign. Moving a window along the road does not
 // change how tall it is.
 const SIGN_TURN = 0.42
-function positionSign(parts, district, side, lane) {
+function positionSign(parts, district, side, dash) {
   const { mesh, frame, post } = parts
   mesh.position.x = ws.laneX(district) + side * SIGN_OFFSET
-  mesh.position.z = windowZ(lane, side)
+  mesh.position.z = windowZ(dash)
   mesh.rotation.y = -side * SIGN_TURN
   if (frame) {
     frame.position.copy(mesh.position)
@@ -641,11 +641,15 @@ function syncPlacement() {
     if (!s.mesh) continue
     const here = ws.inActive(s.district)
     for (const part of [s.mesh, s.frame, s.post]) if (part) part.visible = here
-    if (!here) continue
+    // A window mid-repack has been taken off the grid and has nowhere to be yet.
+    // It cannot be seen either -- a frame never runs inside a repack, which is
+    // synchronous -- but placing one would resolve its z to NaN and take the mesh
+    // out of the scene for good.
+    if (!here || !Number.isInteger(s.dash)) continue
     const x = ws.laneX(s.district) + s.side * SIGN_OFFSET
-    const z = windowZ(s.lane, s.side)
+    const z = windowZ(s.dash)
     if (s.mesh.position.x === x && s.mesh.position.z === z) continue
-    positionSign(s, s.district, s.side, s.lane)
+    positionSign(s, s.district, s.side, s.dash)
   }
 }
 
@@ -666,102 +670,99 @@ const signAt = (district, milepost) =>
 const rowOf = (district, side) =>
   [...signs.values()]
     .filter((s) => s.mesh && s.district === district && s.side === side)
-    .sort((a, b) => a.lane - b.lane)
+    .sort((a, b) => a.dash - b.dash)
 
-// The lowest ordinal on a side that nothing live is standing on.
+// THE FIRST DASH ON A SIDE WITH ROOM FOR A WINDOW.
 //
-// FILLING HOLES RATHER THAN APPENDING. A lane ordinal is a place, not an
-// address -- unlike a milepost there is no harm at all in a later window
-// standing where an earlier one did -- and appending past every gap is what
-// turns a road that has been worked on into a mile of empty tarmac with the
-// windows at the far end of it.
+// FILLING HOLES RATHER THAN APPENDING. A dash is a place, not an address -- unlike
+// a milepost there is no harm at all in a later window standing where an earlier
+// one did -- and appending past every gap is what turns a road that has been worked
+// on into a mile of empty tarmac with the windows at the far end of it.
 //
-// AND A RAMP HOLDS A SLOT TOO. An off-ramp leaves the tarmac on the right and
-// sweeps out through exactly the stretch of verge a right-hand window stands in
-// (world.js rampBlocksLane) -- so a window put there is built into the side of an
-// exit, and the exit's mouth and gore, which are the only parts of it you can read
-// from the road, end up behind a picture. The right-hand ordinal it wants is
-// treated as occupied, by the same rule and in the same set as an occupied one.
-function firstFreeLane(district, side, self) {
-  const taken = new Set()
-  for (const s of signs.values())
-    if (s !== self && s.mesh && s.district === district && s.side === side) taken.add(s.lane)
-  let l = 0
-  while (taken.has(l) || rampBlocksLane(district, side, l)) l++
-  ws.claimLane(district, side, l)
-  return l
+// "Room" is world.js slotFree, which is the same question a ramp asks, against the
+// same occupants. That is the whole of what replaced firstFreeLane, takeClearLane,
+// freeLaneNear and rampBlocksLane: four functions that each knew a bit of how the
+// two grids collided, replaced by one grid where they cannot.
+const firstFreeSlot = (district, side, self) => nextFreeSlot(district, side, SLOT_FIRST, 'window', self)
+
+// LAY A WHOLE SIDE OUT AGAIN, in the order given, from the head of the road.
+//
+// Every member is taken off the grid FIRST -- `dash = null`, which slotFree reads as
+// "not standing anywhere yet" -- because a repack in place has each window blocking
+// the slot the next one wants, and the row would walk itself down the road one pass
+// at a time. It steps by SLOT_GAP and asks for the next free dash rather than
+// assuming one, so a ramp part-way down a road is stepped over instead of built on.
+function repack(district, side, row, dryRun = false) {
+  // WHERE THEY WERE, taken before they are taken off the grid. Comparing against
+  // `s.dash` after the clear compares against the null that was just written, so
+  // every window counts as moved and "moved: 4" is reported for a road that did not
+  // change -- which is the one number this function exists to be believed about.
+  const was = new Map(row.map((s) => [s, s.dash]))
+  for (const s of row) s.dash = null
+  let want = SLOT_FIRST
+  let moved = 0
+  for (const s of row) {
+    const at = nextFreeSlot(district, side, want, 'window', s)
+    if (at === null) break
+    if (was.get(s) !== at) moved++
+    s.dash = at
+    want = at + SLOT_GAP
+  }
+  // A DRY RUN PUTS EVERYTHING BACK. The map has to know whether the tidy would do
+  // anything before it offers the button, and the only honest answer is the one this
+  // function would give -- a road with a ramp part-way down it has permanent holes
+  // that no tidy can close, so "are the dashes a uniform run?" says yes-there-are-gaps
+  // forever and the button becomes one you press to find out.
+  if (dryRun) for (const s of row) s.dash = was.get(s)
+  return moved
 }
 
-// The next ordinal on a side for a window that has just APPEARED, which joins the
-// end of the queue rather than filling a hole (see takeLane). A blocked ordinal is
-// consumed rather than stepped over: the counter has to move past it or the next
-// window lands on it, and leaving a hole behind is harmless -- moves fill holes and
-// `tidyRoad` closes them, so removing the ramp gives the slot back.
-function takeClearLane(district, side) {
-  let lane = ws.takeLane(district, side)
-  for (let guard = 0; guard < 8 && rampBlocksLane(district, side, lane); guard++) {
-    lane = ws.takeLane(district, side)
-  }
-  return lane
+// Would closing this road up move anything? Runs the real packing and undoes it,
+// rather than reimplementing the rule somewhere it could drift from.
+export function tidyPreview(district) {
+  if (!ws.has(district)) return 0
+  let moved = 0
+  for (const side of [-1, 1]) moved += repack(district, side, rowOf(district, side), true)
+  return moved
 }
 
 const placement = (s) =>
-  s && { district: s.district, milepost: s.milepost, side: s.side > 0 ? 'right' : 'left', lane: s.lane }
+  s && { district: s.district, milepost: s.milepost, side: s.side > 0 ? 'right' : 'left', dash: s.dash }
 
-// ACROSS THE ROAD, KEEPING ITS ORDINAL. Left lane 3 becomes right lane 3.
+// ACROSS THE ROAD, KEEPING ITS DASH. A window at dash 11 on the left becomes a
+// window at dash 11 on the right, directly opposite where it was.
 //
-// THIS USED TO DRIFT, AND IT WAS A RATCHET. The first version asked "which
-// ordinal on the other side stands nearest where I am now?", worked it out from
-// the z with laneAtZ, and rounded. The two sides are deliberately half a MILE
-// out of step, so that question's answer is ALWAYS exactly x.5 -- and rounding
-// x.5 always goes the same way. Every crossing therefore moved the window half a
-// MILE further from the entrance, and crossing back moved it another half. Sent
-// one across and back four times and it was 2640 units down the road, which is
-// exactly what was reported: they "just kept moving further and further back".
+// THIS USED TO DRIFT, AND IT WAS A RATCHET. The first version asked "which ordinal
+// on the other side stands nearest where I am now?", worked it out from the z, and
+// rounded. The two sides were half a MILE out of step, so that question's answer was
+// ALWAYS exactly x.5 -- and rounding x.5 always goes the same way. Every crossing
+// moved the window half a MILE further from the entrance and crossing back moved it
+// another half. Sent one across and back four times and it was 2640 units down the
+// road, which is exactly what was reported: they "just kept moving further and
+// further back".
 //
-// A near-miss dressed as arithmetic. The rule that cannot do this is the one
-// with no arithmetic in it: your ordinal is yours, the side is what changes.
-// Crossing is then its own inverse -- twice and you are provably where you
-// started -- which is the property a two-state control has to have.
+// The rule that cannot do that is the one with no arithmetic in it: your place is
+// yours, the side is what changes. ONE GRID MAKES IT LITERAL -- the two sides share
+// the dashes now, so "keep your place" is keeping the same integer rather than
+// keeping an ordinal whose meaning differed by side. Crossing is its own inverse by
+// construction.
 //
-// IT MOVES ONE WINDOW. It briefly swapped with whoever held the ordinal on the
-// far side, on the argument that a swap is drift-free and is the same answer
-// ws.setPos gives when two roads want one number. Wrong here, and the question
-// that showed it was wrong is the obvious one: crossing the road is a thing you
-// ask of ONE window, and a control that quietly moves a second one is a control
-// you cannot use without checking what else it did.
-//
-// It is also a rarer collision than it looks. Left 3 and right 3 are half a MILE
-// apart on opposite sides of the tarmac -- they do not collide at all -- so the
-// only conflict is the exact slot being taken, and then it takes the nearest
-// free ordinal on that side instead. That is a bump, not a ratchet: there is no
-// half-step being rounded, so crossing back returns to the ordinal it came from
-// whenever that ordinal is still free.
+// IT MOVES ONE WINDOW. It briefly swapped with whoever held the far slot, on the
+// argument that a swap is drift-free. Wrong, and the question that showed it is the
+// obvious one: crossing the road is a thing you ask of ONE window, and a control
+// that quietly moves a second is one you cannot use without checking what else it
+// did. If the opposite slot is occupied it takes the NEAREST free dash on that side
+// instead -- a bump, not a ratchet, because no half-step is being rounded, so
+// crossing back returns to the dash it came from whenever that dash is still free.
 export function flipWindowSide(district, milepost) {
   const s = signAt(district, milepost)
   if (!s) return null
   const side = -s.side
-  const lane = freeLaneNear(district, side, s.lane, s)
+  const dash = nearestFreeSlot(district, side, s.dash, 'window', s)
+  if (dash === null) return null
   s.side = side
-  s.lane = lane
-  ws.claimLane(district, side, lane)
+  s.dash = dash
   return placement(s)
-}
-
-// The ordinal at or beside `want` that nothing live on that side is standing on.
-// Searching outward keeps a bumped window as near as possible to the place it
-// asked for; `self` is excluded so a window can always keep its own slot.
-function freeLaneNear(district, side, want, self) {
-  const taken = new Set()
-  for (const x of signs.values())
-    if (x !== self && x.mesh && x.district === district && x.side === side) taken.add(x.lane)
-  const l = Math.max(0, want)
-  const free = (n) => !taken.has(n) && !rampBlocksLane(district, side, n)
-  for (let step = 0; step <= 512; step++) {
-    if (free(l + step)) return l + step
-    if (l - step >= 0 && free(l - step)) return l - step
-  }
-  return takeClearLane(district, side)
 }
 
 // ONE PLACE ALONG THE ROAD. delta < 0 is toward the entrance.
@@ -791,13 +792,11 @@ export function nudgeWindowAlong(district, milepost, delta) {
   if (i < 0 || j < 0 || j >= road.length) return null
   const other = road[j]
   const side = s.side
-  const lane = s.lane
+  const dash = s.dash
   s.side = other.side
-  s.lane = other.lane
+  s.dash = other.dash
   other.side = side
-  other.lane = lane
-  ws.claimLane(district, s.side, s.lane)
-  ws.claimLane(district, other.side, other.lane)
+  other.dash = dash
   return placement(s)
 }
 
@@ -826,7 +825,8 @@ export function moveWindowTo(district, milepost, dest) {
   const d = ws.get(dest)
   if (!s || !d || !d.open || dest === district) return null
   const to = ws.takeMilepost(dest)
-  const lane = firstFreeLane(dest, s.side, s)
+  const dash = firstFreeSlot(dest, s.side, s)
+  if (dash === null) return null
   // Both halves of the address change at once, so the zoom is rekeyed from the
   // old pair before either is overwritten.
   rekeyZoom(district, milepost, dest, to)
@@ -836,7 +836,7 @@ export function moveWindowTo(district, milepost, dest) {
   }
   s.district = dest
   s.milepost = to
-  s.lane = lane
+  s.dash = dash
   return placement(s)
 }
 
@@ -866,15 +866,10 @@ export function reorderWindowTo(district, milepost, ontoMilepost) {
   if (at < 0) return null
   row.splice(at, 0, s)
   s.side = side
-  row.forEach((x, i) => (x.lane = i))
-  ws.resetLane(district, side, row.length)
+  repack(district, side, row)
   // The side it LEFT closes up too, or crossing the road leaves a hole behind
   // and the next thing to look at that road sees a gap it did not make.
-  if (from !== side) {
-    const back = rowOf(district, from)
-    back.forEach((x, i) => (x.lane = i))
-    ws.resetLane(district, from, back.length)
-  }
+  if (from !== side) repack(district, from, rowOf(district, from))
   return placement(s)
 }
 
@@ -894,14 +889,7 @@ export function reorderWindowTo(district, milepost, ontoMilepost) {
 export function tidyRoad(district) {
   if (!ws.has(district)) return null
   let moved = 0
-  for (const side of [-1, 1]) {
-    const row = rowOf(district, side)
-    row.forEach((s, i) => {
-      if (s.lane !== i) moved++
-      s.lane = i
-    })
-    ws.resetLane(district, side, row.length)
-  }
+  for (const side of [-1, 1]) moved += repack(district, side, rowOf(district, side))
   return { district, moved, left: rowOf(district, -1).length, right: rowOf(district, 1).length }
 }
 
@@ -1050,7 +1038,7 @@ function adoptPending() {
         // it is what "really flashy and glitchy" was. If the new sign cannot be
         // built yet, the old one keeps standing, which is the correct thing to
         // show: the window has not changed yet.
-        const rebuilt = makeSign(view, existing.milepost, existing.district, existing.side, existing.lane)
+        const rebuilt = makeSign(view, existing.milepost, existing.district, existing.side, existing.dash)
         if (rebuilt) {
           dropSign(k)
           signs.set(k, {
@@ -1058,7 +1046,7 @@ function adoptPending() {
             district: existing.district,
             slot: existing.slot,
             side: existing.side,
-            lane: existing.lane,
+            dash: existing.dash,
             view,
             ...rebuilt,
           })
@@ -1074,23 +1062,31 @@ function adoptPending() {
     const district = existing?.district ?? state.district
     const milepost = existing?.milepost ?? ws.takeMilepost(district)
     const slot = existing?.slot ?? nextSlot++
-    // The side is claimed at ADOPTION, the same moment and for the same reason
-    // the district is: the surface does not exist when the click happens, so
-    // the request has to wait here for it.
-    const side = existing?.side ?? sideQueue.shift() ?? (milepost % 2 === 0 ? 1 : -1)
+    // WHERE it goes is claimed at ADOPTION, the same moment and for the same
+    // reason the district is: the surface does not exist when the click happens,
+    // so the request has to wait here for it. The queue carries a DASH as well as
+    // a side now, because a window can be asked for at a particular marker -- the
+    // same request, on the same grid, that builds a ramp.
+    const want = existing ? null : (sideQueue.shift() ?? null)
+    const side = existing?.side ?? want?.side ?? (milepost % 2 === 0 ? 1 : -1)
     // The place on that side, taken once and never recomputed -- invariant 6
-    // covers this for the same reason it covers the milepost.
-    const lane = existing?.lane ?? takeClearLane(district, side)
+    // covers this for the same reason it covers the milepost. A dash that was
+    // asked for and has since been taken falls back to the first that is free
+    // rather than refusing: the surface is already here, and a window that does
+    // not appear because its slot was claimed while it was starting is a window
+    // that reads as a launch that failed.
+    const asked = Number.isInteger(want?.dash) && slotFree(district, side, want.dash, 'window')
+    const dash = existing?.dash ?? (asked ? want.dash : firstFreeSlot(district, side, null))
     placeInLedger(view, slot)
-    const built = makeSign(view, milepost, district, side, lane)
+    const built = makeSign(view, milepost, district, side, dash)
     // The view is kept so input can be mapped back into the flat output. It is
     // re-read every frame rather than cached at build time: a view object is
     // replaced when a surface is remapped.
     signs.set(
       k,
       built
-        ? { milepost, district, slot, side, lane, view, ...built }
-        : { milepost, district, slot, side, lane, view },
+        ? { milepost, district, slot, side, dash, view, ...built }
+        : { milepost, district, slot, side, dash, view },
     )
     if (built) built.mesh.userData.signKey = k
   }

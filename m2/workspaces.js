@@ -73,7 +73,7 @@ const SEED = [
 ]
 const SEED_TENANT = { id: 'main', name: 'main' }
 
-// id -> { id, tenant, name, exits, ramps, open, next, lanes, pos }
+// id -> { id, tenant, name, exits, ramps, open, next, pos }
 const nodes = new Map()
 // id -> { id, name, root, last }
 const tenants = new Map()
@@ -205,10 +205,6 @@ function install(loaded) {
         // restored from disk would start the first window of the session at
         // milepost 7 with nothing at 1..6.
         next: 1,
-        // How many windows stand on each SIDE of this road. The milepost is the
-        // address; these decide position, and they advance independently so that
-        // what the left side does cannot move the right side's next window.
-        lanes: { l: 0, r: 0 },
         // WHICH LANE THIS IS -- the slot the road occupies from left to right
         // WITHIN ITS OWN NETWORK. It used to be derived: a breadth-first walk
         // from the root decided the order and therefore the numbering, which is
@@ -372,7 +368,6 @@ export function addTenant(name) {
     ramps: [],
     open: true,
     next: 1,
-    lanes: { l: 0, r: 0 },
     pos: 1,
   })
   tenants.get(id).root = first
@@ -477,41 +472,19 @@ export function takeMilepost(id) {
   return n.next++
 }
 
-// The next free slot on one side of a road. Paired with takeMilepost: one gives
-// the window its name, this one gives it its place.
-export function takeLane(id, side) {
-  const n = nodes.get(id)
-  if (!n) return 0
-  const k = side > 0 ? 'r' : 'l'
-  return n.lanes[k]++
-}
-
-// Mark an ordinal as spoken for WITHOUT handing out the next one.
+// WHERE A WINDOW STANDS IS NOT KEPT HERE ANY MORE.
 //
-// takeLane always appends, which is right for a window that has just appeared:
-// it joins the end of the queue. A window that MOVES picks its own slot -- the
-// one opposite where it was, or the one it swapped into -- and the counter still
-// has to hear about it, or the next new window on that side is laid down on top
-// of it.
-export function claimLane(id, side, lane) {
-  const n = nodes.get(id)
-  if (!n || !Number.isInteger(lane)) return false
-  const k = side > 0 ? 'r' : 'l'
-  n.lanes[k] = Math.max(n.lanes[k], lane + 1)
-  return true
-}
-
-// Wind the counter BACK. The only caller is tidying a road, which has just
-// closed up every gap on a side and knows exactly how many slots are now in
-// use -- and a counter that only ever went up would keep handing out ordinals
-// past the end of a road that had just been shortened, which is the very thing
-// the tidy was for.
-export function resetLane(id, side, used) {
-  const n = nodes.get(id)
-  if (!n || !Number.isInteger(used) || used < 0) return false
-  n.lanes[side > 0 ? 'r' : 'l'] = used
-  return true
-}
+// There used to be `lanes: {l, r}` -- a counter per side -- with takeLane,
+// claimLane and resetLane to move them. That was the second coordinate system:
+// an ordinal that only meant something once windowZ turned it into a z, and three
+// functions whose whole job was keeping the counter honest against a road that had
+// been rearranged underneath it.
+//
+// A window stands on a DASH now, the same grid a ramp stands on, and which dashes
+// are taken is READ OFF THE SIGNS THEMSELVES (world.js slotFree). A counter and a
+// set of live windows can disagree; the live windows cannot disagree with
+// themselves. The milepost stays here because it is an ADDRESS -- unique, never
+// reissued -- and an address is exactly the thing a counter is right for.
 
 // A workspace joins the ACTIVE network unless told otherwise, because every
 // caller is something you did while standing in one.
@@ -528,7 +501,6 @@ export function add({ id, name, exits = [], open = true, tenant: t = activeTenan
     ramps: [],
     open,
     next: 1,
-    lanes: { l: 0, r: 0 },
     // A new road takes the next lane along IN ITS OWN NETWORK. Never an existing
     // one -- adding a workspace must not renumber the ones already there.
     pos: siblings + 1,

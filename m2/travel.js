@@ -1011,8 +1011,8 @@ function doGantryAction(a) {
     // driving -- so there is no workspace to pass. rrabbit.js reads
     // `state.district` when the surface finally arrives, exactly as it does for
     // a window opened any other way, and sideQueue carries the side.
-    const ok = hooks.spawnWindow ? hooks.spawnWindow(a.side) : false
-    state.lastGantryClick = { kind: 'open', side: a.side, ok }
+    const ok = hooks.spawnWindow ? hooks.spawnWindow(a.side, a.dash ?? null) : false
+    state.lastGantryClick = { kind: 'open', side: a.side, dash: a.dash ?? null, ok }
     return ok
   }
   if (a.kind === 'map') {

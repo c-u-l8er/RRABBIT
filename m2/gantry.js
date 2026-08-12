@@ -331,8 +331,8 @@ function enterRow() {
   // Left and right, because "insert a window on the left" is the thing that was
   // asked for and a launcher with no side would have to invent one.
   row.push(
-    { key: 'open:-1', action: { kind: 'open', side: -1 }, title: '‹ left', sub: 'open window', tone: 'enter' },
-    { key: 'open:1', action: { kind: 'open', side: 1 }, title: 'right ›', sub: 'open window', tone: 'enter' },
+    { key: 'open:-1', action: { kind: 'open', side: -1, dash: null }, title: '‹ left', sub: 'open window', tone: 'enter' },
+    { key: 'open:1', action: { kind: 'open', side: 1, dash: null }, title: 'right ›', sub: 'open window', tone: 'enter' },
   )
   return row
 }

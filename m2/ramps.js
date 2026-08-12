@@ -69,10 +69,8 @@ const LINE_Y = ROAD_Y + 0.6
 //   DECELERATION RUN a short stretch near-parallel to the road before anything
 //                    turns -- this is what makes it a road leaving rather than a
 //                    branch drawn at an angle
-//   DEPARTURE        the curve away, sweeping past x=480 so the board at the end
-//                    stands clear of every window, with an edge line down each
-//                    shoulder -- see "no gore fill" below for the part that was
-//                    tried and removed
+//   DEPARTURE        the curve away, with an edge line down each shoulder -- see
+//                    "no gore fill" below for the part that was tried and removed
 //
 // The deck is a RIBBON sampled along that curve, not a quad: a curve is the whole
 // difference between "a road goes that way" and "something is attached here".
@@ -88,29 +86,30 @@ const RAMP_SEGS = 26
 // THE SIGN STANDS AT THE MOUTH, NOT AT THE FAR END.
 //
 // It was at the ramp's far end, 980 units out and 560 down the road, which put it
-// where you cannot read it -- reported. That position was chosen to clear the window
-// row, and clearing the window row is still necessary; it is just not the board's
-// job. The band that keeps a window off a ramp's mouth (world.js) is what makes room
-// for it, so the sign can stand where a real exit direction sign stands: AT THE
-// GORE, beside the road, facing the traffic that has to decide.
+// where you cannot read it -- reported. It stands where a real exit direction sign
+// stands now: at the gore, beside the road, facing the traffic that has to decide.
 //
-// BOARD_STAND_X = 600 IS DECIDED BY THE WINDOW ROW, NOT BY TASTE. At 300 the sign
-// was where you want it -- close, big, unmissable -- and it drew straight over the
-// window standing 600 units further down the road, because the two were at almost
-// the same x and the nearer one wins. That is perspective, and no reservation band
-// can fix it: a band keeps a window out of a stretch of z, and these two were never
-// in the same stretch of z. Only x separates them. A window sign spans x = 180..480,
-// so the first x at which a 214-wide board cannot overlap one is 480 + 107.
+// BOARD_STAND_X CAME BACK IN TO 300, and the shared grid is what paid for it.
+//
+// It was 300, which is where you want it -- close, big, unmissable -- and it drew
+// straight over a window standing 600 units further down the road, because the two
+// were at almost the same x and the nearer one wins. So it went out to 600, past
+// where any window sign can reach (they span x = 180..480).
+//
+// That was the right fix for two grids and the wrong one for a single grid. A ramp
+// now RESERVES its own stretch of its own side -- one dash in front and four behind,
+// which is the sweep it actually occupies (world.js slotFree) -- so no window can
+// stand where the sign is. The clearance is enforced rather than bought with
+// distance, and the sign can be where it belongs: on the verge beside the tarmac.
 //
 // It stays a little in FRONT of the dash so you read it and then reach the turn --
-// the same argument GATE_GAP makes for the gates -- which also means it sits on the
-// verge just before the gore, where an exit direction sign actually stands.
+// the same argument GATE_GAP makes for the gates.
 // 214/107 is 2.0, which is the canvas's 512/256 -- see the gate board for why a
 // quad whose ratio does not match its canvas draws squashed text.
 const BOARD_W = 214
 const BOARD_H = 107
 const BOARD_Y = 40
-const BOARD_STAND_X = 600
+const BOARD_STAND_X = 300
 const BOARD_STAND_Z = 70
 
 const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
@@ -119,7 +118,9 @@ const COOL_CSS = '#' + COOL.toString(16).padStart(6, '0')
 // workspace id -> { line, pads, count, ramps: Map<at, {deck, board, tex, canvas, key}> }
 const lines = new Map()
 
-const dashHot = { district: null, at: null }
+// Only the ramp's SIGN answers to the pointer now -- the centre line is amber
+// whatever is under it. Kept as an address rather than a mesh because a ramp's board
+// is rebuilt whenever the ramp is moved or flipped.
 const rampHot = { district: null, at: null }
 
 // ------------------------------------------------------------------ the line
@@ -128,37 +129,28 @@ const rampHot = { district: null, at: null }
 // that gets longer is the ordinary case -- so the buffer is the cap (world.js
 // DASH_MAX) and `count` is how much of it is in use.
 const DASH_MAX_INSTANCES = 96
-// Amber is the line. White is what your pointer is on. Cool is a slot that
-// already carries a ramp -- the same colour this shell uses everywhere else for
-// "this goes somewhere else" -- so an occupied marker never reads as a free one.
-const DIM = new THREE.Color(ACC)
-const LIT = new THREE.Color(0xffffff)
-const TAKEN = new THREE.Color(COOL)
-
-// THE EXIT ANNOUNCES ITSELF BEFORE YOU ARE LEVEL WITH IT.
+// THE CENTRE LINE IS AMBER AND NEVER ANYTHING ELSE.
 //
-// A road tells you about an exit in advance -- that is what the advance guide sign
-// is for out there -- and a ramp you can only find by already being beside it is
-// one you discover by accident. So the few dashes leading up to a ramp's marker are
-// blended from amber toward cool, strongest nearest the exit. It costs one lerp per
-// dash and nothing on screen when a road has no ramps.
-const APPROACH = 3
-const APPROACH_COLOURS = Array.from({ length: APPROACH }, (_, i) =>
-  new THREE.Color(ACC).lerp(new THREE.Color(COOL), 0.6 - 0.18 * i),
-)
+// It carried three other colours for a while, each defensible on its own: cool for a
+// dash that holds a ramp, a cool-ward gradient on the run-up so an exit announced
+// itself early, and white under the pointer. Asked to stop -- "keep it yellow
+// always" -- and the ask is right. A centre line is a road marking, and a road
+// marking that changes colour to tell you about the traffic is not a marking any
+// more, it is a display. What the markers hold is the map's job to say, and what the
+// pointer is on is the cursor's.
+//
+// So there is no per-instance colour at all now: one material, one colour, and the
+// InstancedMesh is back to a single uniform. `instanceColor` and the three palettes
+// that fed it are gone rather than always-set-to-amber, because a channel nothing
+// writes is a channel somebody re-enables by accident.
 
 function makeLine(district) {
   const n = DASH_MAX_INSTANCES
   const line = new THREE.InstancedMesh(
     new THREE.PlaneGeometry(LINE_W, DASH_LEN),
-    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    new THREE.MeshBasicMaterial({ color: ACC }),
     n,
   )
-  // setColorAt allocates instanceColor on first use, filled with white -- so the
-  // material's own colour has to be white or every instance would be tinted by it
-  // twice. Seed every slot, including the ones past `count`: an allocated
-  // instanceColor that was never written is what draws a black dash.
-  for (let i = 0; i < n; i++) line.setColorAt(i, DIM)
   line.frustumCulled = false
   line.userData.dashLine = district
   scene.add(line)
@@ -186,36 +178,17 @@ const P = new THREE.Vector3()
 // that both are set together. Both are, below.
 function placeLine(entry, district, x) {
   const want = Math.min(DASH_MAX_INSTANCES, dashCount(district))
-  const ramps = ws.rampsOf(district)
-  const byAt = new Map(ramps.map((r) => [r.at, r]))
   for (let i = 0; i < want; i++) {
     P.set(x, LINE_Y, dashZ(i))
     M.compose(P, Q, ONE)
     entry.line.setMatrixAt(i, M)
     entry.pads.setMatrixAt(i, M)
-    // A hovered ramp lights its own marker as well as its board, because the
-    // marker is the part of a ramp that is on the road you are driving.
-    const hot =
-      (dashHot.district === district && dashHot.at === i) ||
-      (rampHot.district === district && rampHot.at === i)
-    // Nearest ramp AHEAD of this dash, within the run-up. `at - i` because dashes
-    // number away from the head of the road, so a bigger index is further along.
-    let lead = -1
-    for (const r of ramps) {
-      const gap = r.at - i
-      if (gap >= 1 && gap <= APPROACH && (lead < 0 || gap < lead)) lead = gap
-    }
-    entry.line.setColorAt(
-      i,
-      hot ? LIT : byAt.has(i) ? TAKEN : lead > 0 ? APPROACH_COLOURS[lead - 1] : DIM,
-    )
   }
   entry.line.count = want
   entry.pads.count = want
   entry.count = want
   entry.line.instanceMatrix.needsUpdate = true
   entry.pads.instanceMatrix.needsUpdate = true
-  entry.line.instanceColor.needsUpdate = true
 }
 
 // ----------------------------------------------------------------- the board
@@ -379,9 +352,19 @@ function makeRamp(district, r) {
   deck.userData.gantryAction = action
 
   // Edge lines on both shoulders -- the pair of thin strips that tell a deck the
-  // same colour as the road apart from the road. Pale rather than white: an edge
-  // line brighter than the centre line would make the ramp shout louder than the
-  // road it leaves.
+  // same colour as the road apart from the road.
+  //
+  // THEY WERE THE WHITE, and it took measuring the materials to see it. The deck was
+  // reported twice as "not blending in with the road", and both times the suspect
+  // was the deck -- whose material turns out to be byte-identical to the road's:
+  // MeshStandardMaterial, 0x11131f, roughness 0.9, normals up. What was bright was
+  // these: 0x8a97ab on a MeshBasicMaterial, which is UNLIT, so it renders at its full
+  // value while the tarmac beside it is a dark colour multiplied by the lights. Two
+  // 5-wide strips seen almost edge-on merge into one band, and that band was the
+  // brightest thing on the road.
+  //
+  // So they are LIT now, in the same family as the tarmac, one step up from it. An
+  // edge line is paint on a road, not a light strip beside one.
   const edges = new THREE.Group()
   for (const e of [-1, 1]) {
     edges.add(
@@ -391,7 +374,7 @@ function makeRamp(district, r) {
           (t) => (e * (RAMP_W_NEAR + (RAMP_W_FAR - RAMP_W_NEAR) * t)) / 2,
           side,
         ),
-        new THREE.MeshBasicMaterial({ color: 0x8a97ab, side: THREE.DoubleSide }),
+        new THREE.MeshStandardMaterial({ color: 0x22263a, roughness: 0.95, side: THREE.DoubleSide }),
       ),
     )
   }
@@ -442,8 +425,14 @@ function placeRamp(part, district, x, r) {
     drawBoard(part.canvas, { ...r, from: district })
     part.tex.needsUpdate = true
   }
+  // THE SIGN LIGHTS, THE ROAD DOES NOT.
+  //
+  // Hovering a ramp used to light two things at once: its sign, and its marker on
+  // the centre line. Asked for the sign only -- and it is the right split, because
+  // the marker is a control in its own right (press it to edit the ramp) rather than
+  // a readout of the ramp, so it should answer to the pointer being on IT.
   const hot = rampHot.district === district && rampHot.at === r.at
-  part.board.material.color.setHex(hot ? 0xffffff : 0xbfbfbf)
+  part.board.material.color.setHex(hot ? 0xffffff : 0xdedede)
   // The action carries the destination, which can be re-pointed from the map
   // without the mesh being rebuilt.
   part.deck.userData.gantryAction.to = r.to
@@ -576,8 +565,6 @@ export function dashActionOf(hit) {
 }
 
 function clearHover() {
-  dashHot.district = null
-  dashHot.at = null
   rampHot.district = null
   rampHot.at = null
 }
@@ -586,11 +573,11 @@ function clearHover() {
 // addresses rather than as a mesh, because the dashes are instances and there is
 // no mesh to remember.
 export function setRampHover(hit) {
+  // A dash pad answers `dash`, never `ramp` -- the marker is a control of its own --
+  // so pointing at a marker lights nothing, and pointing at the tarmac or the board
+  // lights that ramp's sign.
   const action = hit ? (dashActionOf(hit) ?? hit.object?.userData?.gantryAction ?? null) : null
-  const dash = action?.kind === 'dash' ? action : null
   const ramp = action?.kind === 'ramp' ? action : null
-  dashHot.district = dash?.district ?? null
-  dashHot.at = dash ? dash.at : null
   rampHot.district = ramp?.district ?? null
   rampHot.at = ramp ? ramp.at : null
 }
@@ -606,13 +593,15 @@ export const rampReport = () => {
     for (let i = 0; i < entry.count; i++) {
       entry.line.getMatrixAt(i, m)
       const p = new THREE.Vector3().setFromMatrixPosition(m)
-      const c = new THREE.Color()
-      entry.line.getColorAt(i, c)
-      dashes.push({ at: i, z: Math.round(p.z), x: Math.round(p.x), lit: c.getHexString() })
+      dashes.push({ at: i, z: Math.round(p.z), x: Math.round(p.x) })
     }
     out.roads.push({
       id,
       name: ws.get(id)?.name ?? id,
+      // One colour for the whole line, read off the material -- there is no
+      // per-instance colour any more and a report that pretended otherwise would be
+      // describing a channel that no longer exists.
+      lineColour: entry.line.material.color.getHexString(),
       drawn: entry.count,
       clickable: id === state.district,
       dashes,
@@ -634,6 +623,23 @@ export const rampReport = () => {
           if (!g.boundingBox) g.computeBoundingBox()
           return (g.boundingBox.max.x + g.boundingBox.min.x) / 2 > 0 ? 'right' : 'left'
         })(),
+        // What the deck is actually made of, next to what the road is made of. The
+        // deck reading as a white sheet rather than as tarmac has been reported twice
+        // and guessed at twice; a report that says the material's own numbers is the
+        // only way to stop guessing.
+        deck: {
+          type: part.deck.material.type,
+          color: part.deck.material.color.getHexString(),
+          roughness: part.deck.material.roughness,
+          metalness: part.deck.material.metalness,
+          side: part.deck.material.side,
+          hasNormal: !!part.deck.geometry.attributes.normal,
+          hasUV: !!part.deck.geometry.attributes.uv,
+          firstNormal: part.deck.geometry.attributes.normal
+            ? [0, 1, 2].map((i) => +part.deck.geometry.attributes.normal.array[i].toFixed(3))
+            : null,
+        },
+        edgeColor: part.edges.children[0]?.material.color.getHexString(),
         // The hover, read off the MATERIAL rather than off `rampHot` -- the claim is
         // that the highlight follows the pointer, and a report that re-read the
         // variable the highlight is drawn from would agree with itself whatever the

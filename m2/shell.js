@@ -61,7 +61,6 @@ import {
   ACC,
   COOL,
   BG,
-  MILE,
   SCENE_ID,
   LEDGER_PITCH,
   LEDGER_COLS,
@@ -99,6 +98,7 @@ import {
   moveWindowTo,
   reorderWindowTo,
   tidyRoad,
+  tidyPreview,
   requestCloseWindow,
   renameWindow,
   nameOf,
@@ -298,6 +298,7 @@ function buildWorld(canvas) {
       to: follow(moveWindowTo),
       onto: follow(reorderWindowTo),
       tidy: tidyRoad,
+      preview: tidyPreview,
     },
     close: requestCloseWindow,
     rename: renameWindow,
@@ -844,7 +845,7 @@ window.__m1 = () => {
       // milepost: a window opened from the enter gate stands where it was asked
       // to, and parity only decides when nobody said.
       side: s.side ?? null,
-      lane: s.lane ?? null,
+      dash: s.dash ?? null,
       x: s.mesh ? Math.round(s.mesh.position.x) : null,
       z: s.mesh ? Math.round(s.mesh.position.z) : null,
       built: !!s.mesh,
@@ -890,6 +891,11 @@ window.__ws = () => {
   }
 }
 window.__wsReset = () => ws.reset()
+
+// Closing a road up, on demand. The map already offers it; this is the same call
+// with its answer visible, which is the only way to tell "it did nothing" apart
+// from "it was never asked".
+window.__tidy = (d) => tidyRoad(d ?? state.district)
 
 // THE MULTI-TENANCY PROOF, and the two claims it has to carry are opposites:
 //
@@ -1078,7 +1084,7 @@ window.__map = (openIt) => {
 //   __moveWindow('home', 2, 'build')     onto another road entirely
 window.__moveWindow = (district, milepost, what) => {
   const before = [...signs.values()].find((s) => s.district === district && s.milepost === milepost && s.mesh)
-  const from = before ? { district, milepost, side: before.side, lane: before.lane, x: Math.round(before.mesh.position.x), z: Math.round(before.mesh.position.z) } : null
+  const from = before ? { district, milepost, side: before.side, dash: before.dash, x: Math.round(before.mesh.position.x), z: Math.round(before.mesh.position.z) } : null
   const asked =
     what === 'flip'
       ? flipWindowSide(district, milepost)
@@ -1095,7 +1101,7 @@ window.__moveWindow = (district, milepost, what) => {
           mesh: s ? { x: Math.round(s.mesh.position.x), z: Math.round(s.mesh.position.z), turn: +s.mesh.rotation.y.toFixed(3) } : null,
           // The claim, checked rather than asserted: the mesh is where the
           // record now says it should be, and the frame and post came with it.
-          placed: !!s && Math.round(s.mesh.position.z) === Math.round(windowZ(s.lane, s.side)),
+          placed: !!s && Math.round(s.mesh.position.z) === Math.round(windowZ(s.dash)),
           togetherWithFurniture:
             !!s && !!s.post && Math.round(s.post.position.x) === Math.round(s.mesh.position.x) && Math.round(s.post.position.z) === Math.round(s.mesh.position.z),
         })
@@ -1439,9 +1445,12 @@ async function main() {
     // exactly the same path as one the launch plan opened, and there is no
     // second placement rule that could disagree with the first.
     const publishSpawn = (open) => {
-      hooks.spawnWindow = (side) => {
+      // `dash` is which marker on the centre line the window was asked for at, and
+      // null means "wherever there is room". Both go on the queue together for the
+      // same reason the side always did: the surface does not exist yet.
+      hooks.spawnWindow = (side, dash = null) => {
         try {
-          sideQueue.push(side)
+          sideQueue.push({ side, dash: Number.isInteger(dash) ? dash : null })
           const app = open()
           if (app) {
             app.onError = (e) => {

@@ -21,7 +21,7 @@
 // It owns its own stylesheet and its own element's contents, so the network view
 // is one file you could delete.
 
-import { signs, state, titles, renames, hooks, windowZ, dashZ, dashCount, windowsBlockDash, exitZOf } from './world.js'
+import { signs, state, titles, renames, hooks, windowZ, dashZ, dashCount, exitZOf, slotAt, slotFree, nextFreeSlot, SLOT_FIRST, SLOT_GAP } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
 
@@ -186,21 +186,16 @@ const standingIn = (s) =>
 const windowsOf = (id) =>
   [...signs.values()]
     .filter((s) => s.district === id)
-    .sort((a, b) => windowZ(b.lane ?? 0, b.side ?? -1) - windowZ(a.lane ?? 0, a.side ?? -1))
+    .sort((a, b) => (a.dash ?? 0) - (b.dash ?? 0) || a.side - b.side)
 
 // Is anything standing further down this road than it needs to be? True exactly
 // when some side's ordinals are not 0, 1, 2, ... -- which is the one thing the
 // tidy fixes, so it is the one thing that should offer it.
-function roadHasGaps(id) {
-  for (const side of [-1, 1]) {
-    const lanes = [...signs.values()]
-      .filter((s) => s.mesh && s.district === id && s.side === side)
-      .map((s) => s.lane)
-      .sort((a, b) => a - b)
-    if (lanes.some((l, i) => l !== i)) return true
-  }
-  return false
-}
+// Is anything standing further down this road than it needs to be? Answered by the
+// tidy itself, run and undone (rrabbit tidyPreview) -- because on the shared grid a
+// ramp part-way down a road leaves holes that no tidy can close, and any rule of the
+// form "are the dashes a uniform run?" would answer yes-there-are-gaps forever.
+const roadHasGaps = (id) => go.move?.preview?.(id) > 0
 
 const esc = (s) =>
   String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
@@ -593,7 +588,7 @@ function reachHint(id) {
 function firstFreeDash(id, side = 1) {
   const taken = new Set(ws.rampsOf(id).map((r) => r.at))
   const total = dashCount(id)
-  for (let i = 3; i < total; i++) if (!taken.has(i) && !windowsBlockDash(id, i, side)) return i
+  for (let i = 3; i < total; i++) if (!taken.has(i) && slotFree(id, side, i, 'ramp')) return i
   let i = 3
   while (taken.has(i)) i++
   return i
@@ -605,7 +600,7 @@ function firstFreeDash(id, side = 1) {
 // panel says so instead of offering a dash that is no better.
 function nearestClearDash(id, at, total, side = 1) {
   const taken = new Set(ws.rampsOf(id).map((r) => r.at))
-  const ok = (i) => i >= 0 && i < total && !taken.has(i) && !windowsBlockDash(id, i, side)
+  const ok = (i) => i >= 0 && i < total && !taken.has(i) && slotFree(id, side, i, 'ramp')
   for (let step = 1; step < total; step++) {
     if (ok(at + step)) return at + step
     if (ok(at - step)) return at - step
@@ -685,7 +680,7 @@ function rampPanel() {
   const side = existing ? (existing.side > 0 ? 1 : -1) : (ramp.side ?? 1)
   // A slot that already carries this ramp is not "blocked by a window" -- the ramp
   // is why the window is not there.
-  const blocked = !existing && windowsBlockDash(ramp.district, ramp.at, side)
+  const blocked = !existing && !slotFree(ramp.district, side, ramp.at, 'ramp')
   const clear = blocked ? nearestClearDash(ramp.district, ramp.at, total, side) : null
   const past = dashZ(ramp.at) < exitZOf(ramp.district)
   const net = rampNet && ws.tenant(rampNet) ? rampNet : (existing ? ws.tenantOf(existing.to) : defaultRampNet())
@@ -699,11 +694,13 @@ function rampPanel() {
     `<dl class="facts">` +
     `<dt>road</dt><dd>${esc(road.name)} &middot; ${esc(ws.activeTenantName())}</dd>` +
     `<dt>where</dt><dd>${ramp.at + 1} of ${total} down the road &middot; z ${Math.round(dashZ(ramp.at))}</dd>` +
-    `<dt>carries</dt><dd>${
-      existing
-        ? `a ramp off the <b>${existing.side > 0 ? 'right' : 'left'}</b> to <b>${esc(ws.get(existing.to)?.name ?? existing.to)}</b> in ${esc(ws.tenant(ws.tenantOf(existing.to))?.name ?? '?')}`
-        : 'nothing yet'
-    }</dd>` +
+    // WHAT IS ON THIS MARKER, both sides at once. The dash is one thing on the
+    // centre line and each side of the road is a separate place, so a page about a
+    // dash has to answer for both -- otherwise "nothing here" means "nothing on the
+    // side I happen to be asking about", which is how you build a window into the
+    // side of a ramp.
+    `<dt>left</dt><dd>${sideSummary(ramp.district, -1, ramp.at)}</dd>` +
+    `<dt>right</dt><dd>${sideSummary(ramp.district, 1, ramp.at)}</dd>` +
     '</dl>' +
     // THE DASH BOX IS THE RAMP'S ADDRESS, so setting it MOVES THE RAMP.
     //
@@ -768,9 +765,60 @@ function rampPanel() {
       ? `<button class="goto take" data-takeramp="${esc(existing.to)}">take it &mdash; drive to ${esc(ws.get(existing.to)?.name ?? existing.to)}</button>` +
         `<button class="danger" data-cutramp="${esc(ramp.district)}|${ramp.at}">remove this ramp</button>`
       : '') +
-    '<p class="note">A ramp peels off the right of the road at its dash and carries a board naming the network it lands in. Clicking that board out on the road drives you there.</p>' +
+    '<p class="note">A ramp peels off the road at its dash and carries a board naming the network it lands in. Clicking that board out on the road drives you there.</p>' +
+
+    // ---- the other thing a marker can hold -------------------------------
+    //
+    // A WINDOW AND A RAMP ARE PLACED THE SAME WAY NOW, so the page that places one
+    // places the other. This is the whole point of putting windows on the dash grid:
+    // before, "open a window" was a button on a gate that put it wherever the counter
+    // had got to, and "build a ramp" was a dash you pointed at. Two ways of saying
+    // where, for two things standing on one road.
+    '<h3>a window here</h3>' +
+    // ONLY ON THE ROAD YOU ARE STANDING ON, and the button is withheld rather than
+    // made to fail. `spawnWindow` puts a window on `state.district` -- that is where
+    // the compositor is pointed and there is deliberately no second placement rule --
+    // so offering it from a page about another road asks about dash 14 over there and
+    // opens a window at dash 14 over HERE. Measured exactly that: the page said
+    // `build`, the window arrived on `home`.
+    (ramp.district !== state.district
+      ? `<p class="note">This is another road. A window opens onto the one you are standing on, so drive to <b>${esc(road.name)}</b> first &mdash; the button above will do it.</p>`
+      : [-1, 1]
+      .map((sd) => {
+        const dash = ramp.at
+        const here = slotAt(ramp.district, sd, dash)
+        const free = slotFree(ramp.district, sd, dash, 'window')
+        const name = sd < 0 ? '&lsaquo; left' : 'right &rsaquo;'
+        if (here?.kind === 'window') {
+          return (
+            `<p class="note">${name}: <b>window ${here.milepost}</b> stands here. ` +
+            `<button class="mini" data-win="${esc(ramp.district)}|${here.milepost}">open its page</button></p>`
+          )
+        }
+        if (!free) {
+          return dash < SLOT_FIRST
+            ? `<p class="note">${name}: dash ${SLOT_FIRST} is the first a window may stand on &mdash; the road keeps a clear run past the entrance.</p>`
+            : `<p class="note">${name}: no room &mdash; something is standing within ${SLOT_GAP} dashes, or a ramp sweeps through here.</p>`
+        }
+        return `<button class="goto open" data-openwin="${esc(ramp.district)}|${ramp.at}|${sd}">open a window on the ${sd < 0 ? 'left' : 'right'}</button>`
+      })
+          .join('')) +
     '</aside>'
   )
+}
+
+// One line saying what occupies a dash on one side, for the page's facts list.
+function sideSummary(district, side, dash) {
+  const here = slotAt(district, side, dash)
+  if (here?.kind === 'ramp') {
+    const to = ws.get(here.to)
+    return `a ramp to <b>${esc(to?.name ?? here.to)}</b> in ${esc(ws.tenant(ws.tenantOf(here.to))?.name ?? '?')}`
+  }
+  if (here?.kind === 'window') return `<b>window ${here.milepost}</b>`
+  if (slotFree(district, side, dash, 'window')) return 'free'
+  // Two different refusals, and telling them apart is the difference between "move
+  // something" and "you cannot put a window this close to the gate at all".
+  return dash < SLOT_FIRST ? 'too near the entrance for a window' : 'crowded'
 }
 
 // The network the picker opens on: the first one that is NOT the one you are in,
@@ -929,7 +977,7 @@ function sig() {
     // and a control whose own display does not react is a control you press
     // twice.
     windowsOf(selected)
-      .map((s) => `${s.milepost}${s.side > 0 ? 'r' : 'l'}${s.lane}`)
+      .map((s) => `${s.milepost}${s.side > 0 ? 'r' : 'l'}${s.dash}`)
       .join(','),
     // The bar is drawn from the tracks, so it goes stale unless the signature
     // can see them change -- and they change from the KEYBOARD, which the map
@@ -1076,6 +1124,9 @@ const CSS = `
 #map .exits.ramps .net { color: #2de2e6; font-weight: 700; }
 #map .exits .mini.shut, #map .nets-list .mini.shut { color: #ff6b6b; }
 #map .detail .goto.take { background: #0b4a6b; }
+/* Opening a window is not travelling, so it is not the green "go" -- it is the
+   blue the enter gate already uses for the two controls that do exactly this. */
+#map .detail .goto.open { background: #12386e; margin-top: 6px; }
 #map .node.shut rect { stroke: #4d5a72; stroke-dasharray: 5 4; }
 #map .node text { text-anchor: middle; pointer-events: none; font: 14px ui-monospace, monospace; fill: #f3ead4; }
 #map .node .nm { font-weight: 700; font-size: 16px; }
@@ -1339,6 +1390,18 @@ function install() {
       if (ws.rampAt(district, Number(at))) ws.setRampSide(district, Number(at), Number(s))
       else if (ramp) ramp = { ...ramp, side: Number(s) }
       return render(true)
+    }
+    const openwin = ev.target.closest('[data-openwin]')
+    if (openwin) {
+      const [district, at, sd] = openwin.dataset.openwin.split('|')
+      // OUT OF THE MAP FIRST. A window opens onto the road you are standing on --
+      // that is where the compositor puts it and there is no second placement rule --
+      // so this leaves the map the way "drive to it" does, and the window appears in
+      // front of you rather than behind a panel.
+      closeMap()
+      state.lastOpenAt = { district, dash: Number(at), side: Number(sd) }
+      hooks.spawnWindow?.(Number(sd), Number(at))
+      return
     }
     const drivedash = ev.target.closest('[data-drivedash]')
     if (drivedash) {
@@ -1867,7 +1930,7 @@ export const mapReport = () => ({
     windows: windowsOf(n.id).map((s) => ({
       milepost: s.milepost,
       side: s.side > 0 ? 'right' : 'left',
-      lane: s.lane,
+      dash: s.dash,
       z: s.mesh ? Math.round(s.mesh.position.z) : null,
       x: s.mesh ? Math.round(s.mesh.position.x) : null,
     })),

@@ -22,39 +22,27 @@ export const ACC = 0xf2c14e
 export const COOL = 0x2de2e6
 export const BG = 0x03040a
 
-// Spacing between two windows ON THE SAME SIDE of the road. RAVIO measured its
-// way to S=300 for a change feed of 15-25 rows/hour against a road passing 1800
-// signs/hour. Windows invert that problem -- there are 5-30 of them, not
-// thousands -- so this is NOT RAVIO's S and must not be assumed to transfer
-// (spec §7).
+// MILE IS GONE, AND SO IS THE SECOND COORDINATE SYSTEM IT DEFINED.
 //
-// IT WAS 260, AND IT MEANT SOMETHING ELSE. It used to be the gap between
-// consecutive MILEPOSTS, with sides forced to alternate -- so same-side
-// neighbours were really 520 apart and 260 was never the distance between two
-// signs you could see at once. Letting the enter gate choose a side broke that
-// silently: ask for the left three times and you get three 300-wide signs 260
-// apart, each one standing in front of the next. Reported as new windows being
-// too close to see the full contents of while scrolling by.
+// A window used to stand at `ENTER_Z - GATE_GAP - ordinal*MILE - (right ? MILE/2 :
+// 0)`: its own grid, tuned by eye three times (460, 560, 660), with the two sides
+// deliberately half a MILE out of step. A ramp stands on a DASH. Two grids on one
+// road, and everything that had to stop them colliding -- the reservation bands,
+// windowsBlockDash, rampBlocksLane, the "at most one window slot" arithmetic --
+// existed only to translate between them.
 //
-// So MILE now means what it says -- the distance between same-side neighbours --
-// and the sides are spaced independently of each other (windowZ below).
+// So there is one grid: THE DASHES. A window occupies a dash on a side exactly the
+// way a ramp does, both are placed and moved by dash number, and a conflict is now
+// two footprints overlapping rather than two formulas being compared. The reason
+// this is worth the churn is not tidiness -- it is that a dash is a THING YOU CAN
+// POINT AT, so "put a window here" and "put an exit here" become the same gesture
+// on the same marker.
 //
-// 460 was the first honest value and it was still tight: a 300-wide sign turned
-// 24 degrees toward the road covers 122 units of z on its own, so consecutive
-// signs stood about two sign-widths apart and the nearer one still clipped the
-// edge of the next. 560, then 660, both asked for.
-//
-// `?mile=N` overrides it, because this has now been tuned by eye three times and
-// the loop for that should not run through a rebuild. It only affects where
-// windows adopted AFTER the page loads are placed -- placement is an address and
-// is never recomputed (invariant 6) -- so it is a reload knob, which is what a
-// layout constant should be.
-const MILE_DEFAULT = 660
-export const MILE = (() => {
-  const n = Number(new URLSearchParams(location.search).get('mile'))
-  return Number.isFinite(n) && n >= 200 && n <= 3000 ? n : MILE_DEFAULT
-})()
-export const SCENE_ID = 'road'
+// What it costs, stated plainly: the half-MILE stagger is gone, so a left and a
+// right window on the same dash now stand directly opposite each other. That was a
+// real property -- it is what made a road with windows down both sides read as
+// dense rather than as two files -- and it is recovered by CHOOSING dashes rather
+// than by arithmetic nobody can see.
 
 // ---- the shape of a road --------------------------------------------------
 //
@@ -79,34 +67,14 @@ export const SCENE_ID = 'road'
 // arriving somewhere and short enough not to be a chore.
 export const ENTER_Z = -180
 export const GATE_GAP = 900
+export const SCENE_ID = 'road'
 
-// Where a window stands, from its ordinal ON ITS OWN SIDE of the road.
+// Where a window stands: on its dash, like everything else on this road.
 //
-// NOT from its milepost. The milepost is the window's ADDRESS -- unique on the
-// road, never reissued, the thing input and the flatten resolve through -- and
-// tying position to it made the two sides share one sequence, so what the left
-// side did decided where the right side's next window went. They are separate
-// files of traffic and they are spaced separately.
-//
-// The half-MILE offset on the right is what keeps the classic alternating look
-// when windows do alternate: the left side lands on the MILEs and the right side
-// halfway between them, which is exactly the old stagger -- and it now survives
-// three windows in a row on one side instead of collapsing. Deliberately written
-// in terms of MILE rather than with the numbers in it, because the numbers have
-// already moved twice.
-export const windowZ = (laneIndex, side) =>
-  ENTER_Z - GATE_GAP - laneIndex * MILE - (side > 0 ? MILE / 2 : 0)
-
-// THERE IS DELIBERATELY NO INVERSE OF windowZ.
-//
-// One existed for a day. Crossing the road asked "which ordinal on the other
-// side stands nearest the z I am at now?", and because the two sides are half a
-// MILE out of step the answer is always exactly x.5 -- so the rounding decided
-// it, always the same way, and every crossing walked the window half a MILE
-// further down the road. See flipWindowSide in rrabbit.js for what replaced it:
-// the ordinal is kept and only the side changes, which needs no arithmetic and
-// is its own inverse. If a z ever has to be turned back into a lane again, that
-// is the trap it is walking into.
+// It keeps a function of its own rather than every caller reaching for `dashZ`,
+// because "where does a window stand" is a question about the road's shape and the
+// answer has been rewritten twice already.
+export const windowZ = (dash) => dashZ(dash)
 
 // ---- the centre line ------------------------------------------------------
 //
@@ -140,10 +108,27 @@ export const dashNear = (z) => Math.max(0, Math.round((DASH_0_Z - z) / DASH_PITC
 // An empty road still has an exit gate: a workspace with nothing in it is still
 // somewhere you can leave.
 export function lastWindowZ(district) {
-  let z = windowZ(0, -1)
+  let z = windowZ(SLOT_FIRST)
   for (const s of signs.values()) if (s.mesh && s.district === district) z = Math.min(z, s.mesh.position.z)
   return z
 }
+
+// EVERY WINDOW ON A ROAD, in the order you drive past them.
+//
+// Both sides interleaved, because that is the order the road presents them in --
+// the sides are separate for SPACING and were never separate for "where am I in
+// the queue". Out here rather than in either personality because all three callers
+// need the same answer and a second copy of the sort is a second copy that can
+// disagree: RRABBIT moves windows along it, Travel steps between them with the
+// (prev) / (next) controls, and the map lists them in it.
+//
+// It sorts on the DASH now rather than on a z computed from an ordinal and a side.
+// Same order, one less translation -- and two windows facing each other across the
+// road share a dash, so the tie is broken by side to keep the order total.
+export const roadOrder = (district) =>
+  [...signs.values()]
+    .filter((s) => s.mesh && s.district === district)
+    .sort((a, b) => a.dash - b.dash || a.side - b.side)
 
 // ---- the shape of a ramp --------------------------------------------------
 //
@@ -173,60 +158,6 @@ export function lastRampZ(district) {
   return z
 }
 
-// WHERE A RAMP CROSSES THE WINDOW ROW, in z.
-//
-// The ramp leaves the tarmac at its dash and sweeps out to RAMP_OUT. Somewhere in
-// between it passes through x = 180..480, which is exactly where a right-hand
-// window stands -- and a window sign turned 24 degrees to the road covers about
-// 122 units of z on its own. So the two want the same stretch of verge, and the
-// one that was there first has to win.
-//
-// The band runs from a little IN FRONT of the dash -- where the ramp's own sign
-// stands, beside the road at the mouth -- back through the crossing, plus a window
-// sign's own depth. It grew forward when the sign moved from the far end of the ramp
-// to the mouth: a board at x=300 is inside where a window stands, and the whole
-// point of the sign being there is that you can read it.
-//
-// It is deliberately NARROWER THAN A MILE, so a ramp costs at most one window slot
-// on its side. A wider band would be tidier to draw and would quietly evict two
-// windows for one exit.
-const RAMP_BAND_FRONT = 130
-const RAMP_BAND_BACK = 520
-
-export function rampBandsOf(district) {
-  return rampsOf(district).map((r) => {
-    const z0 = dashZ(r.at)
-    return { at: r.at, side: r.side > 0 ? 1 : -1, from: z0 - RAMP_BAND_BACK, to: z0 + RAMP_BAND_FRONT }
-  })
-}
-
-// Would a window standing at this ordinal be in a ramp's way?
-//
-// A RAMP ONLY RESERVES ITS OWN SIDE. Ramps can leave either way now, so the side
-// is no longer a constant of the feature -- and a ramp going left must not evict a
-// window on the right, which is 660 units away across the tarmac and cannot be in
-// the way of anything.
-export function rampBlocksLane(district, side, laneIndex) {
-  const s = side > 0 ? 1 : -1
-  const z = windowZ(laneIndex, s)
-  return rampBandsOf(district).some((b) => b.side === s && z >= b.from && z <= b.to)
-}
-
-// And the same question from the other end: is this dash clear of the windows
-// already standing there, on the side the ramp would leave by? Asked by the ramp
-// planner, so it can offer a slot that will not be built into the side of a window.
-export function windowsBlockDash(district, at, side = 1) {
-  const s = side > 0 ? 1 : -1
-  const z0 = dashZ(at)
-  for (const sign of signs.values()) {
-    if (!sign.mesh || sign.district !== district) continue
-    if ((sign.side > 0 ? 1 : -1) !== s) continue
-    const z = windowZ(sign.lane, sign.side)
-    if (z >= z0 - RAMP_BAND_BACK && z <= z0 + RAMP_BAND_FRONT) return true
-  }
-  return false
-}
-
 export const exitZOf = (district) => Math.min(lastWindowZ(district), lastRampZ(district)) - GATE_GAP
 
 // How many dashes a road needs: enough to run past its own exit gate, and never
@@ -235,22 +166,103 @@ export const exitZOf = (district) => Math.min(lastWindowZ(district), lastRampZ(d
 // of quads and no more.
 export const DASH_MAX = 96
 export function dashCount(district) {
-  const reach = Math.min(exitZOf(district) - GATE_GAP / 2, dashZ(8))
+  const reach = Math.min(exitZOf(district) - GATE_GAP / 2, dashZ(SLOT_FIRST + 2))
   return Math.min(DASH_MAX, Math.ceil((DASH_0_Z - reach) / DASH_PITCH) + 1)
 }
 
-// EVERY WINDOW ON A ROAD, in the order you drive past them.
+// ---- one grid, one notion of "taken" -------------------------------------
 //
-// Both sides interleaved, because that is the order the road presents them in --
-// the sides are separate for SPACING and were never separate for "where am I in
-// the queue". Out here rather than in either personality because all three
-// callers need the same answer and a second copy of the sort is a second copy
-// that can disagree: RRABBIT moves windows along it, Travel steps between them
-// with the (prev) / (next) controls, and the map lists them in it.
-export const roadOrder = (district) =>
-  [...signs.values()]
-    .filter((s) => s.mesh && s.district === district)
-    .sort((a, b) => windowZ(b.lane, b.side) - windowZ(a.lane, a.side))
+// This replaced rampBandsOf / rampBlocksLane / windowsBlockDash, which were three
+// functions doing one job badly: translating between the window grid and the dash
+// grid, in z, with a band whose width had to be argued about. There is one grid
+// now, so occupancy is what it should always have been -- two integer ranges either
+// overlapping or not.
+//
+// TWO RULES, ON ONE SIDE OF THE ROAD, AND THEY ARE WRITTEN OUT RATHER THAN
+// DERIVED FROM A SHARED "FOOTPRINT":
+//
+//   window vs window   at least SLOT_GAP dashes apart. Four dashes is 720 units,
+//                      which is where the old MILE had been tuned to by eye after
+//                      three tries (460, 560, 660) -- a 300-wide sign turned 24
+//                      degrees covers 122 units of z on its own, and consecutive
+//                      signs any closer clip each other as you scroll past.
+//
+//   window vs ramp     the window must be outside the ramp's own sweep, which runs
+//                      from one dash IN FRONT of it (where its sign stands on the
+//                      verge) to four dashes BEHIND (RAMP_SPAN of departure curve).
+//
+// A symmetric footprint was tried first and gave the wrong answer for the common
+// case: non-overlapping [d-3, d+3] boxes force windows SEVEN dashes apart, nearly
+// double the spacing anyone asked for. The two rules are different shapes because
+// the two things are different shapes, and saying so costs four lines.
+export const SLOT_GAP = 4
+const RAMP_AHEAD = 1
+const RAMP_BEHIND = 4
+
+// The first dash a WINDOW may stand on. GATE_GAP of clear road past the enter gate
+// is what makes the gate something you drive through rather than furniture standing
+// among the windows, and that run is measured in the same dashes now.
+export const SLOT_FIRST = Math.ceil((DASH_0_Z - (ENTER_Z - GATE_GAP)) / DASH_PITCH)
+// A ramp may start earlier: it is a marking and a turning, not a structure in the
+// way, and an exit you take early is an ordinary thing for a road to offer.
+export const RAMP_FIRST = 3
+
+const sideOf = (x) => (x > 0 ? 1 : -1)
+const inRampSweep = (dash, at) => dash >= at - RAMP_AHEAD && dash <= at + RAMP_BEHIND
+
+// What stands on this exact dash, on this side. The dash is the address, so this is
+// the lookup every "what is here?" question goes through.
+export function slotAt(district, side, dash) {
+  const s = sideOf(side)
+  for (const sign of signs.values()) {
+    if (!sign.mesh || sign.district !== district || sideOf(sign.side) !== s) continue
+    if (sign.dash === dash) return { kind: 'window', milepost: sign.milepost, sign }
+  }
+  const r = rampsOf(district).find((x) => x.at === dash && sideOf(x.side) === s)
+  return r ? { kind: 'ramp', to: r.to, at: r.at } : null
+}
+
+// Could something of `kind` stand here without crowding anything already standing on
+// this side? `ignore` is a sign being MOVED, which must not block itself -- and a
+// sign whose dash is not an integer is one mid-repack, which is not standing
+// anywhere yet.
+export function slotFree(district, side, dash, kind = 'window', ignore = null) {
+  const s = sideOf(side)
+  if (!Number.isInteger(dash) || dash < (kind === 'ramp' ? RAMP_FIRST : SLOT_FIRST)) return false
+  for (const sign of signs.values()) {
+    if (sign === ignore || !sign.mesh || sign.district !== district) continue
+    if (sideOf(sign.side) !== s || !Number.isInteger(sign.dash)) continue
+    if (kind === 'ramp' ? inRampSweep(sign.dash, dash) : Math.abs(sign.dash - dash) < SLOT_GAP) return false
+  }
+  for (const r of rampsOf(district)) {
+    if (sideOf(r.side) !== s) continue
+    if (kind === 'ramp' ? r.at === dash : inRampSweep(dash, r.at)) return false
+  }
+  return true
+}
+
+// The nearest free dash at or after `from`, searching outward when asked to stay
+// near somewhere in particular. Outward keeps a bumped window as close as it can to
+// the place it was aiming for; forward-only is what a brand new window wants,
+// because it has no place it was aiming for and the head of the road is where a
+// road starts filling up.
+export function nextFreeSlot(district, side, from, kind = 'window', ignore = null) {
+  const floor = kind === 'ramp' ? RAMP_FIRST : SLOT_FIRST
+  for (let d = Math.max(floor, from); d < DASH_MAX; d++) {
+    if (slotFree(district, side, d, kind, ignore)) return d
+  }
+  return null
+}
+
+export function nearestFreeSlot(district, side, want, kind = 'window', ignore = null) {
+  const floor = kind === 'ramp' ? RAMP_FIRST : SLOT_FIRST
+  const start = Math.max(floor, want)
+  for (let step = 0; step < DASH_MAX; step++) {
+    if (slotFree(district, side, start + step, kind, ignore)) return start + step
+    if (start - step >= floor && slotFree(district, side, start - step, kind, ignore)) return start - step
+  }
+  return null
+}
 
 // WHICH WINDOW YOU ARE AT, as a number, for the gate board's `track:at-total`.
 //
@@ -270,7 +282,7 @@ export function windowAtOn(district) {
   }
   const camZ = 260 + (state.roadZ ?? 0)
   let n = 0
-  for (const s of order) if (windowZ(s.lane, s.side) >= camZ) n++
+  for (const s of order) if (windowZ(s.dash) >= camZ) n++
   return n
 }
 
@@ -421,13 +433,19 @@ export const hooks = {
   shellKeyboard: null,
 }
 
-// Which side of the road the next adopted window stands on.
+// WHERE the next adopted window stands: `{ side, dash }`, and the dash may be null
+// for "wherever there is room".
 //
 // A FIFO rather than a single slot: two clicks on "open window ‹ left" and then
 // "open window right" must not both land on the right because the second click
 // overwrote the first before either surface arrived. Adoption order is not
 // guaranteed to match launch order, so a burst can still cross them over -- what
-// this guarantees is that the SIDES REQUESTED are the sides used.
+// this guarantees is that the PLACES REQUESTED are the places used.
+//
+// It carries a dash now because a window can be asked for AT A PARTICULAR MARKER,
+// which is the same request a ramp is made by. The surface does not exist when you
+// click the dash, so the request has to wait here for it -- exactly the reason the
+// side was already queued rather than passed.
 export const sideQueue = []
 
 // A slot in the flat output. The ledger is a grid, one cell per window, so no
