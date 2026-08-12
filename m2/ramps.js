@@ -85,9 +85,33 @@ const RAMP_MOUTH_X = 104
 const RAMP_DROP = 16
 const RAMP_SEGS = 26
 
-const BOARD_W = 240
-const BOARD_H = 84
-const BOARD_Y = 52
+// THE SIGN STANDS AT THE MOUTH, NOT AT THE FAR END.
+//
+// It was at the ramp's far end, 980 units out and 560 down the road, which put it
+// where you cannot read it -- reported. That position was chosen to clear the window
+// row, and clearing the window row is still necessary; it is just not the board's
+// job. The band that keeps a window off a ramp's mouth (world.js) is what makes room
+// for it, so the sign can stand where a real exit direction sign stands: AT THE
+// GORE, beside the road, facing the traffic that has to decide.
+//
+// BOARD_STAND_X = 600 IS DECIDED BY THE WINDOW ROW, NOT BY TASTE. At 300 the sign
+// was where you want it -- close, big, unmissable -- and it drew straight over the
+// window standing 600 units further down the road, because the two were at almost
+// the same x and the nearer one wins. That is perspective, and no reservation band
+// can fix it: a band keeps a window out of a stretch of z, and these two were never
+// in the same stretch of z. Only x separates them. A window sign spans x = 180..480,
+// so the first x at which a 214-wide board cannot overlap one is 480 + 107.
+//
+// It stays a little in FRONT of the dash so you read it and then reach the turn --
+// the same argument GATE_GAP makes for the gates -- which also means it sits on the
+// verge just before the gore, where an exit direction sign actually stands.
+// 214/107 is 2.0, which is the canvas's 512/256 -- see the gate board for why a
+// quad whose ratio does not match its canvas draws squashed text.
+const BOARD_W = 214
+const BOARD_H = 107
+const BOARD_Y = 40
+const BOARD_STAND_X = 600
+const BOARD_STAND_Z = 70
 
 const ACC_CSS = '#' + ACC.toString(16).padStart(6, '0')
 const COOL_CSS = '#' + COOL.toString(16).padStart(6, '0')
@@ -196,6 +220,22 @@ function placeLine(entry, district, x) {
 
 // ----------------------------------------------------------------- the board
 
+// THE EXIT SIGN SPEAKS THE SAME LANGUAGE AS THE GATE BOARD.
+//
+//     --home-->
+//     [open sentience]
+//     exit 7
+//
+// It was three plain lines -- network, road, exit number -- which said the right
+// things in the wrong grammar, and in a different grammar from the board hanging
+// over the road twenty feet away. WRL's notation is the shell's one way of writing
+// "this edge, in that box", so both signs write it that way: the destination road
+// as an arrow in amber, the network it lands in in brackets, cool when the ramp
+// leaves this network and muted when it does not.
+//
+// THE NETWORK IS ALWAYS PRINTED, even for a ramp that stays put. `home` in a
+// network you are not looking at is not identified by its name, and a sign that
+// only names the network sometimes makes you work out which case you are in.
 function drawBoard(canvas, r) {
   const to = ws.get(r.to)
   const net = ws.tenant(ws.tenantOf(r.to))
@@ -209,21 +249,35 @@ function drawBoard(canvas, r) {
   g.strokeStyle = crosses ? COOL_CSS : ACC_CSS
   g.lineWidth = 10
   g.strokeRect(5, 5, W - 10, H - 10)
-  // THE NETWORK NAME IS THE TOP LINE, and it is the whole reason this board
-  // exists. A workspace called "home" in a network you are not looking at is
-  // indistinguishable from the "home" you are standing on; the network is what
-  // tells them apart, so it is not a subtitle.
   g.textAlign = 'center'
   g.textBaseline = 'middle'
-  g.fillStyle = crosses ? COOL_CSS : '#9fb0c8'
-  g.font = 'bold 42px ui-monospace, monospace'
-  g.fillText(crosses ? (net?.name ?? '?').slice(0, 18) : 'this network', W / 2, H * 0.28)
-  g.fillStyle = '#f3ead4'
-  g.font = 'bold 66px ui-monospace, monospace'
-  g.fillText((to?.name ?? r.to).slice(0, 16), W / 2, H * 0.62)
+
+  // Shrink to fit rather than truncate where it can: these are three short lines
+  // on a wide sign, and a name that has to be cut is cut from its own end.
+  const fit = (text, max, room) => {
+    let px = max
+    g.font = `bold ${px}px ui-monospace, monospace`
+    while (px > 22 && g.measureText(text).width > room) {
+      px -= 2
+      g.font = `bold ${px}px ui-monospace, monospace`
+    }
+    let cut = text
+    while (cut.length > 2 && g.measureText(cut).width > room) {
+      cut = cut.slice(0, -1)
+      g.font = `bold ${px}px ui-monospace, monospace`
+    }
+    return cut
+  }
+  const room = W - 44
+
+  g.fillStyle = ACC_CSS
+  g.fillText(fit(`--${(to?.name ?? r.to)}-->`, 62, room), W / 2, H * 0.26)
+
+  g.fillStyle = crosses ? COOL_CSS : '#8a97ab'
+  g.fillText(fit(`[${net?.name ?? '?'}]`, 52, room), W / 2, H * 0.55)
+
   g.fillStyle = '#6b7689'
-  g.font = '34px ui-monospace, monospace'
-  g.fillText(to?.open ? 'exit ' + (r.at + 1) : 'closed', W / 2, H * 0.87)
+  g.fillText(fit(to?.open ? `exit ${r.at + 1}` : 'closed', 34, room), W / 2, H * 0.82)
 }
 
 // The ramp's centreline, in the road's own frame: x out to the right, z down the
@@ -346,12 +400,10 @@ function makeRamp(district, r) {
     new THREE.PlaneGeometry(BOARD_W, BOARD_H),
     new THREE.MeshBasicMaterial({ map: tex, transparent: false }),
   )
-  // FACING THE APPROACH. A plane's normal is +Z, and rotation.y maps it to
-  // (sin f, 0, cos f) -- so pointing it back up the road AND inward, at the driver
-  // rather than at the scenery, is one atan2 of the vector from the board to where
-  // the road came from. Square to the ramp would be edge-on until you were level
-  // with it, which is the trap the window signs already solved by turning.
-  board.rotation.y = Math.atan2(-side * RAMP_OUT * 0.5, RAMP_SPAN + 420)
+  // TURNED IN TOWARD THE DRIVER, the same way and for the same reason a window sign
+  // is: a board square to the road is edge-on until you are level with it, and by
+  // then you have passed the turn it is announcing.
+  board.rotation.y = -side * 0.42
   board.userData.gantryAction = action
 
   const post = new THREE.Mesh(
@@ -363,7 +415,9 @@ function makeRamp(district, r) {
   scene.add(edges)
   scene.add(board)
   scene.add(post)
-  return { deck, edges, board, post, tex, canvas, key: '' }
+  // The side is remembered on the part because the deck's geometry is BAKED with it
+  // -- see syncRamps for why that means a flip is a rebuild and not a reposition.
+  return { deck, edges, board, post, tex, canvas, key: '', side }
 }
 
 function placeRamp(part, district, x, r) {
@@ -372,10 +426,11 @@ function placeRamp(part, district, x, r) {
   // the origin, so placing a ramp is moving that frame. Nothing is rebuilt when the
   // road it hangs off moves sideways.
   for (const m of [part.deck, part.edges]) m.position.set(x, 0, z0)
-  const end = CURVE.getPoint(1)
   const sx = r.side > 0 ? 1 : -1
-  part.board.position.set(x + sx * end.x, ROAD_Y - RAMP_DROP + BOARD_Y + BOARD_H / 2, z0 + end.y)
-  part.post.position.set(x + sx * end.x, ROAD_Y - RAMP_DROP + BOARD_Y / 2, z0 + end.y)
+  const bx = x + sx * BOARD_STAND_X
+  const bz = z0 + BOARD_STAND_Z
+  part.board.position.set(bx, ROAD_Y + BOARD_Y + BOARD_H / 2, bz)
+  part.post.position.set(bx, ROAD_Y + BOARD_Y / 2, bz)
 
   // Redrawn only when what it says changes. A canvas repaint per frame per ramp
   // is the kind of cost that does not show up in a frame time until there are
@@ -445,6 +500,23 @@ export function syncRamps() {
     for (const r of ws.rampsOf(w.id)) {
       live.add(r.at)
       let part = entry.ramps.get(r.at)
+      // A FLIP IS A REBUILD, and this is the line that was missing.
+      //
+      // The deck and its edge lines are ribbons whose vertices are computed with the
+      // side folded in -- x is negated and the winding flipped when it is built --
+      // so nothing about them can be repositioned onto the other side of the road.
+      // Only the board and post are placed from `side` at reconcile time, so flipping
+      // one moved the SIGN across the road and left the tarmac where it was.
+      //
+      // It survived being tested because the check read the board's x to decide which
+      // side the ramp was on: a report that asks the one part that did move whether
+      // the move happened will always say yes. `__ramps().side` still reads the board
+      // -- it is the honest thing to read -- and the deck now cannot disagree with it.
+      if (part && part.side !== (r.side > 0 ? 1 : -1)) {
+        dropRamp(part)
+        entry.ramps.delete(r.at)
+        part = null
+      }
       if (!part) {
         part = makeRamp(w.id, r)
         entry.ramps.set(r.at, part)
@@ -552,6 +624,16 @@ export const rampReport = () => {
         // being made about sides is that the geometry mirrors, and a report that
         // repeated the stored side would agree with itself either way.
         side: part.board.position.x > ws.laneX(id) ? 'right' : 'left',
+        // WHICH SIDE THE TARMAC IS ON, from the deck's own vertices. `side` above is
+        // read off the board, and the board is the one part that is placed from
+        // `side` every frame -- so it moved when a flip was only half-applied and a
+        // check that asked it whether the flip had happened said yes. This asks the
+        // geometry, which is the half that was wrong.
+        deckSide: (() => {
+          const g = part.deck.geometry
+          if (!g.boundingBox) g.computeBoundingBox()
+          return (g.boundingBox.max.x + g.boundingBox.min.x) / 2 > 0 ? 'right' : 'left'
+        })(),
         // The hover, read off the MATERIAL rather than off `rampHot` -- the claim is
         // that the highlight follows the pointer, and a report that re-read the
         // variable the highlight is drawn from would agree with itself whatever the

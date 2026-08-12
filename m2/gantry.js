@@ -164,7 +164,7 @@ const widthOf = (g, text, px, weight = 'bold') => {
 // THE BOARD READS LIKE A WRL LINE, IN TWO COLUMNS OF TWO ROWS.
 //
 //     T&R      --home-->
-//     1:2-2    // main
+//     1:2-2    [main]
 //
 // It was `1   home   ·   2 windows   main` -- three facts in the wrong grammar, and
 // the sentence a road sign wants is not a list. Asked for the WRL shape instead,
@@ -176,7 +176,8 @@ const widthOf = (g, text, px, weight = 'bold') => {
 //   --home-->  the road, in WRL's own edge notation -- an arrow, because a road IS
 //              an edge, and this shell's whole argument is that the road and the
 //              graph are one drawing at two zooms.
-//   // main    the network, after WRL's separator.
+//   [main]     the network, in WRL's box brackets -- the notation WRL uses for a
+//              named thing you are inside of, which is what a network is.
 //
 // AND IT IS TWO ROWS BECAUSE ONE ROW CROWDED. On a single line the four fields ran
 // together the moment a road or a network had a long name -- reported -- and no
@@ -256,7 +257,7 @@ function drawBoard(canvas, { name, count, at, track, network }) {
 
   if (network) {
     let net = String(network)
-    const tail = (n) => `// ${n}`
+    const tail = (n) => `[${n}]`
     let npx = NET_FONT
     while (npx > ROUTE_MIN && widthOf(g, tail(net), npx) > room) npx -= 2
     while (net.length > 1 && widthOf(g, tail(net + '\u2026'), npx) > room) net = net.slice(0, -1)

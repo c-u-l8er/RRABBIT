@@ -181,18 +181,22 @@ export function lastRampZ(district) {
 // 122 units of z on its own. So the two want the same stretch of verge, and the
 // one that was there first has to win.
 //
-// The band is the crossing, plus a sign's own depth, plus enough that the mouth
-// and the gore are readable rather than merely unobstructed. It is deliberately
-// NARROWER THAN A MILE, so a ramp costs at most one window slot on its side: a
-// wider band would be tidier to draw and would quietly evict two windows for one
-// exit.
-const RAMP_BAND_NEAR = 140
-const RAMP_BAND_FAR = 520
+// The band runs from a little IN FRONT of the dash -- where the ramp's own sign
+// stands, beside the road at the mouth -- back through the crossing, plus a window
+// sign's own depth. It grew forward when the sign moved from the far end of the ramp
+// to the mouth: a board at x=300 is inside where a window stands, and the whole
+// point of the sign being there is that you can read it.
+//
+// It is deliberately NARROWER THAN A MILE, so a ramp costs at most one window slot
+// on its side. A wider band would be tidier to draw and would quietly evict two
+// windows for one exit.
+const RAMP_BAND_FRONT = 130
+const RAMP_BAND_BACK = 520
 
 export function rampBandsOf(district) {
   return rampsOf(district).map((r) => {
     const z0 = dashZ(r.at)
-    return { at: r.at, side: r.side > 0 ? 1 : -1, from: z0 - RAMP_BAND_FAR, to: z0 - RAMP_BAND_NEAR }
+    return { at: r.at, side: r.side > 0 ? 1 : -1, from: z0 - RAMP_BAND_BACK, to: z0 + RAMP_BAND_FRONT }
   })
 }
 
@@ -218,7 +222,7 @@ export function windowsBlockDash(district, at, side = 1) {
     if (!sign.mesh || sign.district !== district) continue
     if ((sign.side > 0 ? 1 : -1) !== s) continue
     const z = windowZ(sign.lane, sign.side)
-    if (z >= z0 - RAMP_BAND_FAR && z <= z0 - RAMP_BAND_NEAR) return true
+    if (z >= z0 - RAMP_BAND_BACK && z <= z0 + RAMP_BAND_FRONT) return true
   }
   return false
 }
