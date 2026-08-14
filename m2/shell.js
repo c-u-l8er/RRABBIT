@@ -848,6 +848,24 @@ function buildWorld(canvas) {
   })
   hooks.closeWindow = requestCloseWindow
 
+  // FLY TO A WINDOW THAT HAS JUST APPEARED.
+  //
+  // Reported against dialogs: an application puts one up, the ship stays where
+  // it was, and there is no way to tell anything happened. A window arriving IS
+  // the event worth looking at, so the camera goes to it.
+  //
+  // Two refusals, both so this does not fight the person using it:
+  //   - not while the MAP is open. The map is a deliberate act; yanking the
+  //     world around underneath it would move the thing being read.
+  //   - not if we are already standing IN that window, which happens on the
+  //     rebuild path and would re-fly the camera to where it already is.
+  hooks.arrived = (district, milepost) => {
+    if (state.mapOpen) return
+    if (state.mode === 'flat' && state.flatDistrict === district && state.flatMilepost === milepost) return
+    goWindow(district, milepost)
+    state.flewTo = { district, milepost, n: (state.flewTo?.n ?? 0) + 1 }
+  }
+
   // ---- ending the session -------------------------------------------------
   //
   // A PAGE CANNOT LOG YOU OUT. The shell is a document in a kiosk browser; it
@@ -1573,6 +1591,36 @@ function fenceScenePasses(gfScene) {
           n: passes[mime],
           size: sz ? { w: sz.width, h: sz.height } : null,
           rsSize: renderState?.size ? { w: renderState.size.width, h: renderState.size.height } : null,
+          coded: decodeGeom.last?.coded ?? null,
+        }
+        // THE DECODED FRAME'S SIZE, STAMPED ON THE SURFACE IT BELONGS TO.
+        //
+        // This is the missing number. `rs.texture.size` reports the SURFACE size
+        // while the texture behind it holds the DECODED frame, which the encoder
+        // has padded up to its alignment -- measured, a 613x205 surface decodes
+        // to 640x256 with `visibleRect` covering the whole 640x256, so nothing
+        // downstream can tell the picture from the padding. `sx = width / tw`
+        // then computes 1.0, the quad samples the entire padded frame, and the
+        // margin lands on the sign: 27 black columns for 27 columns of padding.
+        //
+        // Greenfield calls this pass from the decoder's own output callback, so
+        // the frame that just arrived IS this surface's. The size check keeps
+        // that from being a bare assumption: a coded size must CONTAIN the
+        // surface and exceed it by less than one alignment block, or it belongs
+        // to some other window and is ignored.
+        if (mime === 'video/h264' && renderState?.size && decodeGeom.last?.coded) {
+          const [cw, ch] = decodeGeom.last.coded
+          const { width: sw, height: sh } = renderState.size
+          // The slack was "< 64 either way" first, and that was wrong: a 577x183
+          // surface decodes to 640x256, which is 63 columns and **73 rows** of
+          // padding. The alignment is not one block and guessing its rule is how
+          // that mistake happened. The honest constraint is only that a frame
+          // must CONTAIN the surface and not be wildly larger than it -- which
+          // still rejects the other window's frame outright, because that one
+          // does not contain this surface at all.
+          if (cw >= sw && ch >= sh && cw < sw * 2 && ch < sh * 2) {
+            renderState.__codedSize = { w: cw, h: ch }
+          }
         }
       } catch (e) {
         passes.threw++

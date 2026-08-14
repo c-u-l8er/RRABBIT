@@ -14,7 +14,7 @@
 // in this direction only.
 
 import * as THREE from 'three'
-import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, slotFree, nextFreeSlot, nearestFreeSlot, SLOT_FIRST, SLOT_GAP, canvasTexture } from './world.js'
+import { hooks, state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL, SCENE_ID, windowZ, roadOrder, slotFree, nextFreeSlot, nearestFreeSlot, SLOT_FIRST, SLOT_GAP, canvasTexture } from './world.js'
 import * as ws from './workspaces.js'
 import * as layout from './layout.js'
 import { release, rekeyZoom } from './travel.js'
@@ -506,22 +506,54 @@ function adoptSurfaceTexture(rs, crop) {
   //
   // For an unpadded buffer (every shm client) sx = sy = 1 and this reduces
   // exactly to the plain flip.
-  const tw = rs.texture?.size?.width || width
-  const th = rs.texture?.size?.height || height
+  // THE DESTINATION SIZE, FROM THE DECODER WHEN IT IS KNOWN.
+  //
+  // `rs.texture.size` is the SURFACE size even when the texture behind it holds
+  // a padded decoded frame, so trusting it makes sx/sy 1.0 and samples the
+  // padding along with the picture. `__codedSize` is stamped on the renderState
+  // by the h264 pass in shell.js, from the frame that produced it. Absent (every
+  // shm client, and the very first frames of an h264 one) this falls straight
+  // back to the old behaviour.
+  const coded = rs.__codedSize
+  const tw = coded?.w || rs.texture?.size?.width || width
+  const th = coded?.h || rs.texture?.size?.height || height
+  // WHICH CORNER THE PICTURE IS IN. Measured rather than reasoned: a 613-wide
+  // surface in a 640-wide frame put exactly 27 black columns on the LEFT of the
+  // sign, so the picture sits at the FAR corner and the padding at the origin.
+  // That is what the `farcorner` diagnostic always described; it was inert only
+  // because sx and sy computed to 1.
+  // `?uv=full` samples the whole destination texture, padding included -- the
+  // way to SEE the margin rather than argue about it. `?uv=origin` puts the
+  // picture back at the origin corner, which is what this did before the coded
+  // size was known, and is how to re-check the corner if a client ever disagrees.
   const DIAG = new URLSearchParams(location.search).get('uv')
-  // The window rect inside the buffer, in surface pixels. Without a crop this is
-  // the whole surface and every line below reduces to what it was.
-  const gx = DIAG || !crop ? 0 : crop.x
-  const gy = DIAG || !crop ? 0 : crop.y
-  const gw = DIAG === 'full' ? tw : (crop && !DIAG ? crop.w : width)
-  const gh = DIAG === 'full' ? th : (crop && !DIAG ? crop.h : height)
-  const ox = DIAG === 'farcorner' ? 1 - gw / tw : gx / tw
-  const oy = DIAG === 'farcorner' ? 1 - gh / th : gy / th
-  // Surface row 0 is texel row 0 (see the note above), so surface row r is at
-  // v = r/th. The crop spans rows gy..gy+gh, and the quad is flipped, so quad
-  // v=1 must land on gy and quad v=0 on gy+gh.
+
+  // Where the surface sits inside the destination texture. The encoder pads up
+  // to its alignment and the picture ends up at the FAR corner, so surface pixel
+  // (0,0) is texture pixel (padX, padY). Zero for every unpadded buffer, which
+  // is every shm client, and then all of this reduces to the plain flip.
+  const padX = DIAG === 'origin' ? 0 : tw - width
+  const padY = DIAG === 'origin' ? 0 : th - height
+
+  // The window rect inside the surface, in surface pixels. Without a crop this
+  // is the whole surface.
+  const gx = crop ? crop.x : 0
+  const gy = crop ? crop.y : 0
+  const gw = crop ? crop.w : width
+  const gh = crop ? crop.h : height
+
+  if (DIAG === 'full') {
+    tex.repeat.set(1, -1)
+    tex.offset.set(0, 1)
+    return { rt, tex }
+  }
+
+  // u runs left to right in both spaces, so it is a straight translate+scale.
+  // v is flipped by the quad, so the sign's TOP edge (quad v=1) has to land on
+  // the picture's first row and its bottom edge on the last:
+  //   quad v=1 -> offset + 1 * (-gh/th) = (padY + gy) / th
   tex.repeat.set(gw / tw, -gh / th)
-  tex.offset.set(ox, oy + gh / th)
+  tex.offset.set((padX + gx) / tw, (padY + gy + gh) / th)
   return { rt, tex }
 }
 
@@ -912,6 +944,10 @@ function makeSign(view, milepost, district, side, dash) {
     tex,
     rt,
     size: { width, height },
+    // The destination-texture size this sign's UVs were computed from. A sign
+    // built before the first decode has none, and its UVs are the unpadded
+    // fallback -- so this has to be compared, not assumed settled.
+    coded: rs.__codedSize ? { w: rs.__codedSize.w, h: rs.__codedSize.h } : null,
     // The window rect this sign was built against, kept so adoptPending can tell
     // that a client has DECLARED one since -- a change that moves the picture
     // without changing the buffer size, and would otherwise never be noticed.
@@ -1585,7 +1621,13 @@ function adoptPending() {
       // for the rest of its life.
       const nextCrop = rs ? windowRectOf(view.surface, rs.size) : null
       const cropMoved = JSON.stringify(nextCrop) !== JSON.stringify(existing.crop ?? null)
-      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved)) {
+      // THE FIRST DECODE ARRIVES AFTER THE FIRST SIGN. Adoption needs a buffer,
+      // not a decoded frame, so a sign is routinely built before anything knows
+      // the destination texture is padded. Without this the padding stays on the
+      // glass for the life of the window.
+      const nextCoded = rs?.__codedSize ?? null
+      const codedMoved = JSON.stringify(nextCoded) !== JSON.stringify(existing.coded ?? null)
+      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved || codedMoved)) {
         // A resized surface is a new texture allocation. Rebuild the sign in
         // place, at the SAME milepost.
         //
@@ -1652,6 +1694,10 @@ function adoptPending() {
     // which is the only moment it can be, because until a surface has a buffer
     // there is nothing to configure and no sign to hang the request on.
     askForRememberedSize(k, view, district, milepost, built?.size)
+    // AND GO AND LOOK AT IT. Only for a window that has actually been built --
+    // a record with no mesh has nowhere to fly to yet, and adoptPending will be
+    // back next frame.
+    if (built) hooks.arrived?.(district, milepost)
   }
   restoreSizes()
   for (const [k, s] of signs) {

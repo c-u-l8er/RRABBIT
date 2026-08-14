@@ -522,6 +522,14 @@ export const hooks = {
   // cannot import RRABBIT (RRABBIT imports Travel, for release()). Same shape
   // and same reason as spawnWindow.
   closeWindow: null,
+  // (district, milepost) => void -- A NEW WINDOW HAS APPEARED; take the camera
+  // to it. Reported: when an application throws up a dialog, the ship stays
+  // where it was and "it is hard to tell what is happening" -- the window is on
+  // the road somewhere behind you and nothing says so. RRABBIT is what notices a
+  // surface arriving and Travel is what owns the camera; shell.js is the only
+  // module that can see both, which is the same shape and the same reason as
+  // spawnWindow and closeWindow above.
+  arrived: null,
   // (mine: boolean) => void -- take the keyboard, or give it back.
   //
   // The map can be open WHILE YOU ARE STANDING IN A WINDOW now, and both of them
