@@ -1,0 +1,128 @@
+diff --git a/packages/compositor-proxy/native/wayland/src/node-addon/wayland-server-addon.c b/packages/compositor-proxy/native/wayland/src/node-addon/wayland-server-addon.c
+index e8f5d7a..1aee65e 100644
+--- a/packages/compositor-proxy/native/wayland/src/node-addon/wayland-server-addon.c
++++ b/packages/compositor-proxy/native/wayland/src/node-addon/wayland-server-addon.c
+@@ -729,10 +729,19 @@ initDrm(napi_env env, napi_callback_info info) {
+     // init egl backend
+     westfield_egl = westfield_egl_new(device_path);
+     // init wayland egl related buffer protocols
+-    if (westfield_egl) {
++    if (westfield_egl && westfield_egl_get_device_fd(westfield_egl) >= 0) {
+         // TODO do something with the global objects?
+         wlr_linux_dmabuf_v1_create_with_renderer(display, 4, westfield_egl);
+         wlr_drm_create(display, westfield_egl);
++    } else if (westfield_egl) {
++        /*
++         * EGL without a DRM device -- the surfaceless fallback. Both globals
++         * exist to hand clients a DRM fd to import buffers through, and there is
++         * none, so advertising them offers what cannot be delivered: each logs
++         * "Failed to get DRM FD from renderer" and then the session dies.
++         * Clients fall back to shm, which is what a software renderer wants.
++         */
++        fprintf(stderr, "EGL has no DRM device -- wl_dmabuf and wl_drm disabled, clients will use shm.\n");
+     } else {
+         fprintf(stderr, "Can't initialize EGL, wl_dmabuf and wl_drm disabled.");
+     }
+diff --git a/packages/compositor-proxy/native/wayland/src/westfield-egl.c b/packages/compositor-proxy/native/wayland/src/westfield-egl.c
+index 2b5ac24..9710464 100644
+--- a/packages/compositor-proxy/native/wayland/src/westfield-egl.c
++++ b/packages/compositor-proxy/native/wayland/src/westfield-egl.c
+@@ -692,6 +692,58 @@ open_render_node(int drm_fd) {
+     return render_fd;
+ }
+ 
++#ifndef EGL_PLATFORM_SURFACELESS_MESA
++#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
++#endif
++
++static inline int
++westfield_egl_egl_create_surfaceless(struct westfield_egl *westfield_egl) {
++    if (egl_create(westfield_egl)) {
++        wfl_log(stderr, "Failed to create EGL context");
++        return -1;
++    }
++
++    /*
++     * No device and no GBM. Mesa's surfaceless platform builds a display out of
++     * nothing and falls to llvmpipe when there is no hardware behind it -- which
++     * is the only EGL a virtual machine without a DRM node can have, and a
++     * FreeBSD guest cannot be given one (drm-kmod has amdgpu, i915 and radeon;
++     * no virtio-gpu, no vgem, no vkms).
++     */
++    if (egl_init(westfield_egl, EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY)) {
++        wfl_log(stdout, "Using EGL_PLATFORM_SURFACELESS_MESA (software rendering)");
++        /*
++         * egl_init always records the display's EGL_DEVICE_EXT, and here that is
++         * the SOFTWARE device -- but the display was built by the surfaceless
++         * platform, not the device platform.
++         *
++         * The only reader is gst_frame_encoder_ensure_gst_gl_setup, and a
++         * non-NULL device sends it down
++         * gst_gl_display_egl_device_new_with_egl_device(), which builds a SECOND,
++         * separate EGLDisplay from that device and then tries to create a context
++         * sharing ours. Two displays cannot share a context: eglQueryContext
++         * answers EGL_NOT_INITIALIZED, eglCreateContext answers EGL_BAD_CONTEXT
++         * ten times over, and gst_gl_display_create_context calls g_error --
++         * which is fatal, so the session dies on SIGTRAP the moment a browser
++         * attaches and the first surface needs encoding.
++         *
++         * Report no device and the encoder takes the other branch, wrapping the
++         * display we already initialised. That is the one it can actually share.
++         */
++        westfield_egl->egl.device = EGL_NO_DEVICE_EXT;
++        return 0;
++    }
++
++    wfl_log(stderr, "Failed to initialize surfaceless EGL context");
++    if (westfield_egl->egl.egl_display) {
++        eglMakeCurrent(westfield_egl->egl.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++                       EGL_NO_CONTEXT);
++        eglTerminate(westfield_egl->egl.egl_display);
++    }
++    eglReleaseThread();
++    return -1;
++}
++
+ static inline int
+ westfield_egl_egl_create_with_drm_fd(struct westfield_egl *westfield_egl, int drm_fd) {
+     if (egl_create(westfield_egl)) {
+@@ -756,17 +808,35 @@ westfield_egl_egl_create_with_drm_fd(struct westfield_egl *westfield_egl, int dr
+ struct westfield_egl *
+ westfield_egl_new(char *device_path) {
+     struct westfield_egl *westfield_egl = calloc(sizeof(struct westfield_egl), 1);
+-    const int32_t fd = open(device_path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
++    const int32_t fd = device_path
++                       ? open(device_path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK)
++                       : -1;
+     if (fd < 0) {
+-        wfl_log_errno(stderr, "Can't open device path: %s", device_path);
+-        goto err;
++        /*
++         * NOT an error any more. A guest with no /dev/dri is the ordinary case
++         * for anyone running this in a VM, and returning NULL here is what left
++         * gst_frame_encoder_ensure_gst_gl_setup dereferencing it and the session
++         * process dying on SIGSEGV.
++         */
++        wfl_log(stdout, "No DRM device -- falling back to surfaceless EGL");
++        westfield_egl->drm_fd = -1;
++        if (westfield_egl_egl_create_surfaceless(westfield_egl)) {
++            goto err;
++        }
++        return westfield_egl;
+     }
+     assert (fd > 0);
+     westfield_egl->drm_fd = fd;
+ 
+     if (westfield_egl_egl_create_with_drm_fd(westfield_egl, fd)) {
+         close(fd);
+-        goto err;
++        /* The device existed and could not be used; surfaceless is still worth
++         * trying before handing the encoder nothing. */
++        wfl_log(stdout, "DRM EGL failed -- falling back to surfaceless EGL");
++        westfield_egl->drm_fd = -1;
++        if (westfield_egl_egl_create_surfaceless(westfield_egl)) {
++            goto err;
++        }
+     }
+ 
+     return westfield_egl;

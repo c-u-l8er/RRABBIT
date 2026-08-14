@@ -43,12 +43,25 @@ export GST_GL_WINDOW="${GST_GL_WINDOW:-surfaceless}"
 export GST_GL_PLATFORM="${GST_GL_PLATFORM:-egl}"
 export GST_GL_API="${GST_GL_API:-gles2}"
 
+# BOTH PORTS THE SHELL IS SERVED FROM, because it is served from both by design:
+# vite on 8911 while iterating, bridge.py on 8913 for the built bundle -- and
+# 8913 is also the origin inside the T&R image. Allowing only one meant that
+# launching from the other failed as "compositor-proxy is not answering" while
+# the proxy was answering, which is the worst shape a message can have.
+#
+# A list needs the multi-origin patch in proxy/proxy-cli.js to work at all; see
+# patches/proxy-cli-multi-origin.md. Keep them together.
+ALLOW_ORIGIN="${RRABBIT_ALLOW_ORIGIN:-http://127.0.0.1:8911,http://127.0.0.1:8913}"
+
 echo "==> render device: $RENDER_DEVICE ($(cat "/sys/class/drm/$(basename "$RENDER_DEVICE")/device/uevent" 2>/dev/null | grep -m1 DRIVER= || echo 'driver unknown'))"
 echo "==> gstgl:         $GST_GL_WINDOW/$GST_GL_PLATFORM/$GST_GL_API   encoder: $ENCODER"
+echo "==> allow-origin:  $ALLOW_ORIGIN"
+echo "    the page must be served from one of these EXACTLY -- a mismatch reads"
+echo "    as the proxy being down. Override with RRABBIT_ALLOW_ORIGIN."
 
 exec node proxy/proxy-cli.js \
   --applications=./proxy/applications.json \
-  --allow-origin="${RRABBIT_ALLOW_ORIGIN:-http://127.0.0.1:8911}" \
+  --allow-origin="$ALLOW_ORIGIN" \
   --bind-ip=127.0.0.1 \
   --bind-port="$PORT" \
   --base-url="ws://127.0.0.1:$PORT" \

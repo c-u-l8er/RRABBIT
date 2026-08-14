@@ -1,0 +1,46 @@
+#!/bin/sh
+# waypipe's server half, with a runtime directory it can actually use.
+#
+# Installed in the T&R guest at /usr/local/bin/waypipe-tandr and selected with
+# waypipe's `--remote-bin` from the host side. It exists for one reason:
+#
+#     waypipe Error: src/main.rs:2614: Environment variable XDG_RUNTIME_DIR not present
+#
+# waypipe's server runs from a NON-INTERACTIVE ssh command. On Linux the runtime
+# dir is made and exported by logind before you ever get a shell; FreeBSD has no
+# logind, `/var/run/user/$uid` does not exist, and a non-interactive `/bin/sh`
+# reads no profile -- so there is nothing anywhere in that path to set it. The
+# guest is not misconfigured; the variable simply has no owner on this OS.
+#
+# Fixing it in sshd (AcceptEnv + SetEnv, or PermitUserEnvironment) was the
+# alternative and was rejected: it edits the guest's ssh daemon config to carry
+# one variable for one program, and every future T&R image would have to carry
+# that edit forward. A wrapper on the remote binary is the seam waypipe already
+# provides for exactly this.
+#
+# /var/run/user/$uid is TRIED FIRST and not required. It is the conventional
+# location and a future image may well create it at boot with the right owner;
+# if it is not there and cannot be made (it usually cannot -- /var/run is root's)
+# this falls back to a private directory under TMPDIR. Either way the mode is
+# 0700, because a Wayland socket is a channel into the session and the whole
+# point of the conventional directory is that it is not world-reachable.
+
+set -eu
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    uid="$(id -u)"
+    candidate="/var/run/user/$uid"
+    if ! mkdir -p "$candidate" 2>/dev/null; then
+        candidate="${TMPDIR:-/tmp}/xdg-runtime-$uid"
+    fi
+    XDG_RUNTIME_DIR="$candidate"
+    export XDG_RUNTIME_DIR
+fi
+
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+# `exec`, so waypipe keeps this process's pid and stdio. waypipe's ssh mode talks
+# to its server over the ssh channel's stdin/stdout -- a shell left sitting in the
+# middle would be one more thing between the protocol and the socket.
+exec waypipe "$@"

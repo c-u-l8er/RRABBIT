@@ -4,7 +4,8 @@
     "executable": "gnome-text-editor",
     "args": [],
     "env": {
-      "GDK_BACKEND": "wayland"
+      "GDK_BACKEND": "wayland",
+      "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/rrabbit-no-handoff"
     }
   },
   "/xterm": {
@@ -47,6 +48,30 @@
       "sh",
       "-c",
       "while :; do date +%H:%M:%S.%N; done"
+    ],
+    "env": {}
+  },
+  "/tandr-tr4-foot": {
+    "name": "foot · tr4",
+    "executable": "waypipe",
+    "args": [
+      "--remote-bin",
+      "/usr/local/bin/waypipe-tandr",
+      "ssh",
+      "-p",
+      "2223",
+      "-i",
+      "/home/travis/ProjectAmp2/PARKVPS/var/parkvps_ed25519",
+      "-o",
+      "StrictHostKeyChecking=no",
+      "-o",
+      "UserKnownHostsFile=/dev/null",
+      "-o",
+      "LogLevel=ERROR",
+      "-o",
+      "ServerAliveInterval=15",
+      "park@127.0.0.1",
+      "foot"
     ],
     "env": {}
   }

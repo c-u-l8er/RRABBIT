@@ -1,0 +1,22 @@
+diff --git a/packages/compositor-proxy/native/encoding/src/gst_frame_encoder.c b/packages/compositor-proxy/native/encoding/src/gst_frame_encoder.c
+index a3a6e4a..66ab0ab 100644
+--- a/packages/compositor-proxy/native/encoding/src/gst_frame_encoder.c
++++ b/packages/compositor-proxy/native/encoding/src/gst_frame_encoder.c
+@@ -1149,7 +1149,7 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
+                                               "glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! "
+                                               "gldownload ! "
+                                               "queue silent=true ! "
+-                                              "vaapih264enc aud=1 ! "
++                                              "vah264enc aud=1 ! "
+                                               "video/x-h264,profile=high,stream-format=byte-stream,alignment=au ! "
+                                               "appsink name=sink",
+                 .alpha_pipeline_definition = "appsrc name=src format=3 stream-type=0 ! "
+@@ -1160,7 +1160,7 @@ static const struct frame_encoder_description frame_encoder_descriptions[] = {
+                                              "glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! "
+                                              "gldownload ! "
+                                              "queue silent=true ! "
+-                                             "vaapih264enc aud=1 ! "
++                                             "vah264enc aud=1 ! "
+                                              "video/x-h264,profile=high,stream-format=byte-stream,alignment=au ! "
+                                              "appsink name=sink",
+                 .split_alpha = true,

@@ -1,0 +1,25 @@
+{
+  "/foot": {
+    "name": "Terminal",
+    "executable": "foot",
+    "args": [],
+    "env": {}
+  },
+  "/notes": {
+    "name": "Notes",
+    "executable": "mousepad",
+    "args": [],
+    "env": {
+      "GDK_BACKEND": "wayland",
+      "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/rrabbit-no-handoff"
+    }
+  },
+  "/firefox": {
+    "name": "Firefox",
+    "executable": "firefox",
+    "args": ["--new-instance", "--no-remote"],
+    "env": {
+      "MOZ_ENABLE_WAYLAND": "1"
+    }
+  }
+}

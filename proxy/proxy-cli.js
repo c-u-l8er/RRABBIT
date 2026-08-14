@@ -7121,6 +7121,51 @@ function sendMessageWithReply(childProcess, message, timeout = 1e4) {
     childProcess.send(message);
   });
 }
+// RRABBIT PATCH -- see patches/proxy-cli-multi-origin.md.
+//
+// `--allow-origin` documents "Value can be comma seperated domains", but the
+// value was written into the header verbatim -- and `Access-Control-Allow-Origin`
+// may name exactly ONE origin, so a list refused every one of them.
+//
+// The shell is served from two ports BY DESIGN: vite on 8911 while iterating,
+// and bridge.py on 8913 for the built bundle -- which is also the origin inside
+// the T&R image. One allowed origin therefore means every launch from the other
+// one fails, and it fails as "compositor-proxy is not answering" while the proxy
+// is answering perfectly well. That cost a whole round of "programs will not
+// start".
+//
+// Echo the request's origin when it is on the list. No `Vary: Origin`: there is
+// no cache between a browser and a loopback socket, and adding it to five header
+// literals is five more places to drift.
+// RRABBIT PATCH -- see patches/proxy-cli-multi-origin.md.
+//
+// `--base-url` is a SINGLE static address, and it is what the proxy hands back
+// as `signalURL`/`baseURL` for the client to connect to. That works while there
+// is one way in. There are two: the host browser reaches this proxy on
+// `127.0.0.1:8912`, and a T&R guest reaches the SAME proxy on `10.0.2.2:8912`
+// (QEMU's SLIRP maps the gateway to the host's loopback, so nothing has to be
+// bound beyond it). A static base-url is correct for exactly one of them and
+// sends the other to an address that is not there.
+//
+// So answer with the host the client actually used. `Host` is attacker-supplied
+// in general, but all it decides here is the address that same client is told to
+// come back to -- no privilege, no other reader.
+function publicBaseURL(config, request) {
+  const url = new URL(config.public.baseURL);
+  const host = request && request.headers ? request.headers["host"] : undefined;
+  if (host) {
+    url.host = host;
+  }
+  return url.href.replace(/\/$/, "");
+}
+function pickAllowOrigin(config, request) {
+  const allowed = String(config.server.http.allowOrigin || "").split(",").map((o) => o.trim()).filter(Boolean);
+  const origin = request && request.headers ? request.headers["origin"] : undefined;
+  if (origin && allowed.includes(origin)) {
+    return origin;
+  }
+  return allowed.length > 0 ? allowed[0] : config.server.http.allowOrigin;
+}
 function handleOptions(config, request, response, _url) {
   const origin = request.headers["origin"];
   const accessControlRequestMethod = request.headers["access-control-request-method"];
@@ -7129,7 +7174,7 @@ function handleOptions(config, request, response, _url) {
     return;
   }
   response.writeHead(204, "No Content", {
-    "Access-Control-Allow-Origin": config.server.http.allowOrigin,
+    "Access-Control-Allow-Origin": pickAllowOrigin(config, request),
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET",
     "Access-Control-Allow-Headers": allowHeaders,
@@ -7152,7 +7197,7 @@ async function handleGET(childProcess, compositorSessionId, config, request, res
   }
   if (appName === void 0 || appExecutable === void 0 || appArgs === void 0 || appEnv === void 0) {
     response.writeHead(404, "Not Found", {
-      "Access-Control-Allow-Origin": config.server.http.allowOrigin,
+      "Access-Control-Allow-Origin": pickAllowOrigin(config, request),
       "Access-Control-Allow-Credentials": "true",
       "Content-Type": "text/plain"
     }).end("Application not found.");
@@ -7166,18 +7211,18 @@ async function handleGET(childProcess, compositorSessionId, config, request, res
     const messageReply = await sendMessageWithReply(childProcess, launchApp);
     if (messageReply.type === "launchAppFailed") {
       response.writeHead(500, "Internal Server Error", {
-        "Access-Control-Allow-Origin": config.server.http.allowOrigin,
+        "Access-Control-Allow-Origin": pickAllowOrigin(config, request),
         "Access-Control-Allow-Credentials": "true",
         "Content-Type": "text/plain"
       }).end("Application could not be started.");
       return;
     }
-    const proxyURL = new URL(config.public.baseURL);
+    const proxyURL = new URL(publicBaseURL(config, request));
     proxyURL.pathname += proxyURL.pathname.endsWith("/") ? "signal" : "/signal";
     proxyURL.searchParams.set("compositorSessionId", compositorSessionId);
     proxyURL.searchParams.set("key", messageReply.payload.key);
     const reply = {
-      baseURL: config.public.baseURL,
+      baseURL: publicBaseURL(config, request),
       signalURL: proxyURL.href,
       key: messageReply.payload.key,
       pid: messageReply.payload.pid,
@@ -7185,14 +7230,14 @@ async function handleGET(childProcess, compositorSessionId, config, request, res
       internal: false
     };
     response.writeHead(201, "Created", {
-      "Access-Control-Allow-Origin": config.server.http.allowOrigin,
+      "Access-Control-Allow-Origin": pickAllowOrigin(config, request),
       "Access-Control-Allow-Credentials": "true",
       "Content-Type": "application/json"
     }).end(JSON.stringify(reply));
   } catch (e) {
     logger.error(e);
     response.writeHead(500, "Internal Server Error", {
-      "Access-Control-Allow-Origin": config.server.http.allowOrigin,
+      "Access-Control-Allow-Origin": pickAllowOrigin(config, request),
       "Access-Control-Allow-Credentials": "true",
       "Content-Type": "text/plain"
     }).end("Application could not be started.");

@@ -1,0 +1,105 @@
+diff --git a/packages/compositor-proxy/src/NativeWaylandCompositorSession.ts b/packages/compositor-proxy/src/NativeWaylandCompositorSession.ts
+index bb5a33a..f46cc6f 100644
+--- a/packages/compositor-proxy/src/NativeWaylandCompositorSession.ts
++++ b/packages/compositor-proxy/src/NativeWaylandCompositorSession.ts
+@@ -38,6 +38,7 @@ import { Channel, createProtocolChannel } from './Channel.js'
+ import { webcrypto } from 'node:crypto'
+ import { Session } from './Session.js'
+ import { readFileSync } from 'node:fs'
++import { execFileSync } from 'node:child_process'
+ import { NativeAppContext } from './NativeAppContext.js'
+ import { pid } from 'node:process'
+ 
+@@ -74,6 +75,60 @@ function base32Encode(data: Uint8Array) {
+   return output
+ }
+ 
++type ProcInfo = { ppid: number; name: string }
++
++/**
++ * A connecting client is matched to the app that launched it by walking up its
++ * parent pids, and Linux keeps both the parent and the name in
++ * `/proc/<pid>/status`.
++ *
++ * FreeBSD does not. procfs is not mounted by default there, and where it is,
++ * `/proc/<pid>/status` is a single space-separated line in an entirely
++ * different format -- so the readFileSync threw ENOENT out of the wl_display
++ * fd callback, which is a native callback: the exception went nowhere, stayed
++ * pending on the napi env, and every later callback failed with
++ * `napi_pending_exception`. One unreadable file and the compositor went deaf
++ * on the FIRST client to connect, silently.
++ *
++ * ps(1) reports both fields, is POSIX, and costs one fork per client
++ * connection -- which happens once per app, not per frame.
++ */
++function readProcInfo(pid: number): ProcInfo | undefined {
++  try {
++    let ppid: number | undefined
++    let name: string | undefined
++    for (const line of readFileSync(`/proc/${pid}/status`, 'ascii').split('\n')) {
++      if (line.startsWith('PPid')) {
++        ppid = Number.parseInt(line.split(':')[1].trim())
++      } else if (line.startsWith('Name')) {
++        name = line.split(':')[1].trim()
++      }
++    }
++    if (ppid !== undefined) {
++      return { ppid, name: name ?? 'unknown_app' }
++    }
++  } catch {
++    // No Linux-shaped procfs. Fall through rather than throw: this runs in a
++    // native callback where a throw is unrecoverable.
++  }
++
++  try {
++    const out = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', `${pid}`], {
++      encoding: 'ascii',
++      stdio: ['ignore', 'pipe', 'ignore'],
++    }).trim()
++    const match = out.match(/^(\d+)\s+(.*)$/)
++    if (match) {
++      return { ppid: Number.parseInt(match[1]), name: match[2].trim() || 'unknown_app' }
++    }
++  } catch {
++    // The process is already gone. Also possible on Linux -- a client can exit
++    // between connecting and being looked up -- so this is not only a port fix.
++  }
++
++  return undefined
++}
++
+ function newClientId(): string {
+   const randomBytes = new Uint8Array(16)
+   webcrypto.getRandomValues(randomBytes)
+@@ -141,25 +196,16 @@ export class NativeWaylandCompositorSession {
+       return nativeAppContext
+     }
+ 
+-    for (const line of readFileSync(`/proc/${pid}/status`, 'ascii').split('\n')) {
+-      if (line.startsWith('PPid')) {
+-        const ppid = Number.parseInt(line.split(':')[1].trim())
+-        if (ppid === 0) {
+-          // no matches available
+-          return undefined
+-        } else {
+-          return this.findMatchingNativeAppContext(ppid)
+-        }
+-      }
++    const procInfo = readProcInfo(pid)
++    if (procInfo === undefined || procInfo.ppid === 0 || procInfo.ppid === pid) {
++      // no matches available
++      return undefined
+     }
++    return this.findMatchingNativeAppContext(procInfo.ppid)
+   }
+ 
+   private getNameFromPid(pid: number) {
+-    for (const line of readFileSync(`/proc/${pid}/status`, 'ascii').split('\n')) {
+-      if (line.startsWith('Name')) {
+-        return line.split(':')[1].trim()
+-      }
+-    }
++    return readProcInfo(pid)?.name
+   }
+ 
+   private clientForNativeAppContext(wlClient: WlClient) {

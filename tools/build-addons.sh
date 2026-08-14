@@ -92,6 +92,33 @@ git -C "$SRC" fetch --quiet --depth 1 origin "$REF"
 git -C "$SRC" checkout --quiet --force FETCH_HEAD
 echo "==> source commit: $(git -C "$SRC" rev-parse HEAD)"
 
+# ------------------------------------------------------------------ patches --
+# APPLIED AFTER THE CHECKOUT, EVERY TIME, and that ordering is the whole point:
+# `checkout --force` above resets the tree, so a fix made by hand in $SRC
+# survives exactly until the next run of this script and then vanishes without
+# a word. The other patches in patches/ are re-applied into node_modules by
+# tools/patch-compositor.mjs; these are compiled INTO libproxy-encoding.so, so
+# this is the only place they can go in.
+#
+# A patch that does not apply is a HARD STOP, the same rule patch-compositor.mjs
+# keeps: upstream having moved the code is a thing to go and read, not something
+# to build around. Building on would silently produce an addon missing the fix,
+# which is the failure mode §18.1 is entirely about.
+for p in "$REPO_ROOT"/patches/greenfield-*.diff; do
+  [ -e "$p" ] || continue
+  name="$(basename "$p")"
+  if git -C "$SRC" apply --check "$p" 2>/dev/null; then
+    git -C "$SRC" apply "$p"
+    echo "==> applied patch:                    $name"
+  elif git -C "$SRC" apply --reverse --check "$p" 2>/dev/null; then
+    echo "==> patch already applied:            $name"
+  else
+    echo "!!! patch does not apply: $name" >&2
+    echo "    upstream moved -- read the note beside it before forcing anything" >&2
+    exit 1
+  fi
+done
+
 # -------------------------------------------------------------------- build --
 PROXY_SRC="$SRC/packages/compositor-proxy"
 [ -f "$PROXY_SRC/CMakeLists.txt" ] || {

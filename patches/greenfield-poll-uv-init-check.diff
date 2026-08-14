@@ -1,0 +1,335 @@
+diff --git a/packages/compositor-proxy/native/poll/src/poll.c b/packages/compositor-proxy/native/poll/src/poll.c
+index 74ddc24..cf0cfa0 100644
+--- a/packages/compositor-proxy/native/poll/src/poll.c
++++ b/packages/compositor-proxy/native/poll/src/poll.c
+@@ -1,4 +1,7 @@
+ #include <stdlib.h>
++#include <stdio.h>
++#include <errno.h>
++#include <poll.h>
+ #include "node_api.h"
+ // avoid depending on libuv
+ #include "uv.h"
+@@ -30,25 +33,184 @@ if((the_call) != napi_ok) { \
+ the_call;
+ #endif
+ 
+-struct node_cb {
++/*
++ * There are two ways to watch the wayland display fd here.
++ *
++ * POLL_MODE_UV is the good one: hand the fd to libuv and let the loop we are
++ * already running in report readiness.
++ *
++ * POLL_MODE_THREAD exists because uv_poll_init() insists on putting the fd it
++ * is given into non-blocking mode, and on FreeBSD the fd it is given cannot be.
++ * wl_event_loop_get_fd() returns libwayland's epoll fd; libwayland's epoll on
++ * FreeBSD is libepoll-shim, and libepoll-shim's epoll is a KQUEUE. A kqueue
++ * descriptor rejects both ioctl(FIONBIO) and fcntl(F_SETFL) with ENOTTY -- and
++ * libuv already tries both, so there is no third thing to try. uv_poll_init
++ * therefore returns UV_ENOTTY *before* it reaches uv__handle_init, leaving
++ * handle->loop NULL.
++ *
++ * The old code ignored that return value and called uv_poll_start anyway, which
++ * dereferenced the NULL loop and took the whole session process down with
++ * SIGSEGV -- with nothing on stderr, because the failure was a return code
++ * nobody read.
++ *
++ * Note what is NOT wrong: the kernel is perfectly willing to report readiness on
++ * that fd. libuv's own uv__io_check_fd registers it on the loop's kqueue and
++ * succeeds; only the gratuitous FIONBIO is in the way. So the fallback keeps a
++ * thread blocked in poll(2) on the fd and wakes the loop through a uv_async_t,
++ * which is the one libuv primitive that is safe to fire from another thread.
++ * All wayland work still happens on the main thread, in the callback below.
++ */
++enum poll_mode {
++    POLL_MODE_UV,
++    POLL_MODE_THREAD,
++};
++
++struct poll_ctx {
++    enum poll_mode mode;
+     napi_env env;
+     napi_ref js_cb_ref;
++    int fd;
++
++    /* POLL_MODE_UV */
++    uv_poll_t poll_handle;
++
++    /* POLL_MODE_THREAD */
++    uv_async_t async;
++    uv_thread_t thread;
++    uv_sem_t resume;
++    volatile int stopping;
+ };
+ 
++/*
++ * NAPI_CALL throws and then CARRIES ON, and once an exception is pending every
++ * later napi call returns napi_pending_exception while the macro declines to
++ * rethrow it -- so a broken callback loop is completely silent. Name the first
++ * call that fails, once, so the next person gets a sentence instead of a guess.
++ */
++#define POLL_NAPI_STEP(ctx, call)                                             \
++    do {                                                                      \
++        const napi_status s_ = (call);                                        \
++        if (s_ != napi_ok) {                                                  \
++            report_napi_failure((ctx), #call, s_);                            \
++            return;                                                           \
++        }                                                                     \
++    } while (0)
++
+ static void
+-handle_poll_event(struct uv_poll_s *handle, int status, int events) {
++report_napi_failure(struct poll_ctx *ctx, const char *call, napi_status status) {
++    static int reported = 0;
++    const napi_extended_error_info *info = NULL;
++    const int quiet = reported++ > 2;
++    bool pending = false;
++    napi_value err, stack, str;
++    char buf[4096];
++    size_t len = 0;
++
++    napi_get_last_error_info(ctx->env, &info);
++    napi_is_exception_pending(ctx->env, &pending);
++
++    if (!quiet) {
++        fprintf(stderr, "poll addon: %s returned napi status %d (%s)\n",
++                call, (int) status,
++                info && info->error_message ? info->error_message : "no message");
++    }
++
++    if (!pending) {
++        return;
++    }
++
++    /*
++     * An exception left pending here is not survivable: every later napi call
++     * returns napi_pending_exception, so the display fd callback stops running
++     * and the compositor goes deaf while the fd stays readable forever. Take it
++     * off the env so the next tick has a chance, and SAY what it was -- the
++     * upstream macro rethrows nothing when an exception is already pending,
++     * which is how this managed to be completely silent.
++     */
++    if (napi_get_and_clear_last_exception(ctx->env, &err) != napi_ok || quiet) {
++        return;
++    }
++    if (napi_get_named_property(ctx->env, err, "stack", &stack) == napi_ok &&
++        napi_coerce_to_string(ctx->env, stack, &str) == napi_ok &&
++        napi_get_value_string_utf8(ctx->env, str, buf, sizeof(buf), &len) == napi_ok) {
++        fprintf(stderr, "poll addon: uncaught exception in the display fd callback:\n%s\n", buf);
++    } else {
++        fprintf(stderr, "poll addon: uncaught exception in the display fd callback (no stack)\n");
++    }
++}
++
++static void
++invoke_js_cb(struct poll_ctx *ctx, int status, int events) {
+     napi_value status_value, events_value, global, js_cb, cb_result;
+-    struct node_cb *node_cb = handle->data;
+     napi_handle_scope scope;
+ 
+-    NAPI_CALL(node_cb->env, napi_open_handle_scope(node_cb->env, &scope))
+-    NAPI_CALL(node_cb->env, napi_get_global(node_cb->env, &global))
+-    NAPI_CALL(node_cb->env, napi_create_int32(node_cb->env, status, &status_value))
+-    NAPI_CALL(node_cb->env, napi_create_int32(node_cb->env, events, &events_value))
+-    NAPI_CALL(node_cb->env, napi_get_reference_value(node_cb->env, node_cb->js_cb_ref, &js_cb))
++    POLL_NAPI_STEP(ctx, napi_open_handle_scope(ctx->env, &scope));
++    POLL_NAPI_STEP(ctx, napi_get_global(ctx->env, &global));
++    POLL_NAPI_STEP(ctx, napi_create_int32(ctx->env, status, &status_value));
++    POLL_NAPI_STEP(ctx, napi_create_int32(ctx->env, events, &events_value));
++    POLL_NAPI_STEP(ctx, napi_get_reference_value(ctx->env, ctx->js_cb_ref, &js_cb));
+     napi_value args[] = {status_value, events_value};
+-    NAPI_CALL(node_cb->env, napi_call_function(node_cb->env, global, js_cb, sizeof(args) / sizeof(args[0]), args, &cb_result))
+-    NAPI_CALL(node_cb->env, napi_close_handle_scope(node_cb->env, scope))
++    POLL_NAPI_STEP(ctx, napi_call_function(ctx->env, global, js_cb, sizeof(args) / sizeof(args[0]), args, &cb_result));
++    POLL_NAPI_STEP(ctx, napi_close_handle_scope(ctx->env, scope));
++}
++
++static void
++handle_poll_event(struct uv_poll_s *handle, int status, int events) {
++    invoke_js_cb(handle->data, status, events);
++}
++
++static void
++handle_async_event(uv_async_t *async) {
++    struct poll_ctx *ctx = async->data;
++
++    invoke_js_cb(ctx, 0, UV_READABLE);
++    /*
++     * poll(2) is level-triggered, so the watcher must not go back into it until
++     * the callback above has drained the fd -- otherwise it returns immediately
++     * and the thread spins.
++     */
++    uv_sem_post(&ctx->resume);
++}
++
++static void
++watch_fd(void *arg) {
++    struct poll_ctx *ctx = arg;
++
++    while (!ctx->stopping) {
++        struct pollfd p = {.fd = ctx->fd, .events = POLLIN, .revents = 0};
++        /* A timeout rather than -1, so a stop is noticed even if the fd never
++         * becomes readable again. */
++        const int rv = poll(&p, 1, 200);
++
++        if (ctx->stopping) {
++            break;
++        }
++        if (rv < 0) {
++            if (errno == EINTR) {
++                continue;
++            }
++            fprintf(stderr, "poll(fd=%d) failed: %s\n", ctx->fd, uv_strerror(uv_translate_sys_error(errno)));
++            break;
++        }
++        if (rv == 0) {
++            continue;
++        }
++
++        uv_async_send(&ctx->async);
++        uv_sem_wait(&ctx->resume);
++    }
++}
++
++void
++poll_handle_close(struct uv_handle_s *handle) {
++    struct poll_ctx *ctx = handle->data;
++
++    NAPI_CALL(ctx->env, napi_delete_reference(ctx->env, ctx->js_cb_ref))
++
++    if (ctx->mode == POLL_MODE_THREAD) {
++        uv_sem_destroy(&ctx->resume);
++    }
++    free(ctx);
+ }
+ 
+ /**
+@@ -63,52 +225,95 @@ handle_poll_event(struct uv_poll_s *handle, int status, int events) {
+  */
+ napi_value
+ start_poll(napi_env env, napi_callback_info info) {
+-    static size_t argc = 2;
+-    napi_value return_value, argv[argc];
++    /*
++     * NOT static: napi_get_cb_info writes the *actual* argument count back
++     * through this, so a static would keep whatever the smallest call ever
++     * passed and every later call would size argv from that.
++     */
++    size_t argc = 2;
++    napi_value return_value, argv[2];
+     napi_ref js_cb_ref;
+     int32_t fd;
+     struct uv_loop_s *loop;
+-    struct uv_poll_s *poll_handle = calloc(1, sizeof(*poll_handle));
+-    struct node_cb *node_cb = calloc(1, sizeof(*node_cb));
++    struct poll_ctx *ctx = calloc(1, sizeof(*ctx));
++
++    if (ctx == NULL) {
++        napi_throw_error(env, NULL, "Out of memory allocating a poll context");
++        return NULL;
++    }
+ 
+     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+     NAPI_CALL(env, napi_get_value_int32(env, argv[0], &fd))
+-    NAPI_CALL(env, napi_create_external(env, (void *) poll_handle, NULL, NULL, &return_value))
++    NAPI_CALL(env, napi_create_external(env, (void *) ctx, NULL, NULL, &return_value))
+     NAPI_CALL(env, napi_get_uv_event_loop(env, &loop))
+     NAPI_CALL(env, napi_create_reference(env, argv[1], 1, &js_cb_ref))
+ 
+-    node_cb->env = env;
+-    node_cb->js_cb_ref = js_cb_ref;
+-    poll_handle->data = node_cb;
++    ctx->env = env;
++    ctx->js_cb_ref = js_cb_ref;
++    ctx->fd = fd;
++    ctx->poll_handle.data = ctx;
++    ctx->async.data = ctx;
+ 
+-    uv_poll_init(loop, poll_handle, fd);
+-    uv_poll_start(poll_handle, UV_READABLE, handle_poll_event);
++    const int init_err = uv_poll_init(loop, &ctx->poll_handle, fd);
++    if (init_err == 0) {
++        const int start_err = uv_poll_start(&ctx->poll_handle, UV_READABLE, handle_poll_event);
++        if (start_err) {
++            ctx->mode = POLL_MODE_UV;
++            uv_close((struct uv_handle_s *) &ctx->poll_handle, poll_handle_close);
++            napi_throw_error(env, NULL, uv_strerror(start_err));
++            return NULL;
++        }
++        ctx->mode = POLL_MODE_UV;
++        return return_value;
++    }
+ 
+-    return return_value;
+-}
++    /*
++     * uv_poll_init failed, which means it returned BEFORE initialising the
++     * handle. Nothing in ctx->poll_handle is usable and it must not be closed.
++     */
++    fprintf(stderr, "uv_poll_init(fd=%d) failed: %s -- watching the fd on a thread instead.\n",
++            fd, uv_strerror(init_err));
+ 
+-void
+-poll_handle_close(struct uv_handle_s* handle) {
+-    struct node_cb *node_cb = handle->data;
+-
+-    NAPI_CALL(node_cb->env, napi_delete_reference(node_cb->env, node_cb->js_cb_ref))
++    ctx->mode = POLL_MODE_THREAD;
++    if (uv_sem_init(&ctx->resume, 0)) {
++        napi_throw_error(env, NULL, "Failed to create the fd watcher semaphore");
++        return NULL;
++    }
++    if (uv_async_init(loop, &ctx->async, handle_async_event)) {
++        uv_sem_destroy(&ctx->resume);
++        napi_throw_error(env, NULL, "Failed to create the fd watcher async handle");
++        return NULL;
++    }
++    if (uv_thread_create(&ctx->thread, watch_fd, ctx)) {
++        uv_close((struct uv_handle_s *) &ctx->async, poll_handle_close);
++        napi_throw_error(env, NULL, "Failed to start the fd watcher thread");
++        return NULL;
++    }
+ 
+-    free(node_cb);
+-    free(handle);
++    return return_value;
+ }
+ 
+ static napi_value
+ stop_poll(napi_env env, napi_callback_info info) {
+-    static size_t argc = 1;
+-    napi_value argv[argc], return_value;
+-    struct uv_poll_s *poll_handle;
++    size_t argc = 1;
++    napi_value argv[1], return_value;
++    struct poll_ctx *ctx;
+ 
+     NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL))
+-    NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &poll_handle))
++    NAPI_CALL(env, napi_get_value_external(env, argv[0], (void **) &ctx))
+     NAPI_CALL(env, napi_get_undefined(env, &return_value))
+ 
+-    uv_poll_stop(poll_handle);
+-    uv_close((struct uv_handle_s*)poll_handle, poll_handle_close);
++    if (ctx->mode == POLL_MODE_THREAD) {
++        ctx->stopping = 1;
++        /* In case it is parked waiting to be re-armed rather than in poll(). */
++        uv_sem_post(&ctx->resume);
++        /* Join BEFORE closing: uv_async_send on a closed handle is undefined. */
++        uv_thread_join(&ctx->thread);
++        uv_close((struct uv_handle_s *) &ctx->async, poll_handle_close);
++    } else {
++        uv_poll_stop(&ctx->poll_handle);
++        uv_close((struct uv_handle_s *) &ctx->poll_handle, poll_handle_close);
++    }
+ 
+     return return_value;
+ }
+@@ -124,4 +329,4 @@ init(napi_env env, napi_value exports) {
+     return exports;
+ }
+ 
+-NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
+\ No newline at end of file
++NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
