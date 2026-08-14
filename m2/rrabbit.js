@@ -49,6 +49,44 @@ let nextSlot = 0
 // well inside it.
 const SIGN_OFFSET = 330
 
+// ---------------------------------------------------------------------------
+// HOW BIG A WINDOW IS, IN WORLD UNITS -- one scale, used everywhere.
+//
+// This used to be `sw = 300` for EVERY window, with the height taken from the
+// surface's aspect. Two things fall out of that, and both were reported:
+//
+//   1. A 250x250 client and a 1920x1080 client got the SAME 300-wide board, at
+//      wildly different pixel-to-world scales. The board never told you how big
+//      the window was, only what shape it was.
+//   2. The resize grab could not change a sign's width. Drag it wider, the
+//      preview scales the quad wider, you let go, the client reallocates, the
+//      sign is rebuilt -- at 300 wide again, just shorter. The width snapped
+//      back every time. "The --> resizing doesn't actually resize things."
+//
+// So world size is now surface size times ONE constant, and a bigger window is a
+// bigger sign. The constant is chosen so the CANONICAL window is exactly the
+// 300-wide board the road was laid out around -- which makes this change a
+// no-op at the canonical size, and a difference only as a window departs from
+// it. Everything the road's geometry was tuned against still holds there.
+const SIGN_W = 300
+// The shape a window is asked for when nothing has said otherwise: 16:10, and
+// big enough to be a usable application window rather than a swatch. A client
+// may refuse it -- see askForRememberedSize -- and refusing is legitimate.
+const DEFAULT_PX = { w: 960, h: 600 }
+const UNITS_PER_PX = SIGN_W / DEFAULT_PX.w
+
+// The inner edge of a sign, measured from its road's centre line. A sign must
+// CLEAR THE ROAD: the road is 320 wide (±160), so 180 leaves 20 units of verge,
+// and the gantry's width was cut to match on the same argument.
+//
+// Pinned as the INNER edge rather than as a centre offset, which is what
+// `SIGN_OFFSET = 330` was: 330 - 300/2 = 180, identical while every sign was 300
+// wide, and wrong the moment one is not. A 600-wide sign at a fixed centre of
+// 330 reaches x=30 and lies across its own road. Pinning the inner edge means a
+// sign grows OUTWARD, away from the traffic, which is also what a roadside
+// board does.
+const SIGN_INNER = SIGN_OFFSET - SIGN_W / 2
+
 // The `-->` is wider than it is tall, so the grab is not square. HANDLE is the
 // hit-area unit; the visible text gets its own proportions.
 const HANDLE = 34
@@ -457,10 +495,14 @@ function makeSign(view, milepost, district, side, dash) {
 
   const { rt, tex } = adoptSurfaceTexture(rs)
 
-  // One sign is sized to ITS OWN surface. M0's board was a fixed rectangle and
-  // a 250x250 client filled a corner of it -- correct behaviour, wrong framing.
-  const sw = 300
-  const sh = (sw * height) / width
+  // One sign is sized to ITS OWN surface, at the one scale every sign uses. M0's
+  // board was a fixed rectangle and a 250x250 client filled a corner of it --
+  // correct behaviour, wrong framing. A fixed 300 WIDTH was the next version of
+  // the same mistake: it framed the picture perfectly and still told you nothing
+  // about how big the window was, and it is what made the resize grab unable to
+  // change a width. See UNITS_PER_PX.
+  const sw = width * UNITS_PER_PX
+  const sh = height * UNITS_PER_PX
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(sw, sh),
     new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
@@ -847,9 +889,24 @@ function makeSign(view, milepost, district, side, dash) {
 // surface's height, once, in makeSign. Moving a window along the road does not
 // change how tall it is.
 const SIGN_TURN = 0.42
+// FROM THE INNER EDGE, not from a fixed centre. Signs are no longer all one
+// width, and a centre offset that was right at 300 puts a 600-wide sign across
+// its own road. `SIGN_INNER + sw/2` is identical at 300 and correct at any
+// width -- the board grows away from the traffic.
+//
+// ONE FUNCTION, because syncPlacement asks the same question every frame to
+// decide whether a mesh is where its address says. That test used to inline
+// `laneX + side * SIGN_OFFSET`, a second copy of arithmetic this file already
+// warns about copying -- and with a width in it, the copy would answer "not
+// where it should be" forever for any sign that is not 300 wide.
+function signX(district, side, mesh) {
+  const halfW = (mesh?.geometry?.parameters?.width ?? SIGN_W) / 2
+  return ws.laneX(district) + side * (SIGN_INNER + halfW)
+}
+
 function positionSign(parts, district, side, dash) {
   const { mesh, frame, post } = parts
-  mesh.position.x = ws.laneX(district) + side * SIGN_OFFSET
+  mesh.position.x = signX(district, side, mesh)
   mesh.position.z = windowZ(dash)
   mesh.rotation.y = -side * SIGN_TURN
   if (frame) {
@@ -917,7 +974,7 @@ function syncPlacement() {
     // synchronous -- but placing one would resolve its z to NaN and take the mesh
     // out of the scene for good.
     if (!here || !Number.isInteger(s.dash)) continue
-    const x = ws.laneX(s.district) + s.side * SIGN_OFFSET
+    const x = signX(s.district, s.side, s.mesh)
     const z = windowZ(s.dash)
     if (s.mesh.position.x === x && s.mesh.position.z === z) continue
     positionSign(s, s.district, s.side, s.dash)
@@ -1397,8 +1454,21 @@ const RESTORE_FOR = 6000
 const restoring = new Map()
 
 function askForRememberedSize(k, view, district, milepost, size) {
-  const want = layout.sizeOf(district, milepost)
-  if (!want) return false
+  // A REMEMBERED SIZE IF THERE IS ONE, THE CANONICAL SIZE IF THERE IS NOT.
+  //
+  // There used to be no second half, so a window at an address nobody had sized
+  // arrived at whatever its client felt like -- 250x250 for a test client, a
+  // browser's own idea of a default for Firefox -- and the board took that shape.
+  // Two windows opened the same way stood at two different sizes for no reason a
+  // user could see or change, which is the "wrong dimensions on initial load"
+  // half of this. The canonical size is the one the road was laid out around, so
+  // a fresh window is a 300-wide board and the picture fills it exactly.
+  //
+  // Still only an ASK. The re-ask loop below and its deadline are unchanged, and
+  // a client with a larger minimum size is refusing legitimately -- it keeps what
+  // it chose, and its sign is drawn at whatever that turned out to be, because
+  // the sign follows the surface rather than the other way round.
+  const want = layout.sizeOf(district, milepost) ?? { w: DEFAULT_PX.w, h: DEFAULT_PX.h }
   if (size && size.width === want.w && size.height === want.h) return false
   const role = view?.surface?.role
   // BY SHAPE, NOT BY CLASS NAME -- minification renames constructors and every

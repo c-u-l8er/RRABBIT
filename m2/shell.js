@@ -2210,6 +2210,35 @@ window.__views = () =>
       knownAsSign: signs.has(keyOf(v)),
       size,
       texSize,
+      // THE WINDOW RECT THE CLIENT DECLARED, which is not the buffer it painted.
+      // A client drawing its own decorations paints a shadow into the buffer and
+      // then calls `xdg_surface.set_window_geometry` to say which part of it is
+      // actually the window. Size the sign off the buffer and the frame stands
+      // off the visible edge by however much shadow there is.
+      geom: (() => {
+        const g = v.surface?.geometry
+        return g?.size ? { x: g.x0, y: g.y0, w: g.size.width, h: g.size.height } : null
+      })(),
+      // THE QUAD ITSELF, and the surface size it was BUILT from -- which is the
+      // pair that says whether a sign is stale. `makeSign` fixes the width at
+      // SIGN_W and takes the aspect from the surface at the moment it builds, so
+      // sign and surface agree by construction and can only disagree by the
+      // rebuild not having happened. Reporting only the quad would hide that;
+      // reporting only the surface would hide it the other way.
+      sign: (() => {
+        const sg = signs.get(keyOf(v))
+        const p = sg?.mesh?.geometry?.parameters
+        if (!p) return null
+        return {
+          w: +p.width.toFixed(2),
+          h: +p.height.toFixed(2),
+          builtFrom: sg.size ? { w: sg.size.width, h: sg.size.height } : null,
+          // Same number from both sides. If these differ the quad is showing a
+          // shape the surface has stopped being.
+          aspect: +(p.width / p.height).toFixed(4),
+          surfaceAspect: size ? +(size.w / size.h).toFixed(4) : null,
+        }
+      })(),
       uv: size && texSize ? { sx: +(size.w / texSize.w).toFixed(4), sy: +(size.h / texSize.h).toFixed(4) } : null,
       // Two views reporting the same texId ARE the same picture, whatever their
       // titles say.
