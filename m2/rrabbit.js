@@ -69,9 +69,10 @@ const SIGN_OFFSET = 330
 // no-op at the canonical size, and a difference only as a window departs from
 // it. Everything the road's geometry was tuned against still holds there.
 const SIGN_W = 300
-// The shape a window is asked for when nothing has said otherwise: 16:10, and
-// big enough to be a usable application window rather than a swatch. A client
-// may refuse it -- see askForRememberedSize -- and refusing is legitimate.
+// The window this scale is calibrated on. Nothing is CONFIGURED to this size --
+// asking for it at adoption was tried and taken back out, see
+// askForRememberedSize -- it exists so the constant below has a stated origin
+// rather than being a bare 0.3125.
 const DEFAULT_PX = { w: 960, h: 600 }
 const UNITS_PER_PX = SIGN_W / DEFAULT_PX.w
 
@@ -1454,21 +1455,31 @@ const RESTORE_FOR = 6000
 const restoring = new Map()
 
 function askForRememberedSize(k, view, district, milepost, size) {
-  // A REMEMBERED SIZE IF THERE IS ONE, THE CANONICAL SIZE IF THERE IS NOT.
+  // A REMEMBERED SIZE, AND ONLY A REMEMBERED SIZE.
   //
-  // There used to be no second half, so a window at an address nobody had sized
-  // arrived at whatever its client felt like -- 250x250 for a test client, a
-  // browser's own idea of a default for Firefox -- and the board took that shape.
-  // Two windows opened the same way stood at two different sizes for no reason a
-  // user could see or change, which is the "wrong dimensions on initial load"
-  // half of this. The canonical size is the one the road was laid out around, so
-  // a fresh window is a 300-wide board and the picture fills it exactly.
+  // A canonical size for every fresh window was tried here and TAKEN BACK OUT,
+  // because it made static clients render black. Kept as a comment rather than
+  // deleted, because the size is still wanted and the reason it cannot be asked
+  // for yet is the interesting part:
   //
-  // Still only an ASK. The re-ask loop below and its deadline are unchanged, and
-  // a client with a larger minimum size is refusing legitimately -- it keeps what
-  // it chose, and its sign is drawn at whatever that turned out to be, because
-  // the sign follows the surface rather than the other way round.
-  const want = layout.sizeOf(district, milepost) ?? { w: DEFAULT_PX.w, h: DEFAULT_PX.h }
+  //   `adoptSurfaceTexture` allocates a NEW, EMPTY render target every time a
+  //   sign is built, and a sign is rebuilt when its surface changes size. The
+  //   rebuild is triggered BY the new size -- which the shell only learns from
+  //   the commit that has already rendered into the OLD target. So every resize
+  //   loses exactly one frame. A client that animates repaints immediately and
+  //   nobody notices; a static one -- a dialog, a "restore session" prompt --
+  //   has already painted its only frame, and its board stays black for good.
+  //
+  // Measured on the image: a Firefox "Restore Session" dialog took the canonical
+  // 960x600, its sign was correctly 300x187.5, and the glass was empty. Windows
+  // that REFUSED the size (Firefox's main window at 1212x546) were never rebuilt
+  // and rendered perfectly -- which is the tell, and the wrong way round.
+  //
+  // The resize path has always had this hole; asking at adoption is what made
+  // every window walk into it. Carrying the old picture into the new target is
+  // the fix, and it belongs to the resize path, not here.
+  const want = layout.sizeOf(district, milepost)
+  if (!want) return false
   if (size && size.width === want.w && size.height === want.h) return false
   const role = view?.surface?.role
   // BY SHAPE, NOT BY CLASS NAME -- minification renames constructors and every
