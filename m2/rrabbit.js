@@ -450,7 +450,37 @@ function plateTexture(title, width) {
 // branch. (The old branch was measured, not guessed -- on a real xterm,
 // `[travis@PX13 RRABBIT]` came out `[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]`, a vertical mirror.
 // It measured the accident faithfully.)
-function adoptSurfaceTexture(rs) {
+// THE PART OF THE BUFFER THAT IS ACTUALLY THE WINDOW.
+//
+// A client drawing its own decorations paints a shadow into its buffer and then
+// calls `xdg_surface.set_window_geometry` to say which rectangle of it is the
+// window. Nothing here read that, so a sign showed the whole buffer -- window
+// AND shadow -- and the shadow is unpainted, which arrives as opaque black once
+// the encoder has been through it. Measured on this image: mousepad committed a
+// 775x443 buffer whose window rect is `{x:26, y:23, w:723, h:391}`, and the
+// board carried a black margin on the left, the top and the bottom.
+//
+// VALIDATED, NOT TRUSTED. Greenfield's `surface.geometry` is not always the xdg
+// rect -- on `foot` it reported `{y:-26, h:338}` against a 312-tall buffer, i.e.
+// a rectangle taller than the thing it describes and starting above it. That is
+// a bounding box of something else, and using it as an inset would crop a
+// window to a lie. Anything that does not sit inside the buffer is refused and
+// the whole buffer is used, which is exactly the old behaviour.
+function windowRectOf(surface, size) {
+  const g = surface?.geometry
+  if (!g?.size) return null
+  const x = g.x0, y = g.y0, w = g.size.width, h = g.size.height
+  if (![x, y, w, h].every(Number.isFinite)) return null
+  if (w <= 0 || h <= 0) return null
+  if (x < 0 || y < 0) return null
+  if (x + w > size.width || y + h > size.height) return null
+  // A rect that IS the buffer is not a crop; say so rather than doing the
+  // arithmetic and landing back where we started.
+  if (x === 0 && y === 0 && w === size.width && h === size.height) return null
+  return { x, y, w, h }
+}
+
+function adoptSurfaceTexture(rs, crop) {
   const { width, height } = rs.size
   const rt = new THREE.WebGLRenderTarget(width, height)
   rt.depthTexture = new THREE.DepthTexture(width, height)
@@ -479,12 +509,19 @@ function adoptSurfaceTexture(rs) {
   const tw = rs.texture?.size?.width || width
   const th = rs.texture?.size?.height || height
   const DIAG = new URLSearchParams(location.search).get('uv')
-  const sx = DIAG === 'full' ? 1 : width / tw
-  const sy = DIAG === 'full' ? 1 : height / th
-  const ox = DIAG === 'farcorner' ? 1 - sx : 0
-  const oy = DIAG === 'farcorner' ? 1 - sy : 0
-  tex.repeat.set(sx, -sy)
-  tex.offset.set(ox, oy + sy)
+  // The window rect inside the buffer, in surface pixels. Without a crop this is
+  // the whole surface and every line below reduces to what it was.
+  const gx = DIAG || !crop ? 0 : crop.x
+  const gy = DIAG || !crop ? 0 : crop.y
+  const gw = DIAG === 'full' ? tw : (crop && !DIAG ? crop.w : width)
+  const gh = DIAG === 'full' ? th : (crop && !DIAG ? crop.h : height)
+  const ox = DIAG === 'farcorner' ? 1 - gw / tw : gx / tw
+  const oy = DIAG === 'farcorner' ? 1 - gh / th : gy / th
+  // Surface row 0 is texel row 0 (see the note above), so surface row r is at
+  // v = r/th. The crop spans rows gy..gy+gh, and the quad is flipped, so quad
+  // v=1 must land on gy and quad v=0 on gy+gh.
+  tex.repeat.set(gw / tw, -gh / th)
+  tex.offset.set(ox, oy + gh / th)
   return { rt, tex }
 }
 
@@ -494,7 +531,10 @@ function makeSign(view, milepost, district, side, dash) {
   const { width, height } = rs.size
   if (!width || !height) return null
 
-  const { rt, tex } = adoptSurfaceTexture(rs)
+  // The window, not the buffer. A client that draws its own shadow commits a
+  // buffer bigger than its window; the board should be the window.
+  const crop = windowRectOf(view.surface, rs.size)
+  const { rt, tex } = adoptSurfaceTexture(rs, crop)
 
   // One sign is sized to ITS OWN surface, at the one scale every sign uses. M0's
   // board was a fixed rectangle and a 250x250 client filled a corner of it --
@@ -502,8 +542,11 @@ function makeSign(view, milepost, district, side, dash) {
   // the same mistake: it framed the picture perfectly and still told you nothing
   // about how big the window was, and it is what made the resize grab unable to
   // change a width. See UNITS_PER_PX.
-  const sw = width * UNITS_PER_PX
-  const sh = height * UNITS_PER_PX
+  //
+  // Sized to the CROP, so the frame lands on the window's own edge rather than
+  // on the outside of its shadow.
+  const sw = (crop ? crop.w : width) * UNITS_PER_PX
+  const sh = (crop ? crop.h : height) * UNITS_PER_PX
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(sw, sh),
     new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
@@ -869,6 +912,10 @@ function makeSign(view, milepost, district, side, dash) {
     tex,
     rt,
     size: { width, height },
+    // The window rect this sign was built against, kept so adoptPending can tell
+    // that a client has DECLARED one since -- a change that moves the picture
+    // without changing the buffer size, and would otherwise never be noticed.
+    crop,
   }
 }
 
@@ -1531,7 +1578,14 @@ function adoptPending() {
       // Invariant 6: content changes, PLACEMENT DOES NOT. The milepost is the
       // window's address and is never recomputed.
       const rs = view.renderStates[SCENE_ID]
-      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height)) {
+      // A SIZE CHANGE OR A WINDOW-RECT CHANGE. The second one matters on its own:
+      // a client may commit its first buffer and only then call
+      // set_window_geometry, which moves the picture inside a buffer whose size
+      // never changed. Comparing sizes alone leaves that sign showing the shadow
+      // for the rest of its life.
+      const nextCrop = rs ? windowRectOf(view.surface, rs.size) : null
+      const cropMoved = JSON.stringify(nextCrop) !== JSON.stringify(existing.crop ?? null)
+      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved)) {
         // A resized surface is a new texture allocation. Rebuild the sign in
         // place, at the SAME milepost.
         //

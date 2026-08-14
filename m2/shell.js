@@ -116,6 +116,36 @@ import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.j
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 
+// THE DECODER'S OWN GEOMETRY -- the runbook's probe for a picture that does not
+// line up, and the one that found section 23. A padded decode and a shifted
+// visibleRect look identical on the glass and are entirely different faults, so
+// this reports what the decoder says rather than what the surface says.
+//
+// AT MODULE SCOPE ON PURPOSE: it has to be in place before Greenfield builds a
+// decoder, and `?remote=` launches during boot, so there is no later moment to
+// arm it from. Cheap -- it records five numbers per frame and forwards.
+export const decodeGeom = { frames: 0, last: null }
+if (typeof window.VideoDecoder === 'function') {
+  const RealVD = window.VideoDecoder
+  const Patched = function (init) {
+    return new RealVD({
+      output: (f) => {
+        decodeGeom.frames++
+        const r = f.visibleRect
+        decodeGeom.last = {
+          coded: [f.codedWidth, f.codedHeight],
+          visible: r ? [r.x, r.y, r.width, r.height] : null,
+          format: f.format,
+        }
+        init.output(f)
+      },
+      error: init.error,
+    })
+  }
+  Patched.isConfigSupported = RealVD.isConfigSupported.bind(RealVD)
+  window.VideoDecoder = Patched
+}
+
 // state lives in world.js now; the page and the diagnostics still expect it
 // to come from here.
 export { state }
@@ -2186,6 +2216,76 @@ const texIdOf = (t) => {
   return texIds.get(t)
 }
 
+// WHAT IS ACTUALLY IN THE SURFACE, in surface pixels, read off the adopted
+// render target rather than inferred from a screenshot.
+//
+// The black band along the top of native windows has been argued about from
+// screenshots three times and every argument needed a scale factor nobody had
+// measured. This reads a column and a row of the real thing and says how many
+// pixels at each edge are black -- so "the client painted that" and "we sampled
+// the wrong rectangle" stop being indistinguishable.
+//
+// GL readback is BOTTOM-UP: index 0 of the column is the surface's BOTTOM row.
+//
+// IT CANNOT READ THE SIGN'S OWN TARGET. `adoptSurfaceTexture` attaches
+// Greenfield's texture with `setRenderTargetTextures`, and reading that back
+// returns all zeros with alpha 0 -- measured, on windows that were visibly
+// rendering a bright test pattern at the time. So the texture is drawn through
+// a target this file owns, with the SAME material settings the sign uses, and
+// that copy is what gets read. What comes back is then what the glass shows.
+let probeRT = null, probeScene = null, probeCam = null, probeMat = null
+function probeSetup(w, h) {
+  if (!probeScene) {
+    probeScene = new THREE.Scene()
+    probeCam = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, 0, 1)
+    probeMat = new THREE.MeshBasicMaterial({ toneMapped: false })
+    probeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), probeMat))
+  }
+  if (!probeRT || probeRT.width !== w || probeRT.height !== h) {
+    probeRT?.dispose()
+    probeRT = new THREE.WebGLRenderTarget(w, h)
+  }
+  return probeRT
+}
+
+window.__edges = (thresh = 8) =>
+  [...signs.values()]
+    .filter((s) => s.tex && s.size)
+    .map((s) => {
+      const w = s.size.width, h = s.size.height
+      const col = new Uint8Array(h * 4)
+      const row = new Uint8Array(w * 4)
+      try {
+        const rt = probeSetup(w, h)
+        probeMat.map = s.tex
+        probeMat.needsUpdate = true
+        const prev = renderer.getRenderTarget()
+        renderer.setRenderTarget(rt)
+        renderer.render(probeScene, probeCam)
+        renderer.setRenderTarget(prev)
+        renderer.resetState()
+        renderer.readRenderTargetPixels(rt, Math.floor(w / 2), 0, 1, h, col)
+        renderer.readRenderTargetPixels(rt, 0, Math.floor(h / 2), w, 1, row)
+      } catch (e) {
+        return { at: `${s.district}:${s.milepost}`, error: String(e) }
+      }
+      const dark = (buf, i) => buf[i * 4] <= thresh && buf[i * 4 + 1] <= thresh && buf[i * 4 + 2] <= thresh
+      let bottom = 0; while (bottom < h && dark(col, bottom)) bottom++
+      let top = 0; while (top < h && dark(col, h - 1 - top)) top++
+      let left = 0; while (left < w && dark(row, left)) left++
+      let right = 0; while (right < w && dark(row, w - 1 - right)) right++
+      return {
+        at: `${s.district}:${s.milepost}`,
+        size: [w, h],
+        // Black pixels at each edge of the SURFACE, in surface pixels.
+        blackTop: top, blackBottom: bottom, blackLeft: left, blackRight: right,
+        // The alpha at the very top-left, because a transparent region and a
+        // black one look identical on the glass and are different faults.
+        topAlpha: col[(h - 1) * 4 + 3],
+        midAlpha: col[Math.floor(h / 2) * 4 + 3],
+      }
+    })
+
 window.__views = () =>
   session.renderer.topLevelViews.map((v) => {
     // THE TWO SIZES `adoptSurfaceTexture` DIVIDES, reported rather than inferred.
@@ -2237,6 +2337,10 @@ window.__views = () =>
           // shape the surface has stopped being.
           aspect: +(p.width / p.height).toFixed(4),
           surfaceAspect: size ? +(size.w / size.h).toFixed(4) : null,
+          // What windowRectOf actually returned for this sign. `geom` says what
+          // the client declared; this says whether the shell accepted it. The two
+          // disagreeing silently is what cost a whole round of guessing.
+          crop: sg.crop ?? null,
         }
       })(),
       uv: size && texSize ? { sx: +(size.w / texSize.w).toFixed(4), sy: +(size.h / texSize.h).toFixed(4) } : null,
@@ -2368,6 +2472,11 @@ window.__pointAtPopup = () => {
           // a fault in what was drawn, and those two have nothing in common.
           passes: window.__passes(),
           views: window.__views(),
+          // Black pixels at each edge of each surface, measured. In here rather
+          // than only on `window` because the machine this question is about is
+          // a kiosk with no console.
+          edges: window.__edges(),
+          decode: decodeGeom,
           h264,
           errors: errorLog,
         }),
