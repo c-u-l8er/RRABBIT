@@ -156,10 +156,36 @@ function closePopup() {
   ;(window as any).__menuState = 'popup-closed'
 }
 
+// WHAT `X--` DOES, and until now the answer was nothing.
+//
+// `xdg_toplevel.close` is a REQUEST, not an order -- the compositor asks and the
+// client decides -- and this client's listener was `close: () => {}`, so the
+// shell asked and was ignored. The sign stayed on the road, `requestCloseWindow`
+// had done everything it could, and the only way out was to reload the page. It
+// looked like a broken control in the shell and it was a client with no answer.
+//
+// simple-shm has always had one (`xdgToplevelClose` -> `terminate()` -> destroy
+// the window and close the display); this is the same sequence, written out,
+// because there is no Window class here to hang it on. The POPUP GOES FIRST: a
+// child surface outliving its parent is the one ordering the protocol will not
+// forgive.
+function closeToplevel() {
+  closePopup()
+  toplevel?.destroy()
+  xdgSurface?.destroy()
+  surface?.destroy()
+  ;(window as any).__menuState = 'closed'
+  // The surface is gone from the compositor's list the moment the connection
+  // does, which is what takes the sign off the road -- `signs` is reconciled
+  // against the live views every frame.
+  display?.close()
+}
+
 // Exposed so a test can drive the popup deterministically rather than waiting
 // for a timer to line up with a screenshot.
 ;(window as any).__openMenu = () => openPopup()
 ;(window as any).__closeMenu = () => closePopup()
+;(window as any).__closeWindow = () => closeToplevel()
 
 async function main() {
   display = await connect()
@@ -197,7 +223,7 @@ async function main() {
     },
   }
   toplevel = xdgSurface.getToplevel()
-  toplevel.listener = { configure: () => {}, close: () => {} } as any
+  toplevel.listener = { configure: () => {}, close: () => closeToplevel() } as any
   toplevel.setTitle('menu-shm')
   toplevel.setAppId('rrabbit.menu-shm')
   surface.commit()

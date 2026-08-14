@@ -23,17 +23,61 @@
         height: 100%;
         display: block;
       }
+      /* THE COCKPIT. Its own 2D canvas over the scene, never on #gl -- that one
+         belongs to Greenfield and three together and cannot take a 2D context.
+         z-index 3: over the scene (auto), under the yoke's mesh (4), the
+         #status/#why labels (5) and the map (6), so nothing the shell has to SAY is ever behind an instrument.
+
+         pointer-events:none is not a detail. RRABBIT resolves clicks by
+         raycasting the road and by a capture-phase listener on window, and a
+         canvas lying over the whole viewport with pointer-events:auto is the
+         exact shape of the bug that once ate every click in the graph box. The
+         dashboard is an instrument panel, not a control surface. */
+      #dashcv {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        pointer-events: none;
+        display: block;
+      }
+      /* The yoke's own WebGL surface, pinned by dash.js to the square the
+         dashboard reserves for it. Same pointer rule as #dashcv and one z-index
+         above it, so the lit mesh comes out in front of the console it is
+         mounted in rather than behind it. Hidden outright if the context could
+         not be granted -- see createDash, which then paints the flat fallback on
+         #dashcv instead. */
+      #yokecv {
+        position: fixed;
+        z-index: 4;
+        pointer-events: none;
+        display: block;
+      }
       #why {
         position: fixed;
         left: 50%;
         transform: translateX(-50%);
-        bottom: 10px;
-        z-index: 4;
+        /* ABOVE THE HOOD, not 10px off the floor. `--dashtop` is published every
+           frame by dash.js from the same curve it paints the crown with, so the
+           strip that names what is over its redline cannot end up behind the
+           tube that is over it. Falls back to the old value if the dash has not
+           drawn yet. */
+        bottom: calc(100% - var(--dashtop, 100%) + 12px);
+        z-index: 5;
         max-width: 92vw;
         text-align: center;
         color: #ff5a3c;
         text-shadow: 0 0 6px #03040a, 0 0 12px #03040a;
         pointer-events: none;
+      }
+      /* FULL SCREEN HIDES EVERY STRIP THE SHELL OWNS. `#why` carries invariant 1
+         and giving it up is a real cost, so it is a cost the shell only pays
+         when you have explicitly asked for nothing but the window -- and the
+         moment you leave, it is back. The class is set by shell.js off
+         `state.full`, so there is one source for the state and the CSS only
+         reacts to it. */
+      :root.full #status,
+      :root.full #why {
+        display: none;
       }
       #why[data-state='stale'] {
         color: #8f8fa0;
@@ -42,7 +86,7 @@
         position: fixed;
         left: 12px;
         top: 12px;
-        z-index: 4;
+        z-index: 5;
         /* A LABEL MUST NOT EAT CLICKS. The resize grab sits at the top-right of
            a flattened window, which on a short viewport is the same band this
            line occupies -- and the shell's pointer handlers only survive that
@@ -53,11 +97,26 @@
         background: rgba(3, 4, 10, 0.85);
         border: 1px solid #c8862a;
         color: #f2c14e;
+        /* A PLATE, NOT A BANNER. This ran the full width of the frame as one
+           line, which was fine when nothing else was up there and stopped being
+           fine the moment the cockpit's pill arrived at top centre -- the two
+           overlapped and the pill lost, because the pill is on a canvas
+           underneath. Wrapped into a narrow left-hand plate it clears the pill
+           entirely, and it is the shape RAVIO's own DISTRICT/LANE plate has. */
+        max-width: 300px;
       }
     </style>
   </head>
   <body>
     <canvas id="gl"></canvas>
+    <!-- The cockpit. RAVIO's dashboard, seated at the bottom of the frame, with
+         the seven machine gauges in the rack rather than floating in front of
+         the camera. dash.js owns everything on it. -->
+    <canvas id="dashcv"></canvas>
+    <!-- The yoke, as a lit mesh on a context of its own. dash.js pins it to the
+         square the console reserves; if the context cannot be granted it is
+         hidden and the flat wheel is painted on #dashcv instead. -->
+    <canvas id="yokecv"></canvas>
     <!-- The road map. Empty and hidden until 0 opens it; map.js owns everything
          inside, including its stylesheet, so the network view is one file you
          can delete rather than a thing woven through the page. -->

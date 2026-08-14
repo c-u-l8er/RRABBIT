@@ -16,7 +16,7 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, roadOrder, dashZ } from './world.js'
+import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
 import * as layout from './layout.js'
@@ -213,7 +213,14 @@ function roadBoundsOf(id) {
   // are different lengths, and borrowing another workspace's last window lets
   // you drive off the end of a short one into nothing.
   // camera z is 260 + roadZ, and we want (camera z - exitZ) === GANTRY_VIEW.
-  return { near: 0, far: exitZOf(id) + GANTRY_VIEW - 260 }
+  //
+  // `near` is HEAD_ROOM and not 0: the wheel stopped dead at the head of the
+  // road, which framed the enter gate against a full frame at a moment when the
+  // cockpit takes the bottom third of it. See ENTER_VIEW in world.js for the
+  // measurement. Never past `far` -- a road short enough for the two to cross
+  // would otherwise let you scroll backwards off its own exit.
+  const far = exitZOf(id) + GANTRY_VIEW - 260
+  return { near: Math.max(far, HEAD_ROOM), far }
 }
 
 const roadBounds = () => roadBoundsOf(state.district)
@@ -327,6 +334,7 @@ function goDistrict(id, { atHead = false, at = null } = {}) {
   ws.noteLast(id)
   state.network = ws.activeTenantName()
   setRange(FOG_DRIVE, FAR_DRIVE)
+  state.flewBy = { why: 'goDistrict', to: id, at: state.frames }
   flight = { from: currentPose(), to: districtPose(id), t: 0, target: null }
   state.mode = 'flying'
   return w.name
@@ -483,6 +491,11 @@ let flatZoom = 0
 // scroll is a new gesture.
 const GESTURE_GAP = 350
 let wheelOwner = null
+// Wired by installInput. Declared out here because the wheel handler and the key
+// handlers are built in the same call but read each other's state, and a shared
+// `let` would let either one write what the other owns.
+let escIsHeld = () => false
+let noteEscUsed = () => {}
 let lastWheelAt = 0
 function resetWheelGesture() {
   wheelOwner = null
@@ -539,6 +552,15 @@ function zoomFlat(d) {
 // rebuilt some frames later.
 function holdFlatScale() {
   const job = resizing ?? settling
+  // FULL SCREEN KEEPS THIS RUNNING WITH NO JOB. The settle finishes as soon as
+  // the surface reaches the size, and the camera then has to STAY at pixel-exact
+  // for as long as full screen is on -- the window is rebuilt at every size
+  // change and each rebuild lands at the fit distance again.
+  if (state.mode === 'flat' && state.full && !job) {
+    const s0 = flatSign()
+    if (s0?.mesh) applyFlatZoom(s0, 0)
+    return
+  }
   if (!job || state.mode !== 'flat') {
     settling = null
     return
@@ -553,7 +575,14 @@ function holdFlatScale() {
   // made and then not undone. Past that point the window keeps gaining
   // resolution and stops gaining size, which is the half of the trade that can
   // be reversed.
-  const d = Math.max(base / job.scale0, fitDistance(s))
+  // FULL SCREEN IS ALWAYS PIXEL-EXACT, and that is what makes it full screen.
+  //
+  // The client has been asked for the viewport's size, so 1:1 and "fills the
+  // frame" are the same distance -- there is nothing to fit and nothing to hold.
+  // Holding `scale0` instead kept the camera at the distance the window had
+  // BEFORE it grew, which is why a 1440x900 surface was still drawn 775px wide
+  // with road either side of it.
+  const d = state.full ? base : Math.max(base / job.scale0, fitDistance(s))
   applyFlatZoom(s, d - base)
   if (!settling) return
 
@@ -570,7 +599,15 @@ function holdFlatScale() {
     // window back wrong on every future load. `s.size` at this line is the size the
     // surface actually settled at, refusal included, which is the only shape worth
     // keeping. See layout.js for what the address can and cannot promise.
-    layout.remember(s.district, s.milepost, s.size.width, s.size.height)
+    // NOT FOR A FULL-SCREEN CONFIGURE. `remember` is how a window gets put back
+    // the shape you last left it, and it is right for a resize you performed on
+    // purpose. Full screen is a MODE, not a shape: remembering it taught the
+    // shell that this address is viewport-sized, so every future window opened
+    // there came up full-screen-sized with no full screen on -- and it survived
+    // a reload, which is what made it look like the resize was not working.
+    if (settling.remember !== false) {
+      layout.remember(s.district, s.milepost, s.size.width, s.size.height)
+    }
     settling = null
     return
   }
@@ -664,6 +701,24 @@ function setCloseHot(s, hot) {
   state.closeHot = show
 }
 
+// `&--` JOINS THE HOVER-ONLY FAMILY, which is a change of mind worth recording.
+//
+// It was drawn whenever you were in the window, on the argument `X--` makes: a
+// control you can only see once you are pointing at it is one you have to be
+// told about. That argument holds for the way OUT of a window, which every
+// window needs and which has to be findable by someone who has never seen this
+// shell. It does not hold here -- broadcasting is a thing you go looking for,
+// the way a resize is, and a permanent cyan mark on the corner of every window
+// you stand in is furniture the other three corners had already argued against.
+//
+// Asked for, and it puts the pair on the left edge back in step with `-->`.
+function setCastHot(s, hot) {
+  if (!s?.castBtn) return
+  const show = !!hot && !!s.castBtn.userData.armed
+  s.castBtn.visible = show
+  state.castHot = show
+}
+
 function setStepHot(s, which, hot) {
   const btn = s?.[which === -1 ? 'prevBtn' : 'nextBtn']
   if (!btn) return false
@@ -675,7 +730,7 @@ function setStepHot(s, which, hot) {
 function setChromeCursor() {
   renderer.domElement.style.cursor = state.grabHot
     ? 'nesw-resize'
-    : state.closeHot || state.titleHot || state.stepHot
+    : state.closeHot || state.castHot || state.titleHot || state.stepHot
       ? 'pointer'
       : ''
 }
@@ -892,6 +947,65 @@ function stepResize(ev) {
   previewResize(r, w, h)
 }
 
+// ---------------------------------------------------------- FULL SCREEN
+//
+// The window, and nothing else the shell owns. Every control is unarmed and
+// undrawn (syncHandles), the DOM strips are hidden, the cockpit stays away, and
+// the CLIENT IS ASKED TO FILL THE VIEWPORT -- because the flatten is pixel-exact,
+// so viewport pixels and surface pixels are the same pixels and "fill the screen"
+// is a real configure rather than a scale on the quad. A scale would resample the
+// application instead of giving it more room, which is the same argument the
+// resize grab makes in its own note.
+//
+// Asked through `settling`, the mechanism the resize already uses: configureSize
+// is fire-and-forget, so it is re-asked at a rate a client can absorb until the
+// surface is observed to BE the size, or the deadline says the client is refusing
+// rather than lagging. Some clients refuse -- simple-shm is fixed at 250x250 and
+// will never fill anything. That is a fact about the client, so the shell reports
+// it (`__full()`) rather than pretending.
+export function enterFull() {
+  if (state.mode !== 'flat' || state.full) return null
+  const s = flatSign()
+  const role = s?.view?.surface?.role
+  state.full = true
+  // Remembered so leaving puts the window back the size you found it. Recorded
+  // even when the client cannot be asked, so the exit path has nothing to branch
+  // on -- an absent memory and a memory of the same size are different things.
+  state.fullFrom = s?.size ? { w: s.size.width, h: s.size.height } : null
+  // `?fullresize=0` enters full screen WITHOUT asking the client to grow. Kept
+  // as a switch rather than deleted because "the shell drops you out of the
+  // window when you go full screen" has two candidate causes -- the configure
+  // and everything else -- and they are indistinguishable from the outside.
+  const askAllowed = new URLSearchParams(location.search).get('fullresize') !== '0'
+  if (askAllowed && typeof role?.configureSize === 'function') {
+    const w = Math.max(64, Math.round(window.innerWidth || 1280))
+    const h = Math.max(64, Math.round(window.innerHeight || 720))
+    settling = { scale0: 1, w, h, role, sentAt: 0, until: performance.now() + 2500, remember: false }
+  }
+  return { asked: !!settling, from: state.fullFrom }
+}
+
+export function exitFull() {
+  if (!state.full) return null
+  state.full = false
+  const s = flatSign()
+  const role = s?.view?.surface?.role
+  const back = state.fullFrom
+  state.fullFrom = null
+  if (back && typeof role?.configureSize === 'function') {
+    settling = { scale0: 1, w: back.w, h: back.h, role, sentAt: 0, until: performance.now() + 2500, remember: false }
+  }
+  return { restored: back }
+}
+
+// LEAVING THE WINDOW LEAVES FULL SCREEN, and it has to be here rather than in
+// `release()`'s callers: there are four ways out of a window (the chord, a click
+// outside, a step to the neighbour, the window closing under you) and a flag left
+// standing after any of them would hide the chrome of the NEXT window you enter.
+export function clearFull() {
+  if (state.full) exitFull()
+}
+
 function endResize() {
   if (!resizing) return false
   // The preview goes before the request, so the quad is back at 1:1 when the
@@ -938,9 +1052,20 @@ function resizeFlatBy(dxScreen, dyScreen) {
 
 // Invariant 8: there is always a way out that does not depend on the 3D scene.
 function release() {
+  // WHO LET GO, recorded. There are six call sites and a per-frame reconciler
+  // that can reach this, and from outside they are one symptom: the camera is
+  // suddenly back on the road. Guessing between them from a description is what
+  // this replaces -- the same argument `__aim` and `lastFlatClick` already make.
+  state.releasedBy = { at: state.frames, stack: new Error().stack?.split('\n').slice(1, 5).join(' | ') }
+  // FULL SCREEN DOES NOT SURVIVE LEAVING. Every route out of a window ends here,
+  // which is why the clear is here and not at each of the four call sites -- a
+  // flag left standing would hide the chrome of the NEXT window you stand in,
+  // and the only control that could undo it is one that only appears while full.
+  clearFull()
   if (state.mode === 'driving') return false
   // Back to the district you were in, not to district 0 -- releasing must
   // not silently move you between workspaces.
+  state.flewBy = { why: 'release', at: state.frames }
   flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
   state.mode = 'flying'
   state.flatMilepost = null
@@ -1150,6 +1275,7 @@ function doGantryAction(a) {
     roadZ = b.near
     parkRoad(state.district, roadZ)
     state.lastGantryClick = { kind: 'reloop', to: state.district }
+    state.flewBy = { why: 'reloop', at: state.frames }
     flight = { from: currentPose(), to: districtPose(state.district), t: 0, target: null }
     state.mode = 'flying'
     return true
@@ -1339,6 +1465,24 @@ function sendButton(ev, released) {
   state.buttonSent++
 }
 
+// WHERE A PROGRAM DRAGGED OFF THE ST&RT MENU WOULD LAND, answered by the SAME
+// raycast the pointer already uses.
+//
+// Set by installInput because that is where `aim` and `actionAt` live, and they
+// stay there: a probe with its own copy of the mesh list could aim somewhere the
+// real handler does not, which is the ambiguity `__aim` was written to remove and
+// it applies twice over here -- a drop that highlights one marker and opens the
+// window at another is worse than a drop that refuses.
+let dropProbe = null
+
+// null means THERE IS NOWHERE TO PUT IT from where the pointer is: the map is
+// open, or you are standing in a window, or the ray missed the world entirely.
+// The shell shows that as a refusal rather than opening the window somewhere the
+// pointer was not.
+export function dropAt(clientX, clientY) {
+  return dropProbe ? dropProbe(clientX, clientY) : null
+}
+
 function installInput() {
   const canvas = renderer.domElement
 
@@ -1386,6 +1530,7 @@ function installInput() {
     const on = flatSign()
     setGrabHot(on, !!handleUnder(ev))
     setCloseHot(on, !!chromeUnder(ev, 'closePad'))
+    setCastHot(on, !!chromeUnder(ev, 'castPad'))
     state.titleHot = !!chromeUnder(ev, 'platePad')
     const prevHot = setStepHot(on, -1, !!chromeUnder(ev, 'prevPad'))
     const nextHot = setStepHot(on, 1, !!chromeUnder(ev, 'nextPad'))
@@ -1411,6 +1556,54 @@ function installInput() {
     // application would skip, leaving the prompt standing over a window you had
     // gone back to using.
     if (closeClick(ev)) return
+
+    // THE COCKPIT GETS ASKED HERE TOO, and it has to be asked in the FLAT
+    // handler as well as the driving one -- they are two different listeners and
+    // wiring only the first left the pull tab dead in the one mode it exists in.
+    //
+    // Before the window's own controls and before the click-outside-to-leave
+    // rule: while the dashboard is pulled up over a flattened window it is in
+    // front of the surface, so a press that lands on an instrument belongs to
+    // the instrument. Without this, pulling the dash up put a panel over the
+    // window whose every control fell through to "you clicked outside, leaving".
+    if (hooks.dashHit) {
+      const onDash = hooks.dashHit(ev.clientX, ev.clientY)
+      if (onDash) {
+        ev.preventDefault()
+        // RECORDED, like every other branch of this handler. "The cockpit took
+        // it" and "nothing took it and the window was left" are the two answers
+        // that look identical from outside, and one of them is a bug.
+        state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)],
+                                went: 'dash', dash: onDash }
+        return
+      }
+    }
+
+    // THE SHIP ON THE POST puts this window on the whole screen. Checked with the
+    // other window controls and before the client, because it is one of them.
+    const full = chromeUnder(ev, 'fullPad')
+    if (full) {
+      ev.preventDefault()
+      const went = enterFull()
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)],
+                              went: 'full', full: went }
+      return
+    }
+
+    // `--&` PUTS THIS WINDOW ON THE DASHBOARD'S TV, and it is checked after the
+    // close question and before everything else. After, because a standing
+    // "close this?" has to be answerable or cancellable by any press and a
+    // broadcast slipping in front of that would leave the prompt up. Before the
+    // grab and the client, because it is the shell's own control on the shell's
+    // own corner -- the same place in the order `X--` occupies.
+    const cast = chromeUnder(ev, 'castPad')
+    if (cast) {
+      ev.preventDefault()
+      const went = hooks.castWindow?.(cast.district, cast.milepost) ?? null
+      state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)],
+                              went: 'cast', cast: went }
+      return
+    }
 
     const grab = handleUnder(ev)
     if (grab && startResize(grab, ev)) {
@@ -1456,6 +1649,15 @@ function installInput() {
       return
     }
     if (!overFlatSurface(ev)) {
+      // NOT WHILE FULL SCREEN IS ON. Clicking beside the window is how you leave
+      // it, and while full there is no "beside" that means anything -- the app has
+      // the whole frame, so a press that lands off the surface is a press that
+      // missed, not a decision to go. The ONLY way out is the ship, which is the
+      // whole point of there being no bar: an exit you cannot hit by accident.
+      if (state.full) {
+        state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'held' }
+        return
+      }
       state.lastFlatClick = { at: [Math.round(ev.clientX), Math.round(ev.clientY)], went: 'leave' }
       release()
       canvas.blur()
@@ -1505,10 +1707,23 @@ function installInput() {
       ev.preventDefault()
       const now = ev.timeStamp
       if (wheelOwner === null || now - lastWheelAt > GESTURE_GAP) {
-        wheelOwner = ev.ctrlKey || ev.metaKey ? 'shell' : overFlatSurface(ev) ? 'app' : 'shell'
+        // Esc held joins ctrl and cmd as "the shell, wherever the pointer is".
+        const forced = ev.ctrlKey || ev.metaKey || escIsHeld()
+        wheelOwner = forced ? 'shell' : overFlatSurface(ev) ? 'app' : 'shell'
         state.wheelGestures++
       }
       lastWheelAt = now
+      // Marked whether or not this gesture ended up as a zoom: what it records is
+      // that the key was USED, and a wheel while Esc is down is a use even if the
+      // gesture was already latched to the application.
+      if (escIsHeld()) noteEscUsed()
+      // NO ZOOM WHILE FULL SCREEN IS ON. The window is exactly the viewport and
+      // exactly 1:1; a wheel that changed the scale would break both of those at
+      // once and leave a "full screen" that is neither full nor exact. The app
+      // still gets the wheel -- it is the one that should have it here.
+      if (state.full) {
+        wheelOwner = 'app'
+      }
       if (wheelOwner === 'app') {
         session.inputQueue.queueAxis(createAxisEventFromWheelEvent(ev, SCENE_ID))
         state.lastAxisToApp = true
@@ -1639,6 +1854,59 @@ function installInput() {
   // instanceId and nothing else does), a gate panel, or a window.
   const actionAt = (hit) => (hit ? (dashActionOf(hit) ?? actionOf(hit.object)) : null)
 
+  // THE DROP TARGET, in the three forms the road actually offers -- and no more.
+  //
+  // A gate lane is a side, a centre-line marker is a place on that road, and
+  // anywhere else on the road is "wherever there is room", which is what
+  // `spawnWindow(null, null)` has always meant and is the answer that makes the
+  // gesture land instead of bouncing. Dropping ON a window is deliberately NOT a
+  // target: a Wayland client brings its own surface, so "into that window" is not
+  // a thing this shell can honour, and a drop that silently opened a second
+  // window beside the one you aimed at would be a lie about what happened.
+  dropProbe = (clientX, clientY) => {
+    if (state.mode !== 'driving' || mapIsOpen()) return null
+    const hit = aim({ clientX, clientY })
+    const action = actionAt(hit)
+    if (action?.kind === 'open') {
+      return { where: 'gate', side: action.side, dash: action.dash ?? null,
+               label: action.side < 0 ? 'at the gate, on the left' : 'at the gate, on the right' }
+    }
+    if (action?.kind === 'dash') {
+      // THE MARKER IS ASKED WHETHER IT COULD ACTUALLY TAKE ONE, and per side.
+      //
+      // Not every dash can: the first several are the run of clear road past the
+      // enter gate (SLOT_FIRST), and one already carrying a window or standing in
+      // a ramp's sweep is spoken for. Without this the ghost said "at marker 7",
+      // the queue asked for 7, `slotFree` said no at adoption and rrabbit.js put
+      // the window at 16 -- a promise made by the thing you were looking at and
+      // broken by the thing that carried it out. Measured, on the first drop onto
+      // the centre line that was tried.
+      const at = action.at
+      const d = action.district
+      const left = slotFree(d, -1, at, 'window')
+      const right = slotFree(d, 1, at, 'window')
+      if (!left && !right) {
+        return { where: 'dash', dash: at, district: d, blocked: true,
+                 label: `marker ${at} cannot take a window` }
+      }
+      // One side free is a side we can NAME and pass; both free leaves it to the
+      // same parity rule every other window is placed by, and either way what the
+      // ghost says is what the queue is handed.
+      const side = left && right ? null : (left ? -1 : 1)
+      return { where: 'dash', side, dash: at, district: d,
+               label: side === null ? `on this road, at marker ${at}`
+                    : `at marker ${at}, on the ${side < 0 ? 'left' : 'right'}` }
+    }
+    if (hit?.object?.userData?.signKey) {
+      // A WINDOW IS NOT A CONTAINER. Named rather than treated as bare road, so
+      // the ghost can say why this particular pixel is not a place.
+      return { where: 'window', side: null, dash: null, blocked: true,
+               label: 'a window is not a place to put one' }
+    }
+    return { where: 'road', side: null, dash: null,
+             label: 'on this road, wherever there is room' }
+  }
+
   // WHAT IS UNDER A GIVEN PIXEL, answered by the same `aim` the pointer uses. A
   // probe that raycast its own copy of the mesh list could aim somewhere the real
   // handler does not, and "nothing lit" would then mean "the ray missed" and
@@ -1660,6 +1928,19 @@ function installInput() {
 
   canvas.addEventListener('pointerdown', (ev) => {
     if (state.mode !== 'driving' || mapIsOpen()) return
+    // THE COCKPIT GETS ASKED FIRST, and it is asked rather than listening.
+    //
+    // The dash canvas is `pointer-events: none` and stays that way -- a second
+    // element over the whole viewport competing for these events is the shape of
+    // the bug that once ate every click in the graph box. So the dashboard does
+    // not receive the pointer; it ANSWERS a question this handler puts to it,
+    // which keeps one input path with one owner. Before the raycast, because an
+    // instrument painted OVER the road must take the click that lands on it --
+    // otherwise the shifter is furniture with a window behind it.
+    if (hooks.dashHit) {
+      const on = hooks.dashHit(ev.clientX, ev.clientY)
+      if (on) return
+    }
     const hit = aim(ev)
     if (!hit) return
     const action = actionAt(hit)
@@ -1767,10 +2048,36 @@ function installInput() {
 
       if (!flat && (ev.key === 'o' || ev.key === 'O')) return void toggleMap()
       if (!/^[0-9]$/.test(ev.key)) return
-      if (flat) {
-        ev.preventDefault()
-        ev.stopImmediatePropagation()
-      }
+      // THE DIGITS BELONG TO THE APPLICATION ONLY IN FULL SCREEN. The line this
+      // replaces was `if (flat) return`, which gave them up the moment you stood
+      // in a window at all.
+      //
+      // Both halves of that were asked for, in this order, and the second one is
+      // the correction to the first. Giving the digits up entirely was right
+      // about the reason -- a window you are typing into must get the keystroke
+      // -- and wrong about the boundary: STANDING IN a window is the ordinary
+      // working view, with the road, the gate boards and the dashboard all still
+      // in frame, and a track key that stops working the moment you are actually
+      // working is not a track key. Full screen is the state where you have
+      // explicitly asked for nothing but the window; every strip the shell owns
+      // is already hidden there (`:root.full` in index.html), so the keyboard
+      // going with them is the same promise kept once rather than two rules.
+      //
+      // THE COST, STATED PLAINLY: you still cannot type a number into a flattened
+      // terminal. The way out is the one full screen already is -- and the honest
+      // long-term fix is still the one written down for Esc below, a modifier or
+      // a double-tap, so both sides can have the whole row.
+      if (state.full) return
+
+      // AND NOW THE KEY HAS TO BE TAKEN PROPERLY, which it never had to be
+      // before. While the digits were only ever read from the road there was no
+      // focused surface to take them FROM, so this branch could get away with
+      // just acting. In a flattened window there is one, its keydown is bound to
+      // the canvas (browser/input.js) and this listener is capture-phase on
+      // `window` -- so without these two lines a `2` would switch track AND be
+      // typed into the application.
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
 
       // ZERO IS THE MAP, but only as the FIRST digit -- tracks are numbered from
       // 1, so a leading zero can never be part of a track number while the zero
@@ -1832,49 +2139,170 @@ function installInput() {
   const isRelease = (ev) =>
     ev.ctrlKey && ev.altKey && ev.shiftKey && (ev.key === 'Escape' || ev.key === 'r' || ev.key === 'R')
 
-  // AND PLAIN ESC, WHILE FLAT.
+  // PLAIN ESC USED TO LEAVE, AND NO LONGER DOES. Kept as a note because the
+  // reasoning that put it there was sound and the reasoning that took it away is
+  // the other half of the same argument.
   //
-  // The note above says an application must receive every key including Esc,
-  // and that is the right instinct for a shell hosting vi. It was also, in
-  // practice, a room with the door painted on: the chord was eaten by the
-  // console in front of us, nothing on screen named a way out, and clicking
-  // another window does nothing while flat. Every route out of a window was
-  // either invisible or intercepted, which is what "it freezes" and "it doesn't
-  // fly back to normal position" have both turned out to mean.
+  // It was added because every route out of a flattened window was either
+  // invisible or intercepted: the chord is eaten by a PARKVPS console in front of
+  // us, nothing on screen named a way out, and clicking another window does
+  // nothing while flat. That was a room with the door painted on, and Esc was the
+  // door. The cost was written down at the time -- "a full-screen vi in a
+  // flattened window can no longer use Esc" -- as a thing to fix when a client
+  // that needed it shipped.
   //
-  // So Esc leaves. The cost is real and belongs written down rather than
-  // discovered: a full-screen vi in a flattened window can no longer use Esc,
-  // and when a client that needs it actually ships, the honest fix is
-  // double-tap-Esc -- first press to the application, a second within ~400ms to
-  // the shell -- which keeps both. Nothing shipping today needs it.
-  //
-  // NOT WHILE THE MAP IS OVER IT. Esc belongs to the innermost thing that is
-  // open, and once the map can be open on top of a flattened window that is the
-  // map. Without this guard both handlers fire on one keystroke -- they are
-  // separate listeners on `window` in the same phase, so the earlier one's
-  // stopPropagation does not reach the later one -- and Esc shut the map AND
-  // threw you out of the window, which is the opposite of staying put.
-  const isPlainEscape = (ev) =>
-    ev.key === 'Escape' &&
-    !ev.ctrlKey &&
-    !ev.altKey &&
-    !ev.shiftKey &&
-    !ev.metaKey &&
-    state.mode === 'flat' &&
-    !mapIsOpen()
+  // What changed is that the window now NAMES its own ways out: the corner
+  // controls, the ship on the post, the flying ship in full screen, and a click
+  // beside the surface. The door is drawn on the wall now, so the shell can stop
+  // holding the one key every terminal program is waiting for. Asked for, and it
+  // is the same trade read from the other end.
+
+  // Whether Esc is physically down, and whether anything used it while it was.
+  // Declared HERE and not inside the listener: both key handlers and the wheel
+  // read them, and an earlier edit deleted these two lines along with a comment
+  // block above them -- which in an ES module (always strict) turned every read
+  // into a ReferenceError thrown inside a capture listener. The symptom was that
+  // Esc silently did nothing at all while the chord in the same handler kept
+  // working, because the chord returns before it touches either.
+  let escHeld = false
+  let escUsed = false
+  // Whether THIS press is one the flat view took for itself. Separate from
+  // `escHeld`, because the map's Esc branch above returns before any of this and
+  // must not leave a keyup behind that walks you out of the window as well.
+  let escOwned = false
 
   window.addEventListener(
     'keydown',
     (ev) => {
-      if (isRelease(ev) || isPlainEscape(ev)) {
+      // THE CHORD IS THE ONLY KEY THIS SHELL STILL TAKES FROM A WINDOW.
+      //
+      // Ctrl+Alt+Shift+Esc/R, and it stays for the reason it was invented: it is
+      // the hatch you reach for when something has gone wrong, no console in
+      // front of us claims it, and it is unreachable by accident. Take this away
+      // and a client that has grabbed the pointer leaves no way out at all.
+      if (isRelease(ev)) {
         ev.stopPropagation()
         ev.preventDefault()
         release()
         canvas.blur()
+        return
+      }
+      // ESC LEAVES THE WINDOW, AND ONLY OUT OF THE BASIC FLAT VIEW.
+      //
+      // Third position on this key, and the boundary is now the same one the
+      // digits settled on -- which is the point, because two shell keys with two
+      // different ideas of when a window owns the keyboard is not a rule anyone
+      // can hold in their head.
+      //
+      // It used to release on keydown, then on keyup unless held as a zoom
+      // modifier; then it was given up entirely, on the argument that Esc is the
+      // single worst key to take because every terminal program, editor and
+      // dialog is waiting for it. That argument is still true, and it is an
+      // argument about FULL SCREEN -- the state where you have explicitly asked
+      // for nothing but the window, where every strip the shell owns is already
+      // hidden, and where the ship on the frame is a way out that costs no key at
+      // all. Standing at a flattened window on the road is the ordinary working
+      // view, and there Esc means what it means everywhere else in computing:
+      // back out of the thing I stepped into.
+      //
+      // WHAT THIS COSTS, PLAINLY: Esc no longer reaches an application you are
+      // merely standing in front of, so leaving vi's insert mode needs full
+      // screen (or the click-outside gesture to leave first). Held-Esc as a wheel
+      // modifier also goes with it in flat mode -- the first keydown releases you
+      // -- but that hatch was already redundant, because `ctrl`/`cmd`+wheel means
+      // the shell anywhere including over the window (see the wheel handler).
+      if (ev.key === 'Escape') {
+        // Recorded on EVERY Escape, repeat or not, so "the handler never ran"
+        // and "the handler ran and declined" stop looking the same.
+        state.escSeen = { at: state.frames, repeat: !!ev.repeat, held: escHeld,
+                          full: !!state.full, mode: state.mode }
+        const mine = state.mode === 'flat' && !state.full
+        if (mine) {
+          // TAKEN PROPERLY. The surface's own keydown is bound to the canvas and
+          // this listener is capture-phase on `window`, so without both of these
+          // the window would be left AND the application would get the Esc.
+          ev.preventDefault()
+          ev.stopImmediatePropagation()
+        }
+        // LEAVING HAPPENS ON KEYUP, NOT HERE, AND THAT IS WHAT LETS ONE KEY DO
+        // BOTH JOBS.
+        //
+        // Releasing on keydown was the first cut of this and it silently killed
+        // the other thing Esc does: holding it is a wheel modifier that means
+        // "the shell, wherever the pointer is", which is how you zoom a window
+        // you are standing in. The very first keydown walked you out, so
+        // `escIsHeld()` was never true by the time a wheel arrived and the zoom
+        // could not be reached at all. Reported, and correctly.
+        //
+        // So the press is only a decision once it ENDS: a tap leaves, and a hold
+        // that something USED is a modifier and leaves nothing. That is the
+        // distinction `escUsed` was always for -- the wheel handler sets it
+        // through `noteEscUsed()` -- and it is why this file used to work this
+        // way before Esc was given up entirely.
+        if (!ev.repeat && !escHeld) {
+          escHeld = true
+          escUsed = false
+          escOwned = mine
+        }
       }
     },
     { capture: true },
   )
+
+  window.addEventListener(
+    'keyup',
+    (ev) => {
+      if (ev.key !== 'Escape') return
+      const owned = escOwned
+      const used = escUsed
+      escHeld = false
+      escOwned = false
+      state.escZoomGesture = used
+      escUsed = false
+      // A TAP LEAVES THE WINDOW; A HOLD THAT WAS USED LEAVES NOTHING.
+      //
+      // `owned` is what keeps this honest about which press it is answering: an
+      // Esc that shut the map returned long before `escOwned` was set, and an Esc
+      // pressed on the road or in full screen never owned one either. Without it
+      // this listener would walk you out of a window on the release of a key that
+      // was aimed at something else entirely.
+      //
+      // The mode is re-read rather than trusted from keydown, because a press can
+      // outlive the state it began in -- Esc+wheel can end with you somewhere
+      // else, and releasing the key is not a second instruction to leave.
+      state.escUp = { at: state.frames, owned, used }
+      if (!owned || used) return
+      if (state.mode !== 'flat' || state.full) return
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+      release()
+      // The same pair the chord uses. `release()` moves the camera; the blur is
+      // what actually takes the keyboard back off the client, which is settled by
+      // DOM focus here rather than by a flag.
+      canvas.blur()
+      state.escLeft = { at: state.frames }
+    },
+    { capture: true },
+  )
+
+  // A KEY CANNOT STAY HELD ACROSS A BLUR. The browser stops delivering keyups to
+  // a window that has lost focus, so an Esc released elsewhere would leave this
+  // latched and the next scroll would silently be a zoom.
+  window.addEventListener('blur', () => {
+    escHeld = false
+    escUsed = false
+    // AND THE CLAIM ON THE PRESS. Left latched, the next Escape keyup to arrive
+    // -- one belonging to an entirely different press -- would read as a tap this
+    // view had taken and walk you out of a window you were using.
+    escOwned = false
+  })
+
+  // Read by the wheel handler above. A function rather than a shared `let` so
+  // there is one owner of the fact and the wheel only asks.
+  escIsHeld = () => escHeld
+  noteEscUsed = () => {
+    escUsed = true
+  }
 }
 
 export {

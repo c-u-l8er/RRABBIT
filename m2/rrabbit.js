@@ -18,6 +18,11 @@ import { state, signs, titles, renames, sideQueue, ledgerSlot, keyOf, ACC, COOL,
 import * as ws from './workspaces.js'
 import * as layout from './layout.js'
 import { release, rekeyZoom } from './travel.js'
+// THE SAME SHIP AS THE YOKE'S HORN. `saucer()` is one function, drawn on the
+// wheel's boss, on the full-screen button below, and on the flying exit in
+// dash.js -- so the mark that takes you into a window's own screen and the mark
+// that brings you back are visibly one object, and none of the three can drift.
+import { saucer } from './dash.js'
 
 let renderer, gl, scene, camera, session
 export function attachRrabbit(c) {
@@ -218,6 +223,86 @@ function answerTexture(which) {
   return answerTex[which]
 }
 
+// THE BROADCAST CONTROL'S FACE: `&--`, at the BOTTOM LEFT.
+//
+// WRITTEN `--&` FIRST, AND THAT WAS BACKWARDS ON THE GLASS. The reasoning was
+// that the dashes should run into the mark because the window flows TO the
+// ampersand -- which reads well in a sentence and wrong on a window. Every
+// control here is rotated 45 degrees into its corner, so what actually decides
+// the direction is which END of the string ends up outboard: `X--` has its X out
+// to the top left, `-->` has its head out to the top right, and `--&` put the
+// ampersand up and to the RIGHT, pointing back into the window it is mounted on.
+// It looked like an arrow aimed at the client area.
+//
+// So the mark goes outboard like the other two: `&--`, ampersand out to the
+// bottom left, dashes reaching back in. The corner pair on the left edge now
+// lean the same way and read as one fitting.
+//
+// CYAN, and the third colour on a window. `-->` is amber because a resize is
+// furniture; `X--` is red because closing cannot be undone. Broadcasting is
+// neither -- it is reversible and it is not chrome -- and cyan is already this
+// shell's colour for a live thing (the lane edges, the redline, the map's
+// links). A control that shares a colour with a control that means something
+// else is a control you have to remember rather than read.
+let castTex = null
+function castTexture() {
+  if (castTex) return castTex
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 64
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 128, 64)
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  g.font = 'bold 58px ui-monospace, monospace'
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 10
+  g.fillStyle = '#' + COOL.toString(16).padStart(6, '0')
+  // Twice, so the shadow is dark enough to read against a lit surface -- the
+  // same two-pass the other three controls use.
+  g.fillText('&--', 64, 35)
+  g.fillText('&--', 64, 35)
+  castTex = canvasTexture(THREE, c)
+  return castTex
+}
+
+// THE FULL-SCREEN BUTTON'S FACE: the ship, on the top of the post.
+//
+// The post is the one piece of a window's furniture that is neither the picture
+// nor a corner control -- it is what the window STANDS ON -- and a button there
+// reads as belonging to the whole window rather than to one of its edges. It is
+// also the only spot on a window that is empty at every size.
+//
+// No panel and no border, like every other control in this shell: the ship is
+// drawn on transparent and given the same shadow the marks get, so it survives
+// being over a lit surface or over the road behind it.
+// THE CANVAS IS CUT TO THE DRAWING, 2:1 and not square.
+//
+// `saucer()` spans about 190 x 84 in its own units -- it is a saucer, so it is
+// twice as wide as it is tall. On a square canvas the top and bottom thirds were
+// transparent, which pushed the VISIBLE ship a third of a quad below the post it
+// was supposed to be capping. That is exactly the trap `-->` and `--(next)` both
+// hit and both wrote down: measure the drawing, cut the canvas to it, and let the
+// quad take the aspect -- or the mesh is in one place and the mark is in another.
+let fullTex = null
+function fullTexture() {
+  if (fullTex) return fullTex
+  const c = document.createElement('canvas')
+  c.width = 256
+  c.height = 128
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 256, 128)
+  g.save()
+  g.shadowColor = 'rgba(3,4,10,0.95)'
+  g.shadowBlur = 12
+  g.translate(128, 70)
+  // 1.2: 190 units across becomes 228 of the 256, leaving margin for the shadow.
+  saucer(g, 1.2)
+  g.restore()
+  fullTex = canvasTexture(THREE, c)
+  return fullTex
+}
+
 let closeTex = null
 function closeTexture() {
   if (closeTex) return closeTex
@@ -307,20 +392,26 @@ function plateTexture(title, width) {
 // The flip is at SAMPLE time (repeat/offset) because `flipY` is an UPLOAD-time
 // flag and adoption does no upload.
 //
-// THE TWO BUFFER PATHS DISAGREE ABOUT WHICH WAY IS UP, and the fix is not one
-// constant. A web client's shm buffer is uploaded straight to the texture, so
-// it arrives bottom-up and needs the flip. A NATIVE client's frame is h264 and
-// is decoded through a shader that RENDERS INTO the texture, which flips it
-// once already -- flipping again turns it upside down.
+// THE TWO BUFFER PATHS AGREE ABOUT WHICH WAY IS UP, once the upload is not
+// being flipped behind their backs. They used to disagree, and this function
+// used to branch on `mimeType` because of it -- an shm buffer needed the flip
+// and an h264 frame did not. That was never a property of either format:
+// three.js leaves UNPACK_FLIP_Y_WEBGL switched on, so Greenfield's plane
+// uploads were flipped by whatever three had textured last, and the h264 path
+// flipped a second time in its render-into-texture pass. `fenceScenePasses` in
+// shell.js now pins the unpack state off, so both paths land the same way:
 //
-// Measured on a real xterm: `[travis@PX13 RRABBIT]` came out as
-// `[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]` at the bottom of the window. The giveaway is `P` → `b`,
-// which is a VERTICAL mirror; a horizontal one would have given `ꟼ`. Choosing
-// the axis by reading the glyph beat guessing at it.
+//   shm    upload row 0 -> texel row 0            = the surface's top row
+//   h264   the YUV pass draws its quad with v=minV at clip y=-1, and clip y=-1
+//          is framebuffer row 0, which is destination texel row 0 -- and v=minV
+//          is the source's first row. Same answer, by a longer road.
 //
-// `mimeType` is a property, so it survives minification -- unlike the class
-// names that broke in the built bundle (see isSurface above).
-function adoptSurfaceTexture(rs, view) {
+// So texel row 0 is the top of the picture either way, and either way it wants
+// the flip, because three samples v=0 at the BOTTOM of a plane. One rule, no
+// branch. (The old branch was measured, not guessed -- on a real xterm,
+// `[travis@PX13 RRABBIT]` came out `[ɿɒʌiƨ@bXI3 ЯЯAᙠᙠIT]`, a vertical mirror.
+// It measured the accident faithfully.)
+function adoptSurfaceTexture(rs) {
   const { width, height } = rs.size
   const rt = new THREE.WebGLRenderTarget(width, height)
   rt.depthTexture = new THREE.DepthTexture(width, height)
@@ -328,37 +419,33 @@ function adoptSurfaceTexture(rs, view) {
   const tex = rt.texture
   tex.colorSpace = THREE.SRGBColorSpace
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
-  const mime = view?.surface?.state?.bufferContents?.mimeType
-  const alreadyUpright = mime === 'video/h264' || mime === 'image/png'
-
-  // THE DECODED TEXTURE IS BIGGER THAN THE SURFACE. Measured on a real xterm:
-  // surface 960x653, texture 1024x770. h264 decodes into a padded allocation
-  // and the picture occupies a sub-rect of it, so mapping the texture 0..1 --
-  // which is what a plain three material does -- puts the padding on the sign
-  // as well, and the seam between picture and padding is the "tear" this was
-  // filed as.
+  // THE DESTINATION TEXTURE IS BIGGER THAN THE SURFACE. Measured on foot in the
+  // tr4 guest: surface 696x468, texture 768x512. The encoder pads a surface up
+  // to its alignment, Greenfield sizes the destination to the DECODED frame and
+  // then draws only the surface into it, so mapping the texture 0..1 -- which is
+  // what a plain three material does -- puts the unwritten margin on the sign as
+  // well. That seam is what got filed as the "tear".
   //
-  // Which sub-rect is not a guess: Greenfield's own YUV->RGB pass builds its
-  // quad with `textureMinU = 1 - width / texture.width` running to 1, so the
-  // picture sits at the BOTTOM-RIGHT of the allocation. Sampling the same
-  // window here is agreeing with the decoder rather than second-guessing it.
+  // WHICH sub-rect is arithmetic, not a guess. The YUV pass calls
+  // `viewport(0, 0, width, height)` on a framebuffer the size of the whole
+  // texture, and a GL viewport is anchored at the BOTTOM-LEFT -- so the picture
+  // is written to texels [0..width) x [0..height) and the margin is the top and
+  // the right. (This read bottom-RIGHT before, from the source-side
+  // `textureMinU`; that is where the pass READS in the padded decode, not where
+  // it WRITES. The two are different windows and the difference is a black band
+  // down one side and along the top -- photographed.)
   //
   // For an unpadded buffer (every shm client) sx = sy = 1 and this reduces
-  // exactly to the previous repeat/offset, flip and all.
+  // exactly to the plain flip.
   const tw = rs.texture?.size?.width || width
   const th = rs.texture?.size?.height || height
   const DIAG = new URLSearchParams(location.search).get('uv')
   const sx = DIAG === 'full' ? 1 : width / tw
   const sy = DIAG === 'full' ? 1 : height / th
-  const ox = DIAG === 'topleft' ? 0 : 1 - sx
-  const oy = DIAG === 'topleft' ? 0 : 1 - sy
-  if (alreadyUpright) {
-    tex.repeat.set(sx, sy)
-    tex.offset.set(ox, oy)
-  } else {
-    tex.repeat.set(sx, -sy)
-    tex.offset.set(ox, oy + sy)
-  }
+  const ox = DIAG === 'farcorner' ? 1 - sx : 0
+  const oy = DIAG === 'farcorner' ? 1 - sy : 0
+  tex.repeat.set(sx, -sy)
+  tex.offset.set(ox, oy + sy)
   return { rt, tex }
 }
 
@@ -368,7 +455,7 @@ function makeSign(view, milepost, district, side, dash) {
   const { width, height } = rs.size
   if (!width || !height) return null
 
-  const { rt, tex } = adoptSurfaceTexture(rs, view)
+  const { rt, tex } = adoptSurfaceTexture(rs)
 
   // One sign is sized to ITS OWN surface. M0's board was a fixed rectangle and
   // a 250x250 client filled a corner of it -- correct behaviour, wrong framing.
@@ -507,6 +594,99 @@ function makeSign(view, milepost, district, side, dash) {
   closePad.userData.chrome = true
   mesh.add(closePad)
 
+  // THE BROADCAST CONTROL, at the bottom left -- diagonally opposite the resize
+  // grab and directly under the close. Same size, same distance out, wholly
+  // outside the surface: it covers no client pixel, which is the rule the grab
+  // established and every control since has kept.
+  //
+  // DRAWN ONLY WHEN REACHED FOR, like `-->` and unlike `X--`. The close control
+  // has to be findable by someone who has never seen this shell; broadcasting is
+  // a thing you go looking for, and a permanent cyan mark on every window you
+  // stand in is the clutter the other corners already argued against.
+  const castBtn = new THREE.Mesh(
+    new THREE.PlaneGeometry(GRIP_W, GRIP_H),
+    new THREE.MeshBasicMaterial({ map: castTexture(), transparent: true, toneMapped: false }),
+  )
+  // +45 WITH THE MARK FIRST, and both halves were needed. Measured off the two
+  // renders rather than reasoned about: at -45 a string's LEFT end lands up and
+  // to the left (which is how `X--` gets its X outboard at the top corner), and
+  // at +45 the left end lands down and to the left. This is the BOTTOM corner,
+  // so outboard is down-left -- the mark has to be the left end of the string
+  // AND the lean has to be +45.
+  //
+  // Getting one of the two right is what produced both wrong versions: `--&` at
+  // +45 put the ampersand up-right, pointing back into the client area, and
+  // `&--` at -45 was `X--`'s lean copied to a corner that is its mirror.
+  castBtn.rotation.z = Math.PI / 4
+  castBtn.position.set(-(sw / 2 + GRIP_REACH), -(sh / 2 + GRIP_REACH), 3)
+  castBtn.userData.castButton = true
+  castBtn.userData.chrome = true
+  castBtn.visible = false
+  mesh.add(castBtn)
+
+  const castPad = new THREE.Mesh(new THREE.PlaneGeometry(PAD, PAD), new THREE.MeshBasicMaterial({ visible: false }))
+  castPad.position.set(-(sw / 2 + PAD / 2), -(sh / 2 + PAD / 2), 3)
+  castPad.userData.castButton = true
+  castPad.userData.chrome = true
+  mesh.add(castPad)
+
+  // THE FULL-SCREEN BUTTON, on the top of the post -- centred under the surface
+  // rather than at a corner, because it acts on the whole window and not on one
+  // of its edges. A child of the MESH like every other control, so it rides the
+  // flatten; the post itself is a scene child and would have needed its own
+  // pose kept in step.
+  // A CAP ON THE POST. Two to one like its canvas, and sat so its own bottom
+  // edge meets the post's top -- the ship rests ON the timber the way a finial
+  // does, rather than floating partway down it.
+  const FULL_W = 84
+  const FULL_H = FULL_W / 2
+  const fullBtn = new THREE.Mesh(
+    new THREE.PlaneGeometry(FULL_W, FULL_H),
+    new THREE.MeshBasicMaterial({ map: fullTexture(), transparent: true, toneMapped: false }),
+  )
+  // z = 12, NOT 3 like the corner controls. Those sit outside the surface's own
+  // outline with nothing behind them, so 3 units proud is enough. This one is
+  // centred on the POST, which is a 14-deep box running z -7..+7 about the sign's
+  // plane -- at 3 the ship was inside the timber and read as a faint scratch on
+  // it. 12 clears the post's near face with room for the shadow.
+  // UP BY HALF ITS OWN HEIGHT, so the ship sits ASTRIDE the post's top end
+  // rather than hanging below it -- a finial, which is what "like a cap" means.
+  // Its centre lands on the surface's bottom edge; the lower half is over the
+  // post and the upper half overhangs the window by FULL_H/2.
+  //
+  // THAT OVERHANG IS A REAL COST and it is taken on purpose. Every other control
+  // in this shell sits wholly outside the surface because "a shell that draws its
+  // own controls over a client's interface has decided its chrome matters more
+  // than the program". This one is 21 units into the picture, at the bottom
+  // centre, and it was asked for twice. The pad below is cut to exactly the mark
+  // so the cost stops there: no invisible target reaches further in than the
+  // thing you can see, which is the half of that rule that must not bend.
+  // Then a quarter of its height back DOWN. Centring the mark on the post's top
+  // put the saucer's DISC -- its widest part, and the bit that reads as resting
+  // on something -- above the timber with only the dome over the picture. The
+  // drawing is not vertically centred in its own canvas (the dome takes the top
+  // third), so the mark's centre and the mark's seat are not the same point.
+  fullBtn.position.set(0, -(sh / 2) + 4 - FULL_H / 4, 12)
+  fullBtn.userData.fullButton = true
+  fullBtn.userData.chrome = true
+  fullBtn.visible = false
+  mesh.add(fullBtn)
+
+  // CUT TO THE MARK, not the usual square pad. A PAD-sized target centred on the
+  // button would reach 37 units into the window's bottom centre and quietly eat
+  // clicks meant for the application -- "the same fault wearing a disguise", as
+  // the grab pad's own note puts it. This one is the ship's width, and its top
+  // edge is the ship's top edge, so everything you can see is clickable and
+  // nothing you cannot see is.
+  const fullPad = new THREE.Mesh(
+    new THREE.PlaneGeometry(FULL_W, PAD),
+    new THREE.MeshBasicMaterial({ visible: false }),
+  )
+  fullPad.position.set(0, -(sh / 2) + 4 - FULL_H / 4 - (PAD / 2 - FULL_H / 2), 12)
+  fullPad.userData.fullButton = true
+  fullPad.userData.chrome = true
+  mesh.add(fullPad)
+
   // THE NAME BOARD, between the two of them.
   //
   // A unit quad scaled by the layout, the same trick the gantry panels use, so
@@ -609,6 +789,10 @@ function makeSign(view, milepost, district, side, dash) {
     grabPad,
     closeBtn,
     closePad,
+    castBtn,
+    castPad,
+    fullBtn,
+    fullPad,
     plate,
     platePad,
     plateW,
@@ -1024,10 +1208,27 @@ function syncHandles() {
     //   The name board is always up, because it is the only one of the three
     //   that SAYS something. A label you have to hover to read is not a label,
     //   and it is also the thing your pointer aims at to find the other two.
-    for (const o of [s.closeBtn, s.closePad, s.plate, s.platePad]) {
-      if (o) o.userData.armed = armed
+    // NOTHING IS ARMED WHILE FULL SCREEN IS ON. The point of full screen is that
+    // the shell shows you nothing but the window, and a control that is invisible
+    // and still clickable is worse than one you can see -- it is a click into the
+    // application that the shell quietly ate. The only way out is the flying ship
+    // (dash.js), which is deliberately NOT part of this ledger.
+    const chromeOn = armed && !state.full
+    for (const o of [s.closeBtn, s.closePad, s.castBtn, s.castPad,
+                     s.fullBtn, s.fullPad, s.plate, s.platePad]) {
+      if (o) o.userData.armed = chromeOn
     }
+    if (s.fullBtn) s.fullBtn.visible = chromeOn
     if (!armed && s.closeBtn) s.closeBtn.visible = false
+    // `--&` is drawn on the same test as `X--` and for the same reason: it has
+    // to be FINDABLE. Nobody hovers the bottom-left corner of a window to see
+    // whether a feature is hiding there.
+    // NOT drawn on `armed` any more -- `setCastHot` in travel.js draws it, the
+    // same way `-->` is drawn, so it appears only when you reach for it. Armed
+    // still decides what the pointer can HIT, which is why the pad above keeps
+    // it: a control that could only be hit while already visible is a control
+    // nobody can find, and that is the trap syncHandles' own note describes.
+    if (!armed && s.castBtn) s.castBtn.visible = false
     // AND "ALWAYS UP" MEANS FROM THE ROAD TOO, which it did not.
     //
     // It was drawn on `armed`, and armed is "you are standing IN this window" --
@@ -1046,7 +1247,9 @@ function syncHandles() {
     // Windows on another network's road are hidden by clearing `mesh.visible`
     // (syncPlacement), and three does not draw the children of an invisible
     // parent -- so this cannot light up a road you are not looking at.
-    if (s.plate) s.plate.visible = true
+    // The name board is the one thing drawn from the road as well as from inside,
+    // so it answers to `state.full` rather than to `armed`.
+    if (s.plate) s.plate.visible = !state.full
     // A STEP CONTROL IS ARMED ONLY IF THERE IS SOMEWHERE TO STEP TO. At the ends
     // of a road one of them points at nothing, and a control that is drawn and
     // then does nothing is worse than one that is not there -- you press it
@@ -1350,7 +1553,12 @@ function dropSign(k, forget = false) {
   // and leaves its geometry and material behind. One per resize is not much and
   // a drag makes a lot of them. (The texture is shared and outlives every sign,
   // which is why it is not disposed here.)
-  for (const o of [s.handle, s.grabPad, s.closeBtn, s.closePad, s.plate, s.platePad, s.prevBtn, s.prevPad, s.nextBtn, s.nextPad, s.keepBtn, s.keepPad, s.shutBtn, s.shutPad]) {
+  // EVERY control the sign owns, and the list is the thing that goes stale. The
+  // cast pair was added and not added here, which is a texture and two geometries
+  // left behind on every window that closes -- invisible until a soak.
+  for (const o of [s.handle, s.grabPad, s.closeBtn, s.closePad, s.castBtn, s.castPad,
+                   s.fullBtn, s.fullPad, s.plate, s.platePad, s.prevBtn, s.prevPad,
+                   s.nextBtn, s.nextPad, s.keepBtn, s.keepPad, s.shutBtn, s.shutPad]) {
     if (!o) continue
     o.geometry.dispose()
     o.material.dispose()
@@ -1481,7 +1689,7 @@ function syncPopups() {
         q = undefined
       }
       if (!q) {
-        const { rt, tex } = adoptSurfaceTexture(rs, view)
+        const { rt, tex } = adoptSurfaceTexture(rs)
         const mesh = new THREE.Mesh(
           new THREE.PlaneGeometry(1, 1),
           new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),

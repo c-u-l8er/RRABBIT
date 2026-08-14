@@ -1766,6 +1766,48 @@ function installViewInput() {
     { passive: false },
   )
 
+  // ---- clicking off the map shuts it -------------------------------------
+  //
+  // The overlay is two panels on a dark backdrop, and the backdrop is reachable:
+  // the 20px border around `.wrap` and the 24px gap down the middle. Pressing
+  // there is pressing nothing, and pressing nothing to dismiss is what every
+  // other overlay in computing has already taught people -- the same argument,
+  // and the same gesture, that the flat view uses for clicking beside a window.
+  // It resolves through `closeMap()`, so it is Esc's answer by another route
+  // rather than a second way of shutting the map that could drift from it.
+  //
+  // NOT ON `click`, AND THAT IS THE WHOLE CARE HERE. A pan inside the graph box
+  // takes pointer capture on `#map`, and Chrome then retargets the CLICK to the
+  // capture element as well as the moves -- the exact retarget documented under
+  // the pan below, which once ate every click in that box. So a click listener
+  // asking "was this the backdrop?" would answer YES for every pan that moved,
+  // and dragging the graph around would shut the map underneath you.
+  //
+  // Both ENDS of the press are checked instead, and the press is only a dismiss
+  // if it began and ended on nothing. A press that starts on the backdrop can
+  // never be a pan -- panning requires `.graph` -- so there is no drag to test
+  // for beyond that.
+  const onBackdrop = (t) => !!t && !t.closest?.('.graph') && !t.closest?.('.detail')
+  let downOnBackdrop = false
+
+  el.addEventListener('pointerdown', (ev) => {
+    downOnBackdrop = ev.button === 0 && onBackdrop(ev.target)
+  })
+  el.addEventListener('pointerup', (ev) => {
+    const began = downOnBackdrop
+    downOnBackdrop = false
+    if (!began || ev.button !== 0 || !onBackdrop(ev.target)) return
+    // Recorded, because "the backdrop was pressed and declined" and "the press
+    // never reached this listener at all" are the two ways this can look broken
+    // and they have different causes.
+    state.lastMapDismiss = { at: [Math.round(ev.clientX), Math.round(ev.clientY)] }
+    closeMap()
+  })
+  // A press that is cancelled mid-way is not a click anywhere else either.
+  el.addEventListener('pointercancel', () => {
+    downOnBackdrop = false
+  })
+
   el.addEventListener('pointerdown', (ev) => {
     if (ev.button !== 0) return
     const box = ev.target.closest?.('.graph')

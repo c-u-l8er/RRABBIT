@@ -292,6 +292,38 @@ export function windowAtOn(district) {
 // 488 tall and the whole structure is in shot.
 export const GANTRY_VIEW = 440
 
+// HOW FAR BACK PAST THE HEAD OF THE ROAD THE WHEEL MAY TAKE YOU, and why it is
+// no longer zero.
+//
+// The wheel used to stop dead at the start (`near: 0`), which put the enter gate
+// at exactly GANTRY_VIEW and no further. That was the right stop when the frame
+// was all windshield. IT IS NOT ANY MORE: the cockpit now covers the bottom
+// third of the screen, so the band the road is actually visible in is the top
+// two thirds, and the gate that was framed against a full frame is framed
+// against a shorter one. Reported as not being able to see the entrance sign
+// properly, which is exactly what a sign standing in the part of the frustum the
+// dashboard has taken looks like.
+//
+// MEASURED, not chosen, and the measurement includes the dashboard:
+//
+//   the frustum is 2*d*tan(29 deg) = 1.1086*d tall, centred on the camera's y=105
+//   the cockpit's crown sits at 596 of 900 px, so the clear band is the top 66.2%
+//   the clear band's bottom edge is therefore at y = 105 - 0.1796*d
+//   the road surface is at y = -30, and the gantry's feet stand on it
+//
+//   -30 >= 105 - 0.1796*d   =>   d >= 752
+//
+// 760 with the margin. At that distance the frustum top is y=526 against a board
+// top of 328 (BEAM_Y + 12 + BOARD_H), so the whole structure -- feet, uprights,
+// beam and board -- stands clear of both the frame edge and the hood.
+export const ENTER_VIEW = 760
+
+// The same distance as a roadZ bound: camera z is 260 + roadZ, and we want
+// (camera z - ENTER_Z) === ENTER_VIEW. Named here rather than computed at the
+// clamp because the ROAD MESH has to be long enough to still be under you when
+// you get there -- two readers, one definition.
+export const HEAD_ROOM = ENTER_Z + ENTER_VIEW - 260
+
 // A CANVAS TEXTURE WEBGL1 WILL NOT SILENTLY REBUILD ON EVERY UPLOAD.
 //
 // This runs on WebGL1, where a texture whose dimensions are not powers of two
@@ -392,6 +424,11 @@ export const state = {
   // Non-zero exactly when the flattened window is NOT pixel-exact, which is the
   // only honest way to read a zoom that is now remembered per window.
   flatZoom: 0,
+  // FULL SCREEN: the shell shows nothing but the window. Set only while `mode`
+  // is 'flat' -- it is a property of standing in a window, not a mode of its own,
+  // and every reader treats it that way rather than as a fourth mode.
+  full: false,
+  fullFrom: null,
   // Wheel gestures begun while flat, and who owned the last one. The zoom used
   // to be hijacked mid-gesture by the window it was growing; these are what make
   // that visible rather than something you have to feel.
@@ -465,6 +502,20 @@ export const ctx = {
 // TIME rather than copied at attach time, because shell.js only has a launcher
 // once the session is up, which is after the last attach() has run.
 export const hooks = {
+  // (clientX, clientY) => hit|null -- does the COCKPIT own this point?
+  //
+  // Asked by Travel's pointer handler before it raycasts, so an instrument
+  // painted over the road takes the click that lands on it. A hook rather than a
+  // listener on purpose: the dash canvas is `pointer-events: none` and must stay
+  // that way, so the dashboard answers a question instead of competing for the
+  // event. Same shape and same reason as spawnWindow -- shell.js owns the dash
+  // and Travel cannot import it.
+  dashHit: null,
+  // (district, milepost) => {on, listed} -- put this window on the dashboard's
+  // TV and add it to the broadcast list. Travel owns the click on `--&`, the
+  // ledger and the quad live in broadcast.js, and shell.js is the only module
+  // that can see both. Same shape and same reason as closeWindow.
+  castWindow: null,
   spawnWindow: null, // () => boolean -- open a window on the road you are on
   // (district, milepost) => asked -- ask the client to close itself. Travel owns
   // the click on the `X--` control and RRABBIT owns the surface, and Travel

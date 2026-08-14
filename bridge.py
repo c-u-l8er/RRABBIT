@@ -28,6 +28,7 @@ import os
 import platform
 import posixpath
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -55,6 +56,24 @@ ISOLATION_HEADERS = {
 
 # The seven, in rack order.
 TUBES = ("cpu", "ram", "swap", "disk", "net", "temp", "load")
+
+# WHERE THE KIOSK BROWSER LEFT ITS PID (see /api/logout, and `rrabbit-session`,
+# which writes it). Not a pattern to match against `ps`: `pkill firefox` on a
+# workstation kills the browser somebody is working in, and the one place this
+# code runs unattended is the one place that mistake is unrecoverable.
+BROWSER_PIDFILE = os.environ.get("RRABBIT_BROWSER_PIDFILE", "/tmp/rrabbit-browser.pid")
+
+# What the pid is allowed to be if the pidfile does not say. A pidfile outlives
+# the process it names when a session dies badly, and pids are reused -- so the
+# file alone is not evidence, and the name check is the second half of it.
+#
+# THE FILE'S OWN SECOND FIELD BEATS THIS, and the reason is the target rather
+# than tidiness: `firefox` on FreeBSD may be a wrapper, in which case the process
+# the session actually waits on is called something else, and a check against the
+# configured browser name would refuse the real thing every time. So the session
+# records what the process was ACTUALLY called at the moment it started it, and
+# this constant is only the fallback for a pidfile written without one.
+BROWSER_NAME = os.path.basename(os.environ.get("RRABBIT_BROWSER", "firefox"))
 
 # Redlines. `None` means the gauge has no meaningful ceiling (see NET).
 BARS = {
@@ -427,6 +446,86 @@ class FreeBSDReader:
 READER = FreeBSDReader() if platform.system() == "FreeBSD" else LinuxReader()
 
 
+# -------------------------------------------------------------------- logout
+
+
+def _proc_name(pid):
+    """The command name of `pid`, or None if it cannot be established.
+
+    `ps -o comm= -p N` rather than /proc: this has to answer on FreeBSD, where
+    /proc is not mounted by default -- the same fact that cost the native proxy
+    a session. None means "could not tell", which is refused below; it never
+    means "close enough".
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=3
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    name = out.stdout.strip().splitlines()
+    return os.path.basename(name[0].split()[0]) if name and name[0].strip() else None
+
+
+def end_session():
+    """Signal the kiosk browser so the session that owns it can end.
+
+    THE BRIDGE CANNOT LOG ANYBODY OUT EITHER, and this is not a smaller version
+    of that claim. What it does is send SIGTERM to one process it was told about
+    by name and by pid. `rrabbit-session` is blocked waiting on that process; the
+    session ends because the wait returns, and SDDM shows the greeter because the
+    session ended. Every step of that belongs to something else.
+
+    Returns (http status, payload). Every refusal carries a sentence, because
+    this is reached from a button and a button that does nothing and says nothing
+    is the failure mode the whole shell is written against.
+    """
+    try:
+        with open(BROWSER_PIDFILE) as f:
+            raw = f.read().strip()
+    except OSError:
+        return 409, {
+            "ok": False,
+            "why": f"no session to end — nothing wrote {BROWSER_PIDFILE}",
+        }
+    # "<pid>" or "<pid> <comm>" -- see BROWSER_NAME for why the second field is
+    # worth having and why it is allowed to be missing.
+    fields = raw.split()
+    try:
+        pid = int(fields[0])
+    except (IndexError, ValueError):
+        return 409, {"ok": False, "why": f"{BROWSER_PIDFILE} does not hold a pid"}
+    if pid <= 1:
+        return 409, {"ok": False, "why": f"refusing to signal pid {pid}"}
+    want = fields[1] if len(fields) > 1 else BROWSER_NAME
+
+    name = _proc_name(pid)
+    if name is None:
+        return 409, {
+            "ok": False,
+            "why": f"pid {pid} is not running — a stale pidfile from a session that died",
+        }
+    # THE CHECK THAT MAKES THE PIDFILE SAFE TO TRUST. A pid outlives nothing and
+    # gets reused; without this, a session that crashed without clearing its file
+    # arms this endpoint against whatever process inherited the number.
+    if name != want:
+        return 409, {
+            "ok": False,
+            "why": f"pid {pid} is {name}, not {want} — refusing to signal it",
+        }
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        return 500, {"ok": False, "why": f"could not signal pid {pid}: {e}"}
+    # The name it ACTUALLY has, not the one configured -- the two differ whenever
+    # the pidfile carried its own, which is the case this whole check exists for.
+    print(f"LOGOUT signalled {name} pid {pid}", flush=True)
+    return 200, {"ok": True, "pid": pid, "signal": "SIGTERM", "name": name}
+
+
 def read_all():
     out = {}
     for name in TUBES:
@@ -498,10 +597,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, f.read(), ctype or "application/octet-stream")
 
     def do_POST(self):
+        route = self.path.split("?")[0]
+
+        # THE POWER KEY ON THE DASHBOARD. Bound to POST rather than GET because
+        # it is not a read: a link a prefetcher could follow would end the
+        # session of anyone whose browser guessed ahead.
+        if route == "/api/logout":
+            code, payload = end_session()
+            self._send(
+                code,
+                json.dumps(payload).encode(),
+                "application/json",
+                {"Access-Control-Allow-Origin": "*"},
+            )
+            return
+
         # A report endpoint, so a HEADLESS browser can say what it managed to
         # do. Firefox has no way to hand back `window.__m1()`, and "the
         # screenshot looked fine" is not a measurement.
-        if self.path.split("?")[0] != "/api/report":
+        if route != "/api/report":
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
             return
         try:

@@ -50,6 +50,9 @@
 import * as THREE from 'three'
 import { createAppLauncher, createCompositorSession, initWasm } from '@gfld/compositor'
 import { createRack } from './tubes.js'
+import { createDash, GEARS } from './dash.js'
+import { makeYoke } from './yoke3d.js'
+import { createTv } from './broadcast.js'
 import {
   state,
   signs,
@@ -65,6 +68,7 @@ import {
   LEDGER_PITCH,
   LEDGER_COLS,
   windowZ,
+  dashNear,
 } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
@@ -79,12 +83,15 @@ import {
   goDash,
   flattenTo,
   release,
+  enterFull,
+  exitFull,
   backTarget,
   sendMotion,
   resizeFlatBy,
   handlePoint,
   stepFlight,
   installInput,
+  dropAt,
 } from './travel.js'
 import {
   attachRrabbit,
@@ -117,7 +124,226 @@ export { state }
 // an absolute origin here was a bug.
 const TUBE_BRIDGE = new URLSearchParams(location.search).get('bridge') ?? ''
 
-let renderer, gl, scene, camera, session, rack, vaoExt
+let renderer, gl, scene, camera, session, rack, dash, tv, vaoExt
+
+// (program, side, dash) => bool -- open one of the things in the ST&RT menu.
+// Assigned in main() once the compositor session exists, which is the only
+// moment a launcher can be made; null until then, and the drag handler in
+// buildWorld checks rather than assumes, because buildWorld runs first.
+let launchProgram = null
+
+// The layer full screen looks at. 1 rather than 0 because 0 is where everything
+// already is, and the point is to have a channel nothing else is on.
+const FULL_LAYER = 1
+
+// THE BROADCAST LEDGER. Insertion-ordered keys, because the chips on the TV are
+// laid out in list order and a Set preserves that for free -- a window you added
+// first stays leftmost instead of the row reshuffling every time one is removed.
+//
+// `onAir` is a SEPARATE field and not "the first entry". Being on the list and
+// being on the screen are two different states: `--&` puts a window on both, and
+// pressing its chip takes it off the screen while leaving it on the list, which
+// is the whole point of the list existing.
+const castList = new Set()
+let onAirKey = null
+
+// What a chip says. The window's own name plus its ADDRESS, because a client
+// names its own window and two of them often pick the same string -- `home:2` is
+// the shell's name for it and the one thing the map, the keyboard and every
+// report in here agree on. On a chip 104px wide the address is what makes two
+// `xterm`s tell apart, so it goes first and the title fills what is left.
+function labelOfKey(k) {
+  const s = signs.get(k)
+  if (!s) return k
+  return `${s.district}:${s.milepost} ${nameOf(s)}`
+}
+// ------------------------------------------------------------- the programs
+//
+// WHAT THE ST&RT MENU CAN OPEN, and there are exactly two kinds because the
+// compositor has exactly two launchers.
+//
+// `web` is an in-browser client out of `clients/` -- it runs in a same-origin
+// iframe and needs nothing but this page. `native` is a real process on the
+// machine, started by compositor-proxy (`npm run proxy`) and streamed in, and it
+// needs that process to be running. The two are not interchangeable and the menu
+// says which is which, because "xterm did not open" has a different answer from
+// "the test pattern did not open".
+//
+// THE WEB LIST IS THE BUILD'S. vite.config.ts names these two as build inputs, so
+// a third client added there has to be added here as well -- there is no
+// directory to read at runtime, and inventing one would mean a menu offering a
+// path that 404s.
+const WEB_PROGRAMS = [
+  { id: 'simple-shm', name: 'Simple SHM', kind: 'web', client: 'simple-shm',
+    note: 'the shared-memory test pattern' },
+  { id: 'menu-shm', name: 'Menu SHM', kind: 'web', client: 'menu-shm',
+    note: 'test pattern with popup menus' },
+]
+
+// A MIRROR OF `proxy/applications.json`, USED ONLY WHEN THE REAL FILE CANNOT BE
+// READ. The file is served by vite in dev and is not in the build output, so on
+// the target this is what there is. It is a mirror and drifts, which is exactly
+// why `programsFrom` is printed on the menu and reported by `__dash()`: a list
+// off the file and a list off this constant look identical otherwise.
+const NATIVE_MIRROR = [
+  { path: '/text-editor', name: 'Text Editor' },
+  { path: '/xterm', name: 'XTerm' },
+  { path: '/firefox', name: 'Firefox' },
+  { path: '/glxgears', name: 'glxgears' },
+  { path: '/busy-xterm', name: 'XTerm (busy)' },
+]
+
+const PROXY_BASE = new URLSearchParams(location.search).get('proxy') ?? 'http://127.0.0.1:8912'
+
+// THE PROXY TELLS US TO CONNECT SOMEWHERE IT CANNOT KNOW, AND WE CAN.
+//
+// compositor-proxy is started with ONE `--base-url`, and it builds the URL for
+// each application's protocol channel from it (`NativeAppContext.js`, the
+// `data.url` of the channel signalling message). There is no request in scope
+// there, so unlike the HTTP replies it cannot answer with the host the client
+// actually used -- it can only repeat the flag.
+//
+// For a T&R guest reaching the host's proxy at `10.0.2.2:8912` that flag says
+// `127.0.0.1:8912`, which inside the guest is the GUEST. Measured: the signalling
+// socket connected (`appStates: open`), the protocol channel never did, and the
+// only trace was an unhandled `Failed to connect to application.` with
+// `views: []`. Nothing else in the shell can tell that apart from "the frames
+// never decoded" -- which is where two turns went.
+//
+// So correct it here, where the answer is known: we reached the proxy at
+// PROXY_BASE, so that is its address FOR US, whatever it believes. Scoped to the
+// proxy's own two endpoints, and a no-op when the hosts already agree -- vite's
+// HMR socket shares this global and must not be touched.
+//
+// This is the WebSocket half. The HTTP half (`baseURL`, used for clipboard and
+// file transfer) is fixed on the server, where a request IS in scope --
+// `publicBaseURL` in patches/proxy-cli-multi-origin.md. Two transports, two
+// places; neither one covers the other.
+{
+  const proxyHost = new URL(PROXY_BASE).host
+  const Real = window.WebSocket
+  window.WebSocket = function (url, protocols) {
+    try {
+      const u = new URL(String(url), location.href)
+      if ((u.protocol === 'ws:' || u.protocol === 'wss:')
+          && (u.pathname === '/channel' || u.pathname === '/signal')
+          && u.host !== proxyHost) {
+        u.host = proxyHost
+        url = u.href
+      }
+    } catch {
+      // Not a URL we can reason about -- hand it over untouched.
+    }
+    return protocols === undefined ? new Real(url) : new Real(url, protocols)
+  }
+  window.WebSocket.prototype = Real.prototype
+  for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) window.WebSocket[k] = Real[k]
+}
+
+// The native half of the menu, and where it came from. Filled by `loadPrograms`
+// below; until then the menu shows the web clients alone rather than a guess.
+let nativePrograms = []
+let programsFrom = 'web clients'
+// null = NOT ASKED YET, and it is a third state on purpose. "The proxy is down"
+// is a claim, and a menu that made it before anything had been sent would be
+// making it up -- so an unprobed native row says `proxy not checked yet` and
+// still launches, which is the honest order: try, then report.
+let proxyUp = null
+
+async function loadPrograms() {
+  try {
+    // Relative to /m2/, so this is `/proxy/applications.json` -- the actual file
+    // the proxy is started with, served by vite in dev. A 404 in a build is
+    // expected and is not an error; it is the mirror's whole reason to exist.
+    const res = await fetch('../proxy/applications.json', { cache: 'no-store' })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const apps = await res.json()
+    nativePrograms = Object.entries(apps).map(([path, a]) => ({
+      path, name: a?.name || path.replace(/^\//, ''),
+    }))
+    programsFrom = 'applications.json'
+  } catch {
+    nativePrograms = NATIVE_MIRROR
+    programsFrom = 'built-in list'
+  }
+}
+
+// THERE IS NO PROBE. This function used to exist and it was worse than nothing:
+// it reported every healthy proxy as dead, so every native program in the ST&RT
+// menu -- including the T&R guest apps -- was drawn refused, with a message
+// telling you to start something that was already running. Three ways were
+// tried, and this page cannot ask the question:
+//
+//   OPTIONS + cors   The proxy answers `Access-Control-Allow-Methods: GET` and
+//                    nothing else. OPTIONS is not a simple method, so an OPTIONS
+//                    *fetch* is itself preflighted with an OPTIONS -- which the
+//                    allow-list does not contain, so the preflight is refused.
+//                    (`curl -X OPTIONS` returns 204 with correct CORS headers,
+//                    which is what made this look like a proxy fault.)
+//   GET + cors       `/` answers 403 with NO `Access-Control-Allow-Origin`
+//                    header at all, so the CORS check rejects a reply the server
+//                    plainly sent.
+//   GET + no-cors    Blocked by COEP. vite.config.ts serves this page
+//                    `Cross-Origin-Embedder-Policy: require-corp` because
+//                    Greenfield needs SharedArrayBuffer, and under that every
+//                    cross-origin subresource must opt in with CORP. The proxy
+//                    sends none.
+//   WebSocket        The proxy ends any upgrade without a `compositorSessionId`,
+//                    which is indistinguishable from connection-refused.
+//
+// So the menu STOPS GUESSING. `proxyUp` stays null until something real happens:
+// native rows are offered, and the first launch that actually fails records why
+// and refuses the rest. That is the same order the rest of this shell keeps --
+// try, then report what happened -- instead of a claim made before anything was
+// sent.
+let proxyWhy = 'compositor-proxy is not answering — npm run proxy'
+
+// The list as the dashboard needs to draw it, derived every call from the two
+// halves above -- one source, so a row cannot describe a program the launcher
+// would not start.
+// WHAT A WINDOW COSTS, said where the window is opened.
+//
+// MEASURED, not guessed: eight simple-shm windows open at once put one Chrome
+// renderer at 776% CPU on a 24-core machine -- almost exactly one core each,
+// held for as long as the window is open. These clients paint every frame in
+// software forever; that is what they are for, and it was affordable while the
+// only way to open one was to drive to the gate and press a panel.
+//
+// The ST&RT menu made it one click, and a menu that will happily open twenty of
+// them while saying nothing is the shell hiding a cost it can measure. So the
+// count goes on the menu, and past half the machine's cores the footer says what
+// is happening. It does NOT refuse -- how many windows you want is your call,
+// and a shell that capped it would be answering a question nobody asked. This is
+// invariant 1's habit applied to a resource rather than to a gauge: name what is
+// over the line, and why.
+const windowBudget = () => Math.max(2, Math.floor((navigator.hardwareConcurrency || 4) / 2))
+
+function programList() {
+  const web = WEB_PROGRAMS.map((p) => ({ ...p, ok: true }))
+  const native = nativePrograms.map((p) => ({
+    id: 'native' + p.path,
+    name: p.name,
+    kind: 'native',
+    path: p.path,
+    note: proxyUp === true ? 'through the proxy' : 'needs compositor-proxy',
+    ok: proxyUp !== false,
+    why: proxyWhy,
+  }))
+  const open = signs.size
+  const budget = windowBudget()
+  return {
+    list: [...web, ...native],
+    from: programsFrom,
+    open,
+    // `null` when there is nothing to say. A footer that carries a warning slot
+    // even when nothing is wrong is furniture, and the one thing this shell will
+    // not do is print a line that is always there and therefore never read.
+    // The COUNT is already in the header, in the same warn colour, so this line
+    // is only the reason. Repeating the number here overran the plate.
+    cost: open >= budget ? 'each web client holds a core for as long as it is open' : null,
+  }
+}
+
 const DRIVE_POSE = { pos: new THREE.Vector3(0, 105, 260), look: new THREE.Vector3(0, 105, -640) }
 
 // workspace id -> { road }. A Map rather than an array because the roads
@@ -167,12 +393,55 @@ const forgetStatus = () => {
 let contextLost = false
 let sayLine = () => {}
 const timers = []
+
+// WHAT WENT WRONG, FOR A BROWSER THAT CANNOT BE ASKED. The shell's one target is
+// a kiosk Firefox with no devtools and no address bar, so a console error there
+// is a thing that happened to nobody. Kept small and BOUNDED: the tube poll used
+// to emit hundreds of identical failures (see the note above pollTubes), and an
+// unbounded buffer would make the report the same drowning-in-instrumentation
+// problem in a different place. First 20 -- first, not last, because the error
+// that explains a failure is almost always the first one.
+const errorLog = []
+const noteError = (kind, text) => {
+  if (errorLog.length >= 20) return
+  errorLog.push(`${kind}: ${String(text).slice(0, 200)}`)
+}
+{
+  const realError = console.error.bind(console)
+  console.error = (...a) => {
+    noteError('console', a.map((x) => (x && x.stack ? x.stack : x)).join(' '))
+    realError(...a)
+  }
+  window.addEventListener('error', (e) => noteError('window', e.message || e.error))
+  window.addEventListener('unhandledrejection', (e) => noteError('rejection', e.reason))
+}
+// One per launch that has not yet produced a window. `setTimeout`, so they are
+// kept apart from `timers` (cleared with `clearInterval`) for the same reason
+// the pacer's deferral is -- and cleared on a lost context, because a shell that
+// has stopped drawing has no business announcing that a window did not appear.
+const launchWatchdogs = []
+function clearWatchdogs() {
+  for (const t of launchWatchdogs) clearTimeout(t)
+  launchWatchdogs.length = 0
+}
 function loseContext(reason) {
   if (contextLost) return
   contextLost = true
   state.contextLost = reason
   for (const t of timers) clearInterval(t)
   timers.length = 0
+  clearWatchdogs()
+  // The tube poll schedules itself now, so it is not in that list. Left running
+  // it is the thing this function's own note calls the loudest part of a broken
+  // tab: a fetch every few seconds, forever, drawing a rack nobody can see.
+  if (tubeTimer) clearTimeout(tubeTimer)
+  tubeTimer = 0
+  // The pacer's deferral is a setTimeout rather than an interval, so it is not in
+  // that list -- and it holds a reference to the ORIGINAL renderer.render, which
+  // would run one more full cycle after the stub below had replaced the wrapper.
+  if (pacing.timer) clearTimeout(pacing.timer)
+  pacing.timer = 0
+  pacing.fire = null
   // AND THE COMPOSITOR'S LOOP, WHICH IS NOT OURS TO SCHEDULE.
   //
   // Stopping the frame loop stopped OUR drawing and the storm carried on anyway --
@@ -203,6 +472,41 @@ function loseContext(reason) {
   }
   sayLine(`the GPU dropped this page (${reason}) -- reload to come back. Your roads and windows are saved.`)
   console.error(`[rrabbit] ${reason}: halting the frame loop. Reload the page.`)
+  offerReload(reason)
+}
+
+// TELLING SOMEBODY TO RELOAD IS NOT THE SAME AS LETTING THEM.
+//
+// This has now been reported three times, and every time the shell had already
+// worked out exactly what happened and then done nothing about it: the status
+// line says "reload to come back", `#status` is `pointer-events: none`, and the
+// only other notice is a console message you have to have had open. The page sits
+// there looking frozen. Whatever is dropping the context, THAT part is ours.
+//
+// A button, not an automatic reload. A GPU that has just reset may be about to do
+// it again, and a page that reloads itself on context loss can spin -- so the
+// recovery is one click and the choice stays with the person watching. It is
+// wired to `location.reload()` because a reload genuinely is the whole fix: the
+// clients do not survive one anyway, and the roads, workspaces and window names
+// are persisted (which is what the line above is claiming when it says they are
+// saved).
+function offerReload(reason) {
+  const status = document.getElementById('status')
+  if (!status || document.getElementById('reload-btn')) return
+  // The strip is deliberately unclickable so it can never eat a press meant for
+  // the road (see index.html). That rule is right and it is suspended for exactly
+  // this: there is no road left to press.
+  status.style.pointerEvents = 'auto'
+  const btn = document.createElement('button')
+  btn.id = 'reload-btn'
+  btn.textContent = 'reload the shell'
+  btn.style.cssText = 'display:block;margin-top:8px;cursor:pointer;font:inherit;'
+    + 'background:#f2c14e;color:#03040a;border:0;padding:6px 12px;font-weight:700;'
+  btn.addEventListener('click', () => location.reload())
+  status.appendChild(btn)
+  // Recorded so a report can say whether the offer was ever made -- "the button
+  // did not appear" and "the loss was never detected" look identical otherwise.
+  state.reloadOffered = { reason, at: Date.now() }
 }
 
 // ---------------------------------------------------------------- the world
@@ -247,7 +551,21 @@ function whyNoContext(canvas) {
   if (freshWorks) {
     return 'WebGL works here but this page could not get a context -- almost always the browser\'s live-context limit, reached by reloading the shell while old sessions still hold theirs. Close the tab and open it again.'
   }
-  return 'No WebGL context is available in this browser at all (fresh canvases are refused too), so this is the machine or the browser, not the shell. Check hardware acceleration, and on the T&R image whether the software path survives Xorg scfb.'
+  // THIS BRANCH USED TO BLAME THE MACHINE, AND IT WAS WRONG TO.
+  //
+  // "fresh canvases are refused too" was taken to mean WebGL is unavailable
+  // here, which sends you to hardware acceleration and to Xorg scfb -- a long
+  // way from the actual cause. But the context pool is shared across every tab
+  // in the process, and when it is EXHAUSTED rather than merely full for this
+  // page, a fresh canvas is refused as well. That is a recoverable state that
+  // looks identical to a broken driver.
+  //
+  // Diagnosed the hard way on 2026-08-12: the cockpit's yoke took a second
+  // context per load and was not in the pagehide reaper the road's context has
+  // been in for months, so every reload leaked one until the pool was gone --
+  // and this message said the browser could not do WebGL, on a browser that had
+  // been doing it all afternoon.
+  return 'No WebGL context could be had -- fresh canvases are refused too. That is EITHER the browser/machine (check hardware acceleration, and on the T&R image whether the software path survives Xorg scfb) OR the shared context pool being exhausted across tabs. Try that first, it is the cheaper one: close other WebGL tabs (RAVIO holds two of its own), then reload. `?yoke=0` boots this shell on one context instead of two.'
 }
 
 function buildWorld(canvas) {
@@ -275,9 +593,13 @@ function buildWorld(canvas) {
   canvas.addEventListener('webglcontextlost', () => loseContext('WebGL context lost'))
   // And if the browser DOES hand one back, stay stopped: three would be whole and
   // the compositor would not, which is the state that produced the error storm.
-  canvas.addEventListener('webglcontextrestored', () =>
-    console.error('[rrabbit] context restored, but the compositor cannot be. Reload.'),
-  )
+  canvas.addEventListener('webglcontextrestored', () => {
+    console.error('[rrabbit] context restored, but the compositor cannot be. Reload.')
+    // The browser handing the context back is the clearest possible moment to
+    // offer the way out, and until now it was the moment the shell said the least.
+    // Idempotent -- `loseContext` has almost certainly already put the button up.
+    offerReload('context restored without a compositor')
+  })
   renderer = new THREE.WebGLRenderer({ canvas, context: gl })
   renderer.setPixelRatio(1)
 
@@ -299,11 +621,103 @@ function buildWorld(canvas) {
 
   syncRoads()
 
-  // The rack is parented to the camera, and a camera's children are only
-  // rendered if the camera is itself in the scene graph. Without this line the
-  // tubes exist, update correctly, and are invisible.
+  // The camera is still in the scene graph, and that is no longer about the
+  // tubes: the resize handle and the popup quads are parented to it too.
   scene.add(camera)
-  rack = createRack(camera)
+
+  // THE RACK IS A MODEL NOW, AND THE COCKPIT DRAWS IT.
+  //
+  // It used to be seven THREE cylinders in a Group parented to the camera --
+  // an instrument hanging in mid-air, taking fog and perspective from a scene
+  // it was not part of, with its readouts on 256px CanvasTextures. RAVIO does
+  // not do that: RAVIO has a dashboard at the bottom of the frame and the tubes
+  // are seated in it. So does this now. `createRack()` keeps `apply` and
+  // `overRedline` unchanged -- renderWhy() below never knew about the geometry
+  // and still does not.
+  rack = createRack()
+  tv = createTv(camera)
+  dash = createDash({
+    canvas: document.getElementById('dashcv'),
+    yokeCanvas: document.getElementById('yokecv'),
+    makeYoke,
+    rack,
+    state,
+    camera,
+    // WHICH GEARS HAVE NOTHING BEHIND THEM YET. P, R and C are drawn in the gate
+    // and REFUSE to engage, because a stick that moves into PARK while the road
+    // is still running underneath reports a state the viewer cannot read off
+    // anything in front of them. The list shrinks as the scenes get built; it is
+    // not a placeholder for "coming soon", it is the shell declining to claim
+    // something it cannot do.
+    unbuilt: ['P', 'R', 'C'],
+    // What the TV shows. Passed in as a callback rather than imported inside
+    // dash.js, for the same reason the map's actions are: shell.js is the only
+    // module allowed to know about Travel, RRABBIT and the compositor at once.
+    card: (gear) => {
+      const g = GEARS.find((x) => x.id === gear) || GEARS[GEARS.length - 1]
+      const here = [...signs.values()].filter((s) => s.district === state.district).length
+      if (gear !== 'D') {
+        return { head: g.id + ' · ' + g.name, sub: g.sub.toUpperCase(),
+                 big: 'not built', line: 'no scene behind this gear yet',
+                 foot: 'the shifter is beside the wheel · Esc for D', footWarn: true }
+      }
+      return {
+        head: 'T&R · Travel & RRABBIT',
+        sub: state.mode === 'flat' ? 'STANDING IN A WINDOW'
+           : state.mode === 'flying' ? 'IN FLIGHT' : 'ON THE ROAD',
+        big: ws.get(state.district)?.name || state.district,
+        line: `${here} window${here === 1 ? '' : 's'} here  ·  ${signs.size} open  ·  `
+            + (state.tubeError ? 'bridge unreachable' : (state.tubeReader || 'bridge waiting')),
+        foot: 'G · next gear      0 · the map',
+        footWarn: !!state.tubeError,
+      }
+    },
+    // The housings are drawn; the GLASS is empty and says which nothing it is,
+    // because the camera and the reel are the two scenes that would fill them
+    // and neither exists yet. A dark housing with no caption is indistinguishable
+    // from a rendering fault.
+    mirrors: () => ({
+      mirrorLive: { left: false, right: false },
+      mirrorTag: { left: 'BEHIND', right: 'AHEAD' },
+      mirrorEmpty: {
+        left: ['NO REAR VIEW', 'the road behind is not rendered yet'],
+        right: ['NO REEL LOADED', 'C · CAMERA and R · REEL are not built'],
+      },
+    }),
+    // Changing gear is Travel's business the moment there is a scene to change
+    // to; until then it only moves the stick, and this hook is where that will
+    // be wired rather than a second gear variable somewhere else.
+    onGear: (id) => {
+      state.gear = id
+    },
+    // The list, as the TV needs to draw it. Derived from the ledger every call
+    // rather than kept in a second array -- one source, so a chip cannot label
+    // itself after a window that has closed.
+    cast: () => ({
+      onAir: !!onAirKey && signs.has(onAirKey),
+      onAirKey: onAirKey && signs.has(onAirKey) ? onAirKey : null,
+      title: onAirKey ? labelOfKey(onAirKey) : null,
+      list: [...castList].filter((k) => signs.has(k)).map((k) => ({
+        key: k,
+        label: labelOfKey(k),
+        live: k === onAirKey,
+      })),
+    }),
+    // What the ST&RT menu offers. Same shape and same reason as `cast`: read at
+    // paint time and at hit time from one function, so the row you press is the
+    // program that opens.
+    programs: programList,
+    // RAVIO's pill says which lane is on and what milepost you are at. The same
+    // question asked of the grid this fork actually has: which workspace, and
+    // which DASH you are standing at.
+    pill: () => ({
+      lane: 'T&R · ' + String(ws.get(state.district)?.name || state.district).toUpperCase() + ' IS ON',
+      big: String(dashNear(camera.position.z)),
+      right: state.mode === 'flat' ? 'STANDING IN A WINDOW'
+           : state.mode === 'flying' ? 'IN FLIGHT' : 'ON THE ROAD',
+      warn: state.mode === 'flat',
+    }),
+  })
 
   // Hand the stage to both personalities. `session` is still null here -- it is
   // created later in main() -- so this runs again once it exists. attach() is
@@ -402,6 +816,281 @@ function buildWorld(canvas) {
   })
   hooks.closeWindow = requestCloseWindow
 
+  // ---- ending the session -------------------------------------------------
+  //
+  // A PAGE CANNOT LOG YOU OUT. The shell is a document in a kiosk browser; it
+  // has no session to end and `window.close()` will not close the last window it
+  // is running in. The thing that owns the session is `rrabbit-session`, which
+  // is blocked waiting for that browser to exit -- so ending the session means
+  // ending the browser, and the only process on the machine that both knows
+  // which browser that is and is allowed to signal it is the bridge.
+  //
+  // WHICH IS WHY THIS CAN REFUSE, AND SHOULD. Served from vite on 8911, or from
+  // a bridge started by hand on a workstation, there is no session and no kiosk
+  // -- and a shell that reached for the nearest Firefox and killed it would take
+  // the browser you are developing in with it. The bridge answers 409 with a
+  // sentence saying so, and that sentence goes on the plate.
+  async function endSession() {
+    let why
+    try {
+      const r = await fetch(`${TUBE_BRIDGE}/api/logout`, { method: 'POST' })
+      // READ THE BODY EITHER WAY. The refusal's whole value is its reason, and
+      // `r.ok` alone would reduce it to "no".
+      const body = await r.json().catch(() => ({}))
+      state.lastLogout = { ok: !!body.ok, status: r.status, why: body.why || null,
+                           pid: body.pid ?? null, at: Date.now() }
+      if (!r.ok || !body.ok) why = body.why || `bridge answered ${r.status}`
+      // Signalled. Nothing more to draw -- either this page is about to go, or
+      // the browser ignored the signal, and the line below is what says which.
+      else why = `signalled pid ${body.pid} — still here means it did not go`
+    } catch (e) {
+      state.lastLogout = { ok: false, status: null, why: String(e), pid: null, at: Date.now() }
+      why = `the bridge did not answer: ${e}`
+    }
+    dash.setPowerWhy(why)
+  }
+
+  // THE COCKPIT'S ONE CONTROL, wired into the road's own pointer path rather
+  // than into a listener of its own. Travel asks before it raycasts; a hit on
+  // the gate knocks the stick into that detent and swallows the click, and
+  // anything else falls straight through to the road.
+  hooks.dashHit = (x, y) => {
+    const on = dash && dash.hit(x, y)
+    if (!on) return null
+    if (on.kind === 'gear') dash.setGear(on.id, 'click')
+    if (on.kind === 'dashPull') dash.setRaised(on.action === 'raise')
+    if (on.kind === 'exitFull') exitFull()
+    if (on.kind === 'start') {
+      // THE SAME DIVISION THE TUNER KEEPS. `hit()` says a press was a miss;
+      // shutting the menu happens here, once per press, because `hit()` also runs
+      // on every pointer move and a menu closed there closes the instant you
+      // start moving toward the row you meant.
+      if (on.action === 'menu') dash.toggleStart()
+      if (on.action === 'close' || on.action === 'dismiss') dash.closeStart()
+    }
+    if (on.kind === 'power') {
+      // Same division as the tuner's and the ST&RT menu's: `hit()` says what the
+      // press was, and the opening and shutting happens here, once per press.
+      if (on.action === 'menu') dash.togglePower()
+      if (on.action === 'close' || on.action === 'dismiss') dash.closePower()
+      if (on.action === 'logout') endSession()
+    }
+    // A PRESS ON A ROW, as opposed to a DRAG off one. Both begin with the same
+    // pointerdown and the drag is decided later by whether the pointer moved, so
+    // the press is handled where the gesture ENDS -- see `endDrag` -- and this
+    // branch exists only to swallow the click here so nothing behind the menu
+    // takes it as well.
+    if (on.kind === 'program') return on
+    if (on.kind === 'channel') {
+      if (on.action === 'menu') dash.toggleMenu()
+      // THE ONLY PLACE THE MENU IS CLOSED BY A MISS, and it is here rather than
+      // in `hit()` because this runs once per PRESS. `hit()` also runs on every
+      // pointer move, so closing it there closed it the instant the pointer
+      // started travelling toward a row.
+      if (on.action === 'dismiss') dash.closeMenu()
+      if (on.action === 'pick') {
+        // A PICK IS A TUNE, NOT A TOGGLE. Pressing the row of the channel
+        // already on turns the TV OFF, which is the only way this dropdown can
+        // express "nothing" -- there is no other control for it, and a tuner you
+        // cannot switch off is one where a window is stuck on the screen.
+        onAirKey = onAirKey === on.key ? null : on.key
+        dash.closeMenu()
+      }
+    }
+    if (on.kind === 'tvctl' && on.action === 'delete') {
+      // DELETE TAKES IT OFF THE LIST, not off the screen -- taking it off the
+      // screen is what picking its own row already does, and two controls for
+      // one act is how you end up pressing the wrong one. Off the list is off
+      // the air as well, because a window broadcasting that nothing on the
+      // dashboard admits to has no way back.
+      if (on.key) castList.delete(on.key)
+      if (onAirKey === on.key) onAirKey = null
+      dash.closeMenu()
+    }
+    if (on.kind === 'screen' && on.key) {
+      // CLICKING THE TV FLIES YOU INTO THE WINDOW ON IT. The same gesture as
+      // clicking its sign out on the road, and it resolves through the same
+      // function -- the TV is a view of a window, so it answers like one.
+      const s = signs.get(on.key)
+      if (s) {
+        dash.closeMenu()
+        flattenTo(s.milepost, s.district)
+      }
+    }
+    return on
+  }
+
+  // `--&` on a flattened window. Adds it to the list AND puts it on air, because
+  // pressing a control on a window and having it appear nowhere is a press you
+  // cannot tell from a miss.
+  hooks.castWindow = (district, milepost) => {
+    const k = [...signs.keys()].find((key) => {
+      const s = signs.get(key)
+      return s && s.district === district && s.milepost === milepost
+    })
+    if (!k) return null
+    castList.add(k)
+    onAirKey = k
+    // AND IT LETS GO OF THE WINDOW, which is the half that was missing.
+    //
+    // The cockpit slides out of the way while you are standing in a window (the
+    // flatten is pixel-exact and an instrument panel over it would be a lie about
+    // 1:1), so pressing `&--` from inside put the window on a TV that was not on
+    // screen -- a control that visibly did nothing, from the one place you can
+    // reach it. Broadcasting is a thing you do TO a window in order to watch it
+    // from outside, so the press ends where the result is visible: back on the
+    // road, dashboard up, this window on the glass.
+    //
+    // `release()` and not `goWindow()`: you are already parked in front of it, so
+    // stepping back out is the whole move.
+    release()
+    return { key: k, listed: castList.size, on: true, released: true }
+  }
+  // ---- dragging a program out of the ST&RT menu ----------------------------
+  //
+  // ONE GESTURE, TWO OUTCOMES, decided by whether the pointer moved. Press a row
+  // and release without travelling and the program opens wherever the road has
+  // room; press it and drag and it opens WHERE YOU DROPPED IT. That is the same
+  // bargain a desktop makes with a shortcut, and it means the menu does not need
+  // a second control for "and put it over there".
+  //
+  // THE THRESHOLD IS WHAT MAKES BOTH REACHABLE. Without it every click is a
+  // one-pixel drag onto the menu itself, which is a cancel -- so a plain click
+  // would do nothing at all, and it would look exactly like a dead row.
+  const DRAG_SLOP = 5
+  let dragging = null
+
+  // WHERE THIS WOULD LAND IF IT WERE RELEASED NOW, and why not, in the same
+  // answer. The ghost prints `hint` verbatim, so every refusal here is a refusal
+  // the user can read off the screen rather than infer from nothing happening.
+  function dragHint(x, y) {
+    const prog = dragging.program
+    if (!prog.ok) return { ok: false, hint: prog.why || 'not available' }
+    // Over the panel or over the menu it came from: not a place, and the way a
+    // drag is cancelled -- you put it back where you got it.
+    if (dash && dash.overCockpit(x, y)) return { ok: false, hint: 'release it over the road' }
+    const t = dropAt(x, y)
+    if (!t || t.blocked) {
+      return { ok: false, hint: t?.label || 'no road under the pointer to put it on' }
+    }
+    return { ok: true, hint: t.label, target: t }
+  }
+
+  function stepDrag(ev) {
+    if (!dragging) return
+    if (!dragging.moved
+        && Math.hypot(ev.clientX - dragging.from[0], ev.clientY - dragging.from[1]) < DRAG_SLOP) {
+      return
+    }
+    dragging.moved = true
+    const d = dragHint(ev.clientX, ev.clientY)
+    dragging.target = d.ok ? d.target : null
+    dash.setDrag({ name: dragging.program.name, x: ev.clientX, y: ev.clientY,
+                   ok: d.ok, hint: d.hint })
+  }
+
+  function endDrag(ev) {
+    if (!dragging) return
+    const { program, moved, target } = dragging
+    dragging = null
+    dash.setDrag(null)
+    if (!program.ok) {
+      // REFUSED, AND RECORDED. A row that cannot launch is drawn refused and says
+      // why on the row; releasing it changes nothing, and this is the line that
+      // says so rather than leaving "I clicked it and nothing happened".
+      state.lastLaunch = { program: program.id, ok: false, why: program.why }
+      return
+    }
+    // A CLICK IS A DROP WITH NO PLACE IN IT. `spawnWindow(null, null)` is what
+    // the shell has always meant by "wherever there is room", so a press and a
+    // drop onto bare road take the same path and cannot disagree.
+    const place = moved ? target : { where: 'click', side: null, dash: null }
+    if (!place) {
+      state.lastLaunch = { program: program.id, ok: false, why: 'released nowhere' }
+      return
+    }
+    dash.closeStart()
+    const ok = launchProgram ? launchProgram(program, place.side, place.dash) : false
+    state.lastLaunch = { program: program.id, where: place.where,
+                         side: place.side ?? null, dash: place.dash ?? null, ok }
+  }
+
+  // CAPTURE ON `window`, AND IT HAS TO BE. Travel owns the pointer -- its driving
+  // handler is on the canvas and its flat handler is a capture listener on
+  // `window` that calls `stopPropagation` -- so this has to run before both, and
+  // registration order in this phase is what puts it there: buildWorld runs
+  // before installInput. `stopPropagation` here is only ever used for a press on
+  // a program row; every other press on the cockpit still goes down the one path
+  // through `hooks.dashHit`, which is the whole reason that hook exists.
+  window.addEventListener('pointerdown', (ev) => {
+    if (!dash) return
+    const on = dash.hit(ev.clientX, ev.clientY)
+    if (!on || on.kind !== 'program') return
+    ev.preventDefault()
+    ev.stopPropagation()
+    dragging = { program: on.program, from: [ev.clientX, ev.clientY], moved: false, target: null }
+  }, { capture: true })
+
+  // NOT SWALLOWED, and that is the point. Travel's own hover listener is what
+  // lights a gate panel or frames a marker, and it is the road's highlight --
+  // stopping the move here left the ghost naming a target the road showed no
+  // sign of, which is two answers to "where will this land" and only one of them
+  // visible. The move is read, not taken.
+  window.addEventListener('pointermove', (ev) => {
+    if (!dragging) return
+    stepDrag(ev)
+  }, { capture: true })
+
+  for (const kind of ['pointerup', 'pointercancel']) {
+    window.addEventListener(kind, (ev) => {
+      if (!dragging) return
+      ev.stopPropagation()
+      // A CANCELLED POINTER IS NOT A DROP. The browser takes the pointer away on
+      // a lost window or a system gesture, and finishing the launch on that would
+      // open a window somewhere the user never released.
+      if (kind === 'pointercancel') { dragging = null; dash.setDrag(null); return }
+      endDrag(ev)
+    }, { capture: true })
+  }
+
+  // Hover, so a detent reads as reachable before you knock the stick into it --
+  // and so the pull tab knows the pointer has come down to the bottom edge.
+  //
+  // CAPTURE, and that is not a style choice. While you are standing in a window
+  // Travel silences Greenfield with a capture-phase `stopPropagation` on
+  // `window`, so a listener in the BUBBLE phase never runs in flat mode at all --
+  // which is the one mode the pull tab exists in. It stayed invisible however
+  // far down the screen the pointer went. `stopPropagation` does not stop other
+  // listeners on the SAME node, so a capture listener here still hears it.
+  //
+  // Passive: this only ever does arithmetic, and it must not compete with the
+  // raycast hover already on the canvas.
+  window.addEventListener('pointermove', (ev) => {
+    if (dash) dash.hover(ev.clientX, ev.clientY)
+  }, { capture: true, passive: true })
+  window.addEventListener('blur', () => dash && dash.hover(null, null))
+
+  // G WALKS THE GATE, Esc drops back into D -- RAVIO's two keys, and the only
+  // ones the cockpit takes. Capture phase and only when the road has the
+  // keyboard: a flattened window is being typed into, and a shell that ate `g`
+  // out of somebody's editor would be the worst kind of furniture.
+  window.addEventListener('keydown', (ev) => {
+    if (state.mode === 'flat') return
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) return
+    if (!dash) return
+    if (ev.key === 'g' || ev.key === 'G') {
+      const i = GEARS.findIndex((g) => g.id === dash.gear())
+      // Walks past a gear it cannot engage rather than stopping dead on it --
+      // `setGear` refuses, and a G that did nothing would read as a broken key
+      // rather than as a gate with three positions that are not built.
+      for (let n = 1; n <= GEARS.length; n++) {
+        if (dash.setGear(GEARS[(i + n) % GEARS.length].id, 'key')) break
+      }
+    } else if (ev.key === 'Escape') {
+      dash.setGear('D', 'key')
+    }
+  })
+
   resize()
   window.addEventListener('resize', resize)
 }
@@ -428,8 +1117,14 @@ function syncRoads() {
       // with a dozen windows on one side would have run out of tarmac under it.
       // Fog stops at 4200 either way, so this costs one quad and shows nothing
       // extra.
+      // 14500 AND RE-CENTRED, because the wheel now goes BACKWARDS past the head
+      // of the road (HEAD_ROOM). The old quad ran z -13600..+400 and the camera
+      // can now sit at z 580, which put you 180 units behind the tarmac's own
+      // near edge, looking at the road starting in mid-air. The far end is kept
+      // exactly where it was and only the near end grows -- fog stops at 4200
+      // either way, so this still costs one quad and shows nothing extra.
       const road = new THREE.Mesh(
-        new THREE.PlaneGeometry(320, 14000),
+        new THREE.PlaneGeometry(320, 14500),
         new THREE.MeshStandardMaterial({ color: 0x11131f, roughness: 0.9 }),
       )
       road.rotation.x = -Math.PI / 2
@@ -443,7 +1138,7 @@ function syncRoads() {
       r = { road }
       roads.set(w.id, r)
     }
-    r.road.position.set(x, -30, -6600)
+    r.road.position.set(x, -30, -6350)
   }
   // THE STATUS LINE STOPPED DESCRIBING THE KEYBOARD, because the keyboard
   // changed under it. It said "type a number for a lane (1..n)" and the numbers
@@ -471,20 +1166,67 @@ function syncRoads() {
 
 // ---------------------------------------------------------------- the tubes
 
+// A BRIDGE THAT IS DOWN IS ASKED LESS OFTEN, and it took three crash logs to
+// notice this was not already true.
+//
+// The poll was a flat `setInterval(pollTubes, 2000)` -- forever, at the same rate,
+// whether the bridge answered or not. With bridge.py not running that is a failed
+// fetch every two seconds for as long as the tab is open, and each one is a
+// console error Chrome RETAINS, with a stack. Every crash report from this shell
+// so far has been several hundred identical `api/tubes 500` lines with the actual
+// event buried at the bottom; twelve minutes of idle is about 360 of them. That
+// is a diagnostic being drowned by its own instrumentation.
+//
+// The file already knows this is wrong -- `loseContext` calls pollTubes "the
+// loudest thing in a broken tab" and clears it -- but only for a lost context. A
+// bridge that is simply not running is the far more ordinary case and got no such
+// mercy.
+//
+// So: double the gap on every consecutive failure up to TUBE_MAX, and drop
+// straight back to TUBE_BASE the moment it answers. The rack still shows its last
+// known values and `#why` still says the bridge is unreachable -- the display is
+// unchanged, only the asking is. A bridge that comes back is picked up within
+// TUBE_MAX rather than instantly, which is the honest price and is stated on the
+// line itself.
+const TUBE_BASE = 2000
+const TUBE_MAX = 30000
+let tubeGap = TUBE_BASE
+let tubeTimer = 0
+
 async function pollTubes() {
   try {
     const r = await fetch(`${TUBE_BRIDGE}/api/tubes`, { cache: 'no-store' })
+    // CHECKED, WHICH IT WAS NOT. A 500 fell through to `r.json()` and surfaced as
+    // `Unexpected end of JSON input` -- which reads as a bridge sending malformed
+    // data rather than as a bridge that is not running, and those have completely
+    // different fixes. The status code is the answer to which one it is.
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
     const payload = await r.json()
     rack.apply(payload)
     state.tubeReader = payload.reader
     state.tubePolls++
     state.tubeError = null
+    tubeGap = TUBE_BASE
   } catch (e) {
     // A bridge that is down must not read as a machine that is idle: leave the
     // last values alone and say so. Blanking the rack would be a claim.
     state.tubeError = String(e)
+    state.tubeFails = (state.tubeFails ?? 0) + 1
+    tubeGap = Math.min(TUBE_MAX, tubeGap * 2)
   }
+  state.tubeGap = tubeGap
   renderWhy()
+}
+
+// Self-scheduling rather than an interval, because the gap changes. One handle,
+// cleared by `loseContext` -- a poll that outlives the context it draws for is
+// exactly what the note above is about.
+function scheduleTubes() {
+  tubeTimer = setTimeout(async () => {
+    tubeTimer = 0
+    await pollTubes()
+    if (!contextLost) scheduleTubes()
+  }, tubeGap)
 }
 
 // Invariant 1: a tube over its redline has to say what is doing it.
@@ -493,7 +1235,13 @@ function renderWhy() {
   if (!el) return
   const over = rack.overRedline()
   if (state.tubeError) {
-    el.textContent = `tube bridge unreachable — showing last known values (${state.tubeError})`
+    // The RETRY GAP is on the line, because a poll that has backed off to thirty
+    // seconds and a poll that has stopped look identical from a stale rack, and
+    // one of them is a bug. It also says how long a bridge you have just started
+    // will take to be noticed.
+    const every = Math.round((state.tubeGap ?? TUBE_BASE) / 1000)
+    el.textContent = `tube bridge unreachable — showing last known values `
+      + `(${state.tubeError}; retrying every ${every}s)`
     el.dataset.state = 'stale'
     return
   }
@@ -619,6 +1367,11 @@ window.addEventListener('visibilitychange', () => !document.hidden && wake())
 
 function wake() {
   lastInput = performance.now()
+  // The clients are paced off the same brake now, so waking has to release them
+  // too -- see paceCompositor. Unconditional, and BEFORE the `beat` guard: the
+  // shell can already be at full rate (mode is not `driving`) while a deferral
+  // from a moment ago is still sitting on a timer.
+  flushPace()
   if (!beat) return
   // Do not wait out the rest of a beat to answer a keystroke.
   clearTimeout(beat)
@@ -651,6 +1404,166 @@ function rearm(now) {
     beat = 0
     frame(performance.now())
   }, 1000 / hz)
+}
+
+// -------------------------------------------------- pacing the CLIENTS too
+//
+// THE BRAKE ABOVE THROTTLED THE ONE CHEAP PARTICIPANT AND NONE OF THE EXPENSIVE
+// ONES, and it took a soak to see it.
+//
+// Measured: seven simple-shm windows, seven minutes untouched. The shell braked
+// itself all the way down to WALKED_HZ -- 3597 idle beats, the loop doing almost
+// nothing -- and one Chrome renderer sat at 614% CPU for the entire run. The
+// clients never slowed down at all, and the reason is one line in the compositor:
+//
+//     export function createRenderFrame() {                  Renderer.js:8
+//       return new Promise((resolve) => { requestAnimationFrame(resolve) })
+//     }
+//
+// A Wayland client paints when the compositor hands it a `wl_surface.frame`
+// callback. Greenfield hands them out on a bare rAF, so every client is invited
+// to paint sixty times a second forever no matter what the page is displaying --
+// seven clients painting at 60fps into a shell drawing at 1fps. The brake was
+// saving the cheapest thing on the page and paying full price for the rest.
+//
+// So the callbacks are paced by the SAME `pace()` the shell re-arms on. Not a
+// second policy: one function, so the rate the clients are invited to paint at
+// and the rate the page is drawn at cannot drift -- and it inherits `pace()`'s
+// existing rule that anything other than `driving` runs at full rate for free,
+// which is what keeps a flattened window pixel-exact and live while you are
+// standing in it.
+//
+// DEFERRED, NEVER DROPPED, and that distinction is the whole correctness of it.
+// `Renderer.render()` is what collects a surface's pending frame callbacks and
+// fires them; a client that is waiting on one does not commit again until it
+// arrives. Dropping a call would therefore not slow a client down, it would STOP
+// it -- permanently, because the next call only ever comes from the commit that
+// is now never going to happen. So a call that arrives early is rescheduled, not
+// discarded, and one deferral in flight is enough to carry all of them.
+//
+// `?pace=0` declines it. The cost this trades away is real: a client animating on
+// its own -- a clock, a video -- goes choppy after RESTING_AFTER of no input,
+// because it is being invited to paint ten times a second instead of sixty. That
+// is the same bargain the shell already makes with its own loop, applied to the
+// participants that were exempt from it.
+const PACE_CLIENTS = new URLSearchParams(location.search).get('pace') !== '0'
+const pacing = { deferred: 0, passed: 0, lastAt: 0, timer: 0 }
+
+// Input must not wait out a beat here either -- `wake()` calls this. A pending
+// deferral is up to a second of latency sitting between a keystroke and the
+// client that should answer it.
+function flushPace() {
+  if (!pacing.timer) return
+  clearTimeout(pacing.timer)
+  pacing.timer = 0
+  pacing.fire?.()
+}
+
+function paceCompositor() {
+  if (!PACE_CLIENTS || !session?.renderer) return
+  const real = session.renderer.render.bind(session.renderer)
+  let queued
+  const run = (after) => {
+    pacing.passed++
+    pacing.lastAt = performance.now()
+    return real(after)
+  }
+  pacing.fire = () => {
+    const arg = queued
+    queued = undefined
+    run(arg ?? undefined)
+  }
+  session.renderer.render = (after) => {
+    const now = performance.now()
+    const hz = pace(now)
+    // Full rate: the wrapper is a straight pass-through and costs one call.
+    if (!hz) return run(after)
+    const due = pacing.lastAt + 1000 / hz
+    if (now >= due) return run(after)
+    if (queued === undefined) queued = after ?? null
+    if (pacing.timer) return
+    pacing.deferred++
+    pacing.timer = setTimeout(() => {
+      pacing.timer = 0
+      pacing.fire()
+    }, Math.ceil(due - now))
+  }
+}
+
+// SHARING THE CONTEXT MEANS SHARING THE STATE, AND THE STATE IS THREE'S.
+//
+// Greenfield gets a surface's pixels into `renderState.texture` three ways, and
+// all three are raw GL in OUR context (Scene.js: `image/bitmap` and `image/png`
+// are a texImage2D, `video/h264` is a full YUV->RGB shader pass rendered into
+// the texture). Upstream that context belongs to Greenfield alone, so the
+// passes set only what they use and inherit the defaults for everything else.
+// Here they inherit whatever three.js last left switched on -- measured, mid
+// frame: CULL_FACE on (BACK/CCW), DEPTH_TEST on, BLEND on, UNPACK_FLIP_Y on,
+// and a clear colour of the road's navy instead of transparent black.
+//
+// THAT IS THE WHOLE "NATIVE WINDOWS ARE BLANK" FAULT, and it is why only native
+// ones were: an shm client's upload does not rasterise, so nothing culls it.
+// The h264 quad is six vertices drawn as a TRIANGLE_STRIP, whose two real
+// triangles come out with OPPOSITE winding -- so back-face culling drops
+// exactly one of them and the window shows a corner-to-corner diagonal, half
+// picture and half clear colour. Photographed before and after.
+//
+// UNPACK_FLIP_Y is the subtler one. It flips every plane upload, which means
+// which way a window is up depended on which three.js texture happened to be
+// uploaded last. Forcing it off is what lets `adoptSurfaceTexture` derive the
+// flip instead of measuring an accident (see the note there).
+//
+// The fence is per-pass rather than around `renderer.render`, because the passes
+// run in a microtask that `render()` queues -- anything set outside it is only
+// still true by luck. `resetState()` on the way out: three caches every one of
+// these and would otherwise keep drawing the road on Greenfield's settings.
+// EVERY DECODED FRAME PASSES THROUGH HERE, so this is where "did a picture ever
+// arrive" can be answered instead of guessed. `state.decodes` looks like it
+// answers it and does not -- it is declared in world.js and incremented nowhere,
+// and it was quoted as evidence for "no frames arrive" more than once. This
+// counts the passes that actually ran, per format, with the size of the last
+// one, and it is the only counter here that has ever been true.
+const passes = { 'video/h264': 0, 'image/bitmap': 0, 'image/png': 0, last: null, threw: 0 }
+window.__passes = () => passes
+
+function fenceScenePasses(gfScene) {
+  for (const mime of ['video/h264', 'image/bitmap', 'image/png']) {
+    const real = gfScene[mime].bind(gfScene)
+    gfScene[mime] = (contents, renderState) => {
+      passes[mime] = (passes[mime] ?? 0) + 1
+      // Shape-agnostic: greenfield has moved this field around, and a probe that
+      // throws while measuring is worse than no probe.
+      try {
+        const c = contents ?? {}
+        const sz = c.size ?? c.codedSize ?? c.buffer?.codedSize ?? null
+        passes.last = {
+          mime,
+          n: passes[mime],
+          size: sz ? { w: sz.width, h: sz.height } : null,
+          rsSize: renderState?.size ? { w: renderState.size.width, h: renderState.size.height } : null,
+        }
+      } catch (e) {
+        passes.threw++
+      }
+      gl.disable(gl.CULL_FACE)
+      gl.disable(gl.DEPTH_TEST)
+      gl.disable(gl.BLEND)
+      gl.disable(gl.SCISSOR_TEST)
+      gl.disable(gl.STENCIL_TEST)
+      gl.colorMask(true, true, true, true)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+      // Greenfield sets this once at YUVA2RGBA.create and never again; the pass
+      // clears with it, so the padding around a picture is transparent rather
+      // than a stripe of whatever three cleared with last.
+      gl.clearColor(0, 0, 0, 0)
+      try {
+        return real(contents, renderState)
+      } finally {
+        renderer.resetState()
+      }
+    }
+  }
 }
 
 let lastT = 0
@@ -703,10 +1616,68 @@ function frame(now = 0) {
     // Greenfield decoded into OUR context and left its own bindings behind.
     // three caches GL state and would otherwise trust a cache that is no longer
     // true. This call exists for exactly this kind of interop.
+    // FULL SCREEN SHOWS THE WINDOW AND NOTHING ELSE, and it is done with LAYERS
+    // rather than by hiding things.
+    //
+    // Setting `.visible = false` across the scene would be fighting the
+    // reconcilers: syncPlacement, syncRoads, syncGantries and syncRamps all
+    // write `visible` every frame from their own rules, so anything cleared here
+    // is set again before the draw. Layers are orthogonal -- nothing else in this
+    // shell touches them -- so the camera can simply be told to look at one layer
+    // and every road, gantry, ramp, post and neighbouring window falls out of the
+    // frame without a single one of them being asked to.
+    //
+    // Re-applied every frame rather than at the moment full screen is entered,
+    // because the sign is REBUILT whenever the surface changes size, and the
+    // first thing full screen does is change the surface's size.
+    if (state.full && state.mode === 'flat') {
+      const fs = [...signs.values()].find(
+        (x) => x.district === state.flatDistrict && x.milepost === state.flatMilepost,
+      )
+      if (fs?.mesh) fs.mesh.traverse((o) => o.layers.enable(FULL_LAYER))
+      camera.layers.set(FULL_LAYER)
+    } else if (camera.layers.mask !== 1) {
+      camera.layers.set(0)
+    }
+
+    // WHAT IS ON AIR, reconciled BEFORE the render, because the screen is an
+    // object in this scene and positioning it after the draw would put it a
+    // frame behind the bezel it has to sit inside.
+    //
+    // Reconciled rather than remembered: a window can leave by closing, by its
+    // client exiting, or by its surface being remapped, and only one of those
+    // routes goes through a handler this file owns. So the ledger is filtered
+    // against the signs that actually exist, every frame, exactly the way
+    // syncPlacement and syncTitles do it.
+    if (tv && dash) {
+      for (const k of [...castList]) if (!signs.has(k)) castList.delete(k)
+      if (onAirKey && !signs.has(onAirKey)) onAirKey = null
+      const rect = dash.tvRect()
+      // No rect means the cockpit is out of the way (flat, or the map is up), and
+      // a TV with nowhere to be does not draw. It keeps its place on the list.
+      tv.set(rect && onAirKey ? signs.get(onAirKey) : null)
+      if (rect) {
+        tv.sync(rect, window.innerWidth || 1280, window.innerHeight || 720, new Set(signs.keys()))
+      }
+    }
+
     renderer.resetState()
     renderer.render(scene, camera)
     state.frames++
     leaveNeutralVertexState()
+
+    // WHAT IS ON AIR, reconciled before the frame is drawn rather than
+    // remembered at the moment something changed. A window can leave by closing,
+    // by its client exiting, or by the surface being remapped, and only one of
+    // those routes goes through a handler we own -- so the ledger is filtered
+    // against the signs that actually exist, every frame, the same way
+    // syncPlacement and syncTitles do it.
+    // AFTER the scene and after leaveNeutralVertexState(), and both halves of
+    // that matter. It is a separate 2D canvas composited by the browser, so it
+    // cannot touch the shared GL context -- but drawing it before the render
+    // would show the cockpit reading a frame the scene under it has not drawn
+    // yet, and the whole panel is a measurement OF this frame.
+    if (dash) dash.draw(now)
 
     // Drain the shared context's error flag once per frame and REMEMBER it.
     // Greenfield's Program.use() calls getError() straight after useProgram and
@@ -1136,27 +2107,123 @@ window.__tubes = () => ({
   polls: state.tubePolls,
   error: state.tubeError,
   over: rack ? rack.overRedline() : null,
-  read: rack ? Object.fromEntries(Object.entries(rack.tubes).map(([k, t]) => [k, t.data && {
-    value: t.data.value, n: t.data.n, bar: t.data.bar,
-    fillY: +t.fill.scale.y.toFixed(5), barShown: t.bar.visible,
-    color: '#' + t.fill.material.color.getHexString(),
+  // WHAT THE BRIDGE SAID, and separately WHAT WAS PAINTED. This used to be one
+  // object because the mesh WAS the drawing -- `fill.scale.y` and
+  // `fill.material.color` were the picture, read straight off it. The rack is a
+  // model and a 2D panel now, so the two are split rather than merged: `said`
+  // is the payload, `drawn` is dash.js writing down what it actually put on the
+  // canvas. A report that recomputed the second from the first would agree with
+  // itself no matter what the cockpit did.
+  said: rack ? Object.fromEntries(Object.entries(rack.tubes).map(([k, t]) => [k, t.data && {
+    value: t.data.value, n: t.data.n, bar: t.data.bar, why: t.data.why,
   }])) : null,
+  drawn: dash ? dash.report().tubes : null,
   why: document.getElementById('why')?.textContent ?? null,
+})
+
+// The cockpit's own numbers: how big it is, how far it is pushed out of the
+// frame, and the two dials -- which are measured in dash.js off the camera and
+// the clock, not handed to it.
+// IS THE COMPOSITOR ACTUALLY BEING PACED, and at what. Every field is measured
+// here rather than assumed: `wrapped` false with `on` true means the install
+// never ran, which looks exactly like a pacer that is running and finding nothing
+// to defer -- and those are opposite facts. `hz` 0 is "full rate, nothing to do",
+// which is the correct state whenever the page is being used.
+window.__pace = () => ({
+  on: PACE_CLIENTS,
+  wrapped: !!pacing.fire,
+  hz: pace(performance.now()),
+  quietMs: Math.round(performance.now() - lastInput),
+  deferred: pacing.deferred,
+  passed: pacing.passed,
+  pending: !!pacing.timer,
+})
+
+window.__dash = () => (dash ? dash.report() : null)
+
+// WHAT THE COCKPIT CLAIMS AT A GIVEN PIXEL, answered by the SAME hook the
+// pointer handler calls -- the discipline `__aim` already keeps. A probe with
+// its own copy of the arithmetic could answer about a gate the real handler
+// never consults, and "the shifter does not respond" would then mean "the hit
+// test is wrong" and "the handler never asks" indistinguishably.
+//
+// It really does knock the stick, because `hooks.dashHit` is the thing that
+// does that -- a read-only probe would be testing a different function.
+window.__dashAt = (x, y) => (hooks.dashHit ? hooks.dashHit(x, y) : null)
+
+// The broadcast, from both ends: what the ledger believes and what the quad
+// actually drew. Kept apart on purpose -- `list` is the shell's intent and
+// `tv` is the picture, and a report that computed the second from the first
+// would agree with itself no matter what the screen was doing.
+window.__cast = () => ({
+  // `live` as well as `alive`, because they are different questions and the
+  // report was missing the one a reader actually asks. `alive` is "does this
+  // window still exist"; `live` is "is this the chip lit on the TV". Without the
+  // second, a test of the toggle reads the first, sees no change, and concludes
+  // the toggle is broken -- which is exactly what happened.
+  list: [...castList].map((k) => ({
+    key: k, label: labelOfKey(k), alive: signs.has(k), live: k === onAirKey,
+  })),
+  onAir: onAirKey,
+  rect: dash ? dash.tvRect() : null,
+  tv: tv ? tv.report() : null,
 })
 
 // Raw view tree, for looking at what the compositor actually did with a popup
 // before deciding how to draw it.
+// IDENTITY, NOT EQUALITY. Two signs showing one picture and one showing none is
+// what "the wrong window" looks like, and the only way to tell it from a drawing
+// bug is to ask whether the two views point at the SAME WebGLTexture. Numbered
+// through a WeakMap so the answer is comparable inside one report and nothing is
+// retained.
+const texIds = new WeakMap()
+let nextTexId = 1
+const texIdOf = (t) => {
+  if (!t) return null
+  if (!texIds.has(t)) texIds.set(t, nextTexId++)
+  return texIds.get(t)
+}
+
 window.__views = () =>
-  session.renderer.topLevelViews.map((v) => ({
-    key: keyOf(v),
-    role: v.surface.role?.constructor?.name ?? null,
-    hasParent: !!v.surface.parent,
-    parentKey: v.surface.parent?.role?.view ? keyOf(v.surface.parent.role.view) : null,
-    rect: [v.regionRect.x0, v.regionRect.y0, v.regionRect.x1, v.regionRect.y1],
-    mapped: v.mapped,
-    hasBuffer: !!v.surface.state.bufferContents,
-    knownAsSign: signs.has(keyOf(v)),
-  }))
+  session.renderer.topLevelViews.map((v) => {
+    // THE TWO SIZES `adoptSurfaceTexture` DIVIDES, reported rather than inferred.
+    // A window whose picture does not fill its sign is one of these disagreeing,
+    // and from outside they are indistinguishable: the surface being smaller
+    // than the sign, the texture being bigger than the surface, and the picture
+    // being written to the wrong corner all look like "it does not line up".
+    // `size` is what the quad is built from; `texSize` is the destination
+    // texture the encoder's padding decides; `uv` is the sub-rect actually
+    // sampled. If uv is far from 1, the margin is real and this says how much.
+    const rs = v.renderStates?.[SCENE_ID]
+    const size = rs?.size ? { w: rs.size.width, h: rs.size.height } : null
+    const texSize = rs?.texture?.size ? { w: rs.texture.size.width, h: rs.texture.size.height } : null
+    return {
+      key: keyOf(v),
+      role: v.surface.role?.constructor?.name ?? null,
+      hasParent: !!v.surface.parent,
+      parentKey: v.surface.parent?.role?.view ? keyOf(v.surface.parent.role.view) : null,
+      rect: [v.regionRect.x0, v.regionRect.y0, v.regionRect.x1, v.regionRect.y1],
+      mapped: v.mapped,
+      hasBuffer: !!v.surface.state.bufferContents,
+      knownAsSign: signs.has(keyOf(v)),
+      size,
+      texSize,
+      uv: size && texSize ? { sx: +(size.w / texSize.w).toFixed(4), sy: +(size.h / texSize.h).toFixed(4) } : null,
+      // Two views reporting the same texId ARE the same picture, whatever their
+      // titles say.
+      texId: texIdOf(rs?.texture?.texture),
+      // WHY A WINDOW WILL NOT RESIZE, asked the same way startResize asks it --
+      // by shape, because minification renames the class and every check keyed
+      // on a constructor name is already dead in the shipped bundle.
+      canResize: typeof v.surface.role?.configureSize === 'function',
+      roleName: v.surface.role?.constructor?.name ?? null,
+      // What the client actually painted, which need not be either of the above.
+      buffer: (() => {
+        const b = v.surface.state.bufferContents
+        return b?.size ? { w: b.size.width, h: b.size.height } : null
+      })(),
+    }
+  })
 
 // Aim at a POPUP's centre and report where Greenfield resolved it. The proof
 // that a menu is clickable, not decorative.
@@ -1188,15 +2255,37 @@ window.__pointAtPopup = () => {
   return null
 }
 
-// Say what happened, once, for the benefit of a browser that cannot be asked.
-// `?report=15` posts state after 15 seconds.
+// Say what happened, and KEEP saying it, for the benefit of a browser that
+// cannot be asked. `?report=15` posts state every 15 seconds.
+//
+// IT USED TO FIRE ONCE, and that made it useless for the questions it was built
+// to answer. A one-shot report describes the shell as it was `secs` after boot,
+// so anything about a WINDOW had to be asked by guessing -- before the page
+// loaded, in a shell script -- how long it would take to open one. Every
+// diagnosis needing two programs up at the same time was a race against a timer
+// set in the past. Repeating costs one POST per interval to a server on the same
+// machine, and `grep REPORT | tail -1` becomes "what is true now".
 {
   const secs = Number(new URLSearchParams(location.search).get('report'))
   if (Number.isFinite(secs) && secs > 0) {
-    setTimeout(() => {
+    // Re-armed AFTER each POST settles rather than on a fixed interval: a bridge
+    // that stops answering must not leave an unbounded queue of reports behind
+    // it. One in flight, always.
+    const post = async () => {
       const t = window.__m1()
       const tubes = window.__tubes()
-      fetch(`${TUBE_BRIDGE}/api/report`, {
+      // CAN THIS BROWSER DECODE AT ALL. Asked rather than assumed: the target is
+      // Firefox on FreeBSD, and "the h264 path is dark" has one cause here that
+      // no amount of looking at the compositor would ever find.
+      let h264 = 'not asked'
+      try {
+        h264 = typeof VideoDecoder === 'undefined'
+          ? 'no VideoDecoder'
+          : JSON.stringify(await VideoDecoder.isConfigSupported({ codec: 'avc1.64001f' }))
+      } catch (e) {
+        h264 = `threw: ${e}`
+      }
+      return fetch(`${TUBE_BRIDGE}/api/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1220,9 +2309,41 @@ window.__pointAtPopup = () => {
           tubePolls: tubes.polls,
           error: t.error,
           frameError: t.frameError,
+          // THE THREE FIELDS THAT TELL THE FAILURES APART. "A native program does
+          // not appear" has distinct causes that look identical from outside, and
+          // each of these separates a pair of them:
+          //
+          //   proxyBase       -- did `?proxy=` reach the shell at all, or is it
+          //                      still talking to a port that is not there
+          //   appStates       -- did the LAUNCH fail, or did it succeed and the
+          //                      picture not arrive
+          //   views           -- THE decisive one. A view with `hasBuffer` and
+          //                      `knownAsSign:false` means the surface arrived and
+          //                      the road did not build a sign for it; no view at
+          //                      all means nothing ever arrived. Those two have
+          //                      nothing in common and were being guessed between.
+          proxyBase: PROXY_BASE,
+          programsFrom,
+          appStates: t.appStates ?? null,
+          lastLaunch: t.lastLaunch ?? null,
+          // Whether the power key ever reached the bridge, and what it said. The
+          // dash's own `powerWhy` is the same sentence; this is the status code
+          // and the pid behind it, which the plate has no room for.
+          lastLogout: t.lastLogout ?? null,
+          spawned: t.spawned ?? null,
+          // DID A PICTURE EVER ARRIVE, counted rather than assumed. See
+          // `fenceScenePasses`. A black window with `video/h264: 0` is a
+          // transport or decode fault; the same window with a non-zero count is
+          // a fault in what was drawn, and those two have nothing in common.
+          passes: window.__passes(),
+          views: window.__views(),
+          h264,
+          errors: errorLog,
         }),
       }).catch(() => {})
-    }, secs * 1000)
+    }
+    const tick = () => post().catch(() => {}).finally(() => setTimeout(tick, secs * 1000))
+    setTimeout(tick, secs * 1000)
   }
 }
 
@@ -1597,6 +2718,18 @@ async function main() {
       } catch {
         /* same -- nothing here is worth blocking an unload for */
       }
+      // AND THE COCKPIT'S, which is a SECOND context on this page.
+      //
+      // The dash reaps its own yoke on pagehide as well, because this listener
+      // only exists once the compositor session is up and the yoke is taken
+      // before that. Both is deliberate and costs nothing: `dispose()` is
+      // idempotent, and the case that matters is the boot that never reaches
+      // here at all.
+      try {
+        dash?.dispose()
+      } catch {
+        /* same */
+      }
     })
 
     session.userShell.events.notify = (v, m) => {
@@ -1631,6 +2764,16 @@ async function main() {
       session.userShell.events.sceneRefreshed?.(SCENE_ID)
     }
 
+    fenceScenePasses(gfScene)
+
+    // THE SAME SEAM, ONE LAYER UP. The line above cuts Greenfield's compositing
+    // out of the scene; this one paces how often the whole cycle -- including the
+    // frame callbacks that invite every client to paint again -- is allowed to
+    // run at all. Installed here because this is the first moment the renderer
+    // exists, and before `globals.register()` so no client can commit into an
+    // unpaced renderer.
+    paceCompositor()
+
     session.globals.register()
     installInput()
     // KEPT, so a lost context can cancel them. Both of these outlive the frame loop
@@ -1640,8 +2783,9 @@ async function main() {
     // every two seconds forever and logs its own failure each time.
     // A detector, not a fix -- see checkPopupsMapped. Slow on purpose.
     timers.push(setInterval(checkPopupsMapped, 1000))
-    pollTubes()
-    timers.push(setInterval(pollTubes, 2000))
+    pollTubes().then(() => {
+      if (!contextLost) scheduleTubes()
+    })
     state.compositor = 'up'
 
     // `?remote=/text-editor,/xterm` launches NATIVE applications through
@@ -1651,74 +2795,157 @@ async function main() {
     const params = new URLSearchParams(location.search)
     const remote = params.get('remote')
 
-    // WHAT THE ENTER GATE DOES. One function, defined for whichever kind of
-    // client this session is running, and published through `hooks` because
-    // travel.js cannot import this module back.
+    // The ST&RT menu's list, read once. Not awaited: the menu draws the web
+    // clients the moment it is opened and the native rows appear when the answer
+    // arrives, which is the right order -- a start button that would not open
+    // until a fetch came back would be a start button blocked on a file that is
+    // legitimately absent in a build.
+    loadPrograms()
+
+    // ONE LAUNCH PATH FOR EVERY WAY A WINDOW IS ASKED FOR -- the gate panels, the
+    // boot plan, a click in the ST&RT menu and a program dropped on the road all
+    // come through here. Four callers and one function, because the placement
+    // rule (below) has to be the same for all of them or the same request made
+    // two ways puts the window in two different places.
     //
     // It does NOT choose a workspace or a milepost. Both are claimed at adoption
     // (`state.district`, `ws.takeMilepost`) because the surface does not exist
     // yet when the click happens -- so a window opened from a gate arrives by
     // exactly the same path as one the launch plan opened, and there is no
     // second placement rule that could disagree with the first.
-    const publishSpawn = (open) => {
-      // `dash` is which marker on the centre line the window was asked for at, and
-      // null means "wherever there is room". Both go on the queue together for the
-      // same reason the side always did: the surface does not exist yet.
-      hooks.spawnWindow = (side, dash = null) => {
-        try {
-          sideQueue.push({ side, dash: Number.isInteger(dash) ? dash : null })
-          const app = open()
-          if (app) {
-            app.onError = (e) => {
-              state.error = String(e)
+    //
+    // The launchers are made ON DEMAND and kept. Both kinds can be wanted in one
+    // session now (the menu offers web clients and native programs together),
+    // which is the thing `?remote=` used to decide once at boot for the whole page.
+    const launchers = {}
+    const launcherFor = (kind) =>
+      (launchers[kind] ??= createAppLauncher(session, kind === 'web' ? 'web' : 'remote'))
+    const urlOf = (prog) => (prog.kind === 'web'
+      ? new URL(`${location.origin}/clients/${prog.client}/app.html`)
+      : new URL(`${PROXY_BASE}${prog.path}`))
+
+    // `at` is which marker on the centre line the window was asked for, and null
+    // means "wherever there is room". It goes on the queue with the side for the
+    // same reason the side always did: the surface does not exist yet.
+    launchProgram = (prog, side = null, at = null) => {
+      try {
+        sideQueue.push({ side: side ?? null, dash: Number.isInteger(at) ? at : null })
+        // A WINDOW IS THE ONLY EVIDENCE THAT A PROGRAM RAN. `open` and `closed`
+        // are the SIGNALLING socket's states, not the application's -- measured:
+        // a program that exits immediately cycles open/closed/open/closed as the
+        // launcher reconnects, and one that is running sits at `open`. Neither
+        // says whether anything appeared. So watch for the thing being asked for.
+        //
+        // This is a TIMEOUT, which is a guess about how long is long enough, and
+        // it is worded as what was observed -- "no window ... within 12s" -- and
+        // not as "failed". A slow program that arrives late still gets its
+        // window; all that is lost is a line on the status strip.
+        const before = state.surfaces ?? 0
+        const watchdog = setTimeout(() => {
+          if ((state.surfaces ?? 0) > before) return
+          // NOT a proxy verdict. The proxy answered -- it took the launch and
+          // ran something. Blaming it here is what would refuse every other
+          // native row because one application on this host is unhappy.
+          const why = 'no window within 12s — the program may have exited'
+          state.error = `${prog.id}: ${why}`
+          if (state.lastLaunch?.program === prog.id) {
+            state.lastLaunch = { ...state.lastLaunch, ok: false, why }
+          }
+          say(`${prog.name}: ${why}`)
+        }, 12000)
+        launchWatchdogs.push(watchdog)
+        const app = launcherFor(prog.kind).launch(urlOf(prog), () => {})
+        if (app) {
+          // WHAT THE DELETED PROBE USED TO GUESS, LEARNED FROM AN ACTUAL ATTEMPT.
+          // A native launch can only fail this way if the proxy did not answer,
+          // so this is the first moment the menu is entitled to say so.
+          //
+          // `onStateChange('error')` IS THE FAILURE SIGNAL. `onError` is not, and
+          // wiring this to it (as it was) meant the reporting half of "try, then
+          // report" never ran: you clicked a program, the menu shut, nothing
+          // opened, and nothing anywhere said why. Measured with the proxy down
+          // -- `appStates` went to `error`, `onError` never fired, every row
+          // stayed `ok:true` and `lastLaunch.ok` said `true`.
+          //
+          // Upstream only calls `onError` from the signalling socket's own
+          // `error` event, and the browser's WebSocket error event carries no
+          // `.error` -- so even when it does fire it has nothing to say.
+          // `RemoteAppLauncher.error()` closes everything and reports through
+          // `onStateChange`.
+          const failed = (why) => {
+            // A named failure beats a timeout, and both firing would print two
+            // different reasons for one click.
+            clearTimeout(watchdog)
+            state.error = `${prog.id}: ${why}`
+            // The launch was ACCEPTED and then failed. Leaving `ok:true` on the
+            // record is how "I clicked it and nothing happened" stayed
+            // unexplained in every report of this.
+            if (state.lastLaunch?.program === prog.id) {
+              state.lastLaunch = { ...state.lastLaunch, ok: false, why }
+            }
+            say(`${prog.name}: ${why}`)
+            if (prog.kind !== 'web') {
+              proxyUp = false
+              // NAME THE ADDRESS THAT DID NOT ANSWER. The launcher has no
+              // message to give (see above), and "not answering" without saying
+              // what was called is unactionable -- especially in the distro,
+              // where this URL is a host the guest has no proxy on at all.
+              proxyWhy = `no compositor-proxy at ${PROXY_BASE}`
             }
           }
-          state.spawned = (state.spawned ?? 0) + 1
-          return true
-        } catch (e) {
-          // A failed launch must not leave a side queued -- the next window to
-          // arrive for any other reason would take it.
-          sideQueue.pop()
-          state.error = String(e)
-          return false
+          app.onError = (e) => failed(e ? String(e) : `no compositor-proxy at ${PROXY_BASE}`)
+          app.onStateChange = (s) => {
+            state.appStates = { ...(state.appStates ?? {}), [prog.id]: s }
+            if (s === 'error') failed(`no compositor-proxy at ${PROXY_BASE}`)
+          }
         }
+        state.spawned = (state.spawned ?? 0) + 1
+        return true
+      } catch (e) {
+        // A failed launch must not leave a side queued -- the next window to
+        // arrive for any other reason would take it.
+        sideQueue.pop()
+        state.error = String(e)
+        return false
       }
     }
 
+    // A path off the query string, in the shape the menu and the launcher both
+    // read. Named from the path because nothing on the wire says otherwise --
+    // `applications.json` has the pretty name and it is the proxy's, not ours.
+    const progOf = (path) => ({ id: 'native' + path, name: path.replace(/^\//, ''),
+                                kind: 'native', path, ok: true })
+
+    // Launch on demand from the console. `?remote=` fires during boot, which
+    // makes it useless for anything that has to be armed BEFORE the first frame
+    // -- a probe on the decoder, say. Same one launch path as everything else.
+    window.__launch = (path) => launchProgram(progOf(path))
+
     if (remote) {
-      const base = params.get('proxy') ?? 'http://127.0.0.1:8912'
-      const launcher = createAppLauncher(session, 'remote')
       const paths = remote.split(',')
-      for (const path of paths) {
-        const app = launcher.launch(new URL(`${base}${path}`), () => {})
-        app.onStateChange = (s) => {
-          state.appStates = { ...(state.appStates ?? {}), [path]: s }
-        }
-        app.onError = (e) => {
-          state.error = `${path}: ${e}`
-        }
-      }
+      for (const path of paths) launchProgram(progOf(path))
       // "Open another one of these" -- the first remote path is the only thing a
       // gate could mean here, since nothing on the sign names an application.
-      publishSpawn(() => launcher.launch(new URL(`${base}${paths[0]}`), () => {}))
+      hooks.spawnWindow = (side, at = null) => launchProgram(progOf(paths[0]), side, at)
       say(`compositor up -- launching remote ${remote}`)
     } else {
       // Windows open in the district you are STANDING IN -- assignment reads
       // `state.district` at adoption time, exactly as it would if you were
       // driving around opening things. `?windows=2,2,1` is per-district counts.
-      const launcher = createAppLauncher(session, 'web')
       const clientName = params.get('client') ?? 'simple-shm'
+      // `?client=` may name a client that is not in the menu's list; it still
+      // launches, because the query string is a direct instruction and the list
+      // is only what the menu is prepared to offer.
+      const boot = WEB_PROGRAMS.find((p) => p.client === clientName)
+        ?? { id: clientName, name: clientName, kind: 'web', client: clientName, ok: true }
       const plan = (params.get('windows') ?? '2,2,1').split(',').map((n) => parseInt(n, 10) || 0)
       const lanes = ws.openList()
-      publishSpawn(() => launcher.launch(new URL(`${location.origin}/clients/${clientName}/app.html`), () => {}))
+      hooks.spawnWindow = (side, at = null) => launchProgram(boot, side, at)
       ;(async () => {
         for (let d = 0; d < Math.min(plan.length, lanes.length); d++) {
           state.district = lanes[d].id
           for (let i = 0; i < plan[d]; i++) {
-            const app = launcher.launch(new URL(`${location.origin}/clients/${clientName}/app.html`), () => {})
-            app.onError = (e) => {
-              state.error = String(e)
-            }
+            launchProgram(boot)
             // Let the surface arrive and be adopted before moving on, or every
             // window would be assigned to whichever district we ended on.
             await new Promise((r) => setTimeout(r, 2500))
