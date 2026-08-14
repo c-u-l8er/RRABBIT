@@ -391,3 +391,77 @@ browser, and it does not need RAVIO to be running.
   `mouse down` → `mouse up`. Prove the event arrived before trusting it.
 - **`console` output is cumulative across page loads**, so a stale error from a
   previous load reads as a live one.
+
+---
+
+## 7. "The window is frozen" — the three reasons, and which one it is
+
+Two sessions have opened with *the client is waiting for permission to draw*.
+It has never been true. Measured on this machine, **with no input at all**:
+
+| | untouched | for |
+|---|---|---|
+| five web `simple-shm` clients | ~28 fps each | 4 s |
+| native `glxgears` through the proxy | ~45 fps | **82 s**, 41 consecutive samples |
+
+Frame callbacks fire. They fire by **two completely different routes**, and that
+is the fact that keeps getting missed:
+
+- **web** — Greenfield's `Renderer.render()` collects the surface's pending
+  `wl_surface.frame` callbacks and fires them after its rAF (`Renderer.js:95`,
+  `:111`). This is the path `paceCompositor` throttles, so braking the shell
+  really does stop a web client painting.
+- **native** — compositor-proxy answers the application's frame callbacks
+  **itself**, off its own `setInterval` (`FrameFeedback.js`). The browser's only
+  say is a once-a-second encoder-feedback message (`EncoderFeedback.js`), and
+  the proxy parks callbacks only if that message goes **1500 ms** stale.
+  *Nothing the shell draws, defers or suppresses grants a native app its next
+  frame.*
+
+So do not go looking in `Surface.js` for a callback the shell forgot to fire.
+
+### Ask the window, not the page
+
+```js
+__fed()      // per window: native?, frames, fps — plus mode, hz, quietMs
+```
+
+`__passes()` totals are the **whole page**: five animating web clients drown one
+stalled native window, so a climbing number has been read as "frames are
+arriving" while the window under discussion was getting none. `__fed()` is the
+same count keyed per surface. `fps` is measured *between calls* and is null on
+the first one — call it twice.
+
+The three reasons, in the order to rule them out:
+
+1. **`hz` is not 0 — the brake has it.** `pace()` caps the whole compositing
+   cycle at **10 Hz after 60 s** untouched and **1 Hz after 10 minutes**
+   (`RESTING_AFTER`/`WALKED_AFTER`). Measured with the brake engaged: 19–20
+   render passes per 2 s, exactly 10 Hz, every excess call deferred. A window
+   at 1 fps looks frozen and snaps live on the first pointer move, which is
+   precisely the reported symptom. `?pace=0` declines it. Note `pace()` returns
+   full rate whenever `mode !== 'driving'` — **a flattened window is already
+   exempt**, so the brake cannot explain a stale picture you are standing in.
+2. **`fps` is 0 and `hz` is 0 — the client has nothing to paint.** A static page
+   in Firefox, a settled dialog, an idle editor. Indistinguishable from frozen
+   by eye, and correct. `Esc` and clicking back in makes it repaint (focus,
+   hover), which reads as unfreezing and is not.
+3. **The window is not in `__fed()` at all.** Then no surface ever existed —
+   §3's `views: []` + `appStates: open` case, a different fault entirely.
+
+### Loose ends seen while measuring this, not chased
+
+- **XWayland windows map unreliably here.** Of six launches, `glxgears` mapped
+  once and `busy-xterm` never, on runs where `XWayland started` and `Handling
+  incoming XWM connection` both logged clean. Native *Wayland* clients were not
+  affected in those runs.
+- One run threw `RangeError: Structure larger than remaining buffer` out of
+  `@gfld/xtsb` `struct.js:118` during the XWM handshake, and the Wayland client
+  that triggered XWayland lost its window with it. It is caught and logged, so
+  **grep the proxy log for `RangeError` before believing a launch failed for
+  its own reasons.**
+- The proxy's own Wayland socket is created **when the first app launches**, not
+  at startup, and it does not set `DISPLAY` for children — they inherit it. On
+  this box the inherited `DISPLAY=:2` happens to *be* the proxy's XWayland
+  (`ss -xlp | grep X11-unix` names the owner). That is a coincidence, not a
+  design, and it will not hold on a machine with a different display count.

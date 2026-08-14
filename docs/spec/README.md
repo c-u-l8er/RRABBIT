@@ -2406,3 +2406,80 @@ exist on the target, and one of them names a stranger's key.
 guest instead of rebuilding. It **reports by default**: the guest had accumulated
 hand edits (the proxy start) that the overlay lacked, so a blind push would have
 switched native windows back off.
+
+---
+
+## 30. Nothing was waiting for permission to draw
+
+Two sessions in a row opened on the theory that a window looks frozen because
+the shell never fires its `wl_surface.frame` callbacks — "`Surface.js` collects
+`frameCallbacks` and something has to fire them each time the shell draws a
+surface." It is wrong, and it is worth writing down *why* it is wrong, because
+the shape of the mistake is reasonable: the shell **does** suppress Greenfield's
+compositing (§23), so assuming it also suppressed the callbacks costs one
+inference.
+
+### 30.1 Measured first, untouched
+
+With no input of any kind — no pointer, no keys, only `Runtime.evaluate` reads,
+which dispatch no events:
+
+| | rate | duration |
+|---|---|---|
+| five web `simple-shm` clients | ~28 fps each | 4 s |
+| native `glxgears` via compositor-proxy | ~45 fps | 82 s, 41 consecutive 2 s samples |
+
+Neither class starves. `glxgears` held between 52 and 102 h264 uploads per 2 s
+for the whole run and never trended down.
+
+### 30.2 The two routes, which are not the same route
+
+- **Web clients** get their callbacks from `Renderer.render()`: it drains
+  `view.surface.state.frameCallbacks` into its own list while walking the view
+  stack, then fires them after `createRenderFrame()` resolves. `render()` is
+  commit-driven (`XdgToplevel.onCommit` → `session.renderer.render()`), so the
+  loop is self-sustaining and needs nothing from the shell.
+- **Native clients never depend on the browser for permission at all.**
+  compositor-proxy intercepts `wl_surface.frame`
+  (`protocol/wl_surface_interceptor.js`) and answers it **itself**, from
+  `FrameFeedback.commitNotify` on a `setInterval` at the client's refresh
+  interval. The browser's only contribution is a once-a-second
+  `[refreshInterval, avgDuration]` message from `EncoderFeedback.js`; the proxy
+  parks callbacks only if that message is more than **1500 ms** stale, and it
+  releases every parked one the moment the next arrives.
+
+So there is no seam in this shell where a native app's next frame is granted,
+and adding one would have changed nothing.
+
+### 30.3 What DOES freeze a picture: the brake, and it is on purpose
+
+`paceCompositor` (§ the idle-brake note in `shell.js`) throttles
+`session.renderer.render` to `pace()` — **10 Hz after 60 s untouched, 1 Hz after
+ten minutes**. Measured with it engaged: 19–20 render passes per 2 s, exactly
+10 Hz, with every excess call deferred rather than dropped. Since the texture
+upload (`updateRenderStatesPixelContent` → `Scene['video/h264']`) runs *inside*
+`render()`, the cap is also the cap on how often a decoded frame reaches the
+glass. A window at 1 fps looks frozen and snaps live on the first pointer move.
+
+Two qualifications that keep this from being over-read:
+
+- `pace()` returns full rate whenever `state.mode !== 'driving'`, so **a window
+  you are standing in is already exempt**. The brake cannot explain a stale
+  picture in the flatten.
+- The brake's own note claims it slows "the expensive participants". That is
+  exactly true for web clients, whose frame callbacks it gates. For a **native**
+  window it is not: the app keeps painting, the proxy keeps encoding, and the
+  browser still decodes every frame — `Surface.commit` awaits
+  `getContents()`, which decodes, *before* it calls `role.onCommit` and reaches
+  the throttle. Only the GL upload and the composite are skipped. The 614 % CPU
+  soak that justified the brake was measured on `simple-shm`; it has never been
+  measured on a native window, and the claim should not be carried over to one.
+
+### 30.4 The probe this needed and did not have
+
+`__fed()` — per window: `native`, `frames`, `fps`, plus `mode`, `hz`,
+`quietMs`. `__passes()` totals are page-wide, and five animating web clients
+drown one stalled native window; a climbing total has been read as "frames are
+arriving" about a window that was getting none. `fps` is measured between calls
+and is `null` on the first, deliberately: a rate invented from one sample is the
+kind of number that comes back later as evidence.

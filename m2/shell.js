@@ -1576,11 +1576,28 @@ function paceCompositor() {
 const passes = { 'video/h264': 0, 'image/bitmap': 0, 'image/png': 0, last: null, threw: 0 }
 window.__passes = () => passes
 
+// THE SAME COUNT, PER WINDOW -- because "is this one frozen" is the question
+// that keeps getting asked and `passes` cannot answer it. Its totals are the
+// whole page: five animating web clients drown one stalled native window, so a
+// climbing number has been read as "frames are arriving" while the window being
+// argued about was getting none. Keyed on the renderState the pass wrote into,
+// which is the only handle a pass has -- it is given `(contents, renderState)`
+// and nothing else. WeakMap so a destroyed surface takes its counter with it.
+const fedByRenderState = new WeakMap()
+
+function tallyFed(renderState) {
+  if (!renderState) return
+  const f = fedByRenderState.get(renderState)
+  if (f) f.n++
+  else fedByRenderState.set(renderState, { n: 1, was: 0, at: 0 })
+}
+
 function fenceScenePasses(gfScene) {
   for (const mime of ['video/h264', 'image/bitmap', 'image/png']) {
     const real = gfScene[mime].bind(gfScene)
     gfScene[mime] = (contents, renderState) => {
       passes[mime] = (passes[mime] ?? 0) + 1
+      tallyFed(renderState)
       // Shape-agnostic: greenfield has moved this field around, and a probe that
       // throws while measuring is worse than no probe.
       try {
@@ -2218,6 +2235,66 @@ window.__pace = () => ({
   passed: pacing.passed,
   pending: !!pacing.timer,
 })
+
+// IS THIS WINDOW BEING FED, AND IF NOT, WHOSE FAULT IS IT.
+//
+// Two sessions have now started from "the client is waiting for permission to
+// draw" and that has never once been true. Measured, on this machine, with no
+// input at all for 82 seconds: five web clients held ~28 fps each and a native
+// glxgears held ~45 fps. Frame callbacks fire. They fire for the two classes of
+// client by COMPLETELY DIFFERENT ROUTES, which is the fact that keeps getting
+// missed:
+//
+//   web    -- Greenfield's `Renderer.render()` collects the surface's pending
+//             `wl_surface.frame` callbacks and fires them after its rAF. That is
+//             the path `paceCompositor` throttles, so braking the shell really
+//             does stop a web client painting.
+//   native -- compositor-proxy answers the application's frame callbacks ITSELF,
+//             off its own `setInterval` (FrameFeedback.js). The browser's only
+//             say is a once-a-second encoder-feedback message, and the proxy
+//             parks callbacks only if that message goes 1500 ms stale. Nothing
+//             the shell draws, defers or suppresses grants a native app its next
+//             frame.
+//
+// So a native window that looks frozen is not starved: either the client has
+// nothing to paint, or the BRAKE has capped how often its decoded frame reaches
+// the glass -- 10 Hz after a minute untouched, 1 Hz after ten, and full rate the
+// moment anything is touched or the mode leaves `driving`. `hz` here is that cap
+// and it is the first field to read.
+//
+// `fps` is measured BETWEEN CALLS and is therefore null on the first one. That
+// is deliberate: a rate invented from a single sample is the kind of number that
+// gets quoted back as evidence.
+window.__fed = () => {
+  const now = performance.now()
+  return {
+    mode: state.mode,
+    hz: pace(now), // 0 = uncapped
+    quietMs: Math.round(now - lastInput),
+    windows: (session?.renderer?.topLevelViews ?? []).map((view) => {
+      const rs = view.renderStates[SCENE_ID]
+      const f = rs ? fedByRenderState.get(rs) : undefined
+      const dt = f?.at ? now - f.at : 0
+      const d = f ? f.n - f.was : 0
+      if (f) {
+        f.was = f.n
+        f.at = now
+      }
+      return {
+        at: keyOf(view),
+        title: titles.get(keyOf(view)) ?? null,
+        // The one honest test for "does this window's picture come over the
+        // wire": a surface only has an encoderFeedback if the remote launcher
+        // built one for it. Role name cannot say -- a native app is an
+        // XdgToplevel exactly like a web one.
+        native: !!view.surface.encoderFeedback,
+        size: rs?.size ? { w: rs.size.width, h: rs.size.height } : null,
+        frames: f?.n ?? 0,
+        fps: dt > 0 ? Math.round((d / dt) * 1000 * 10) / 10 : null,
+      }
+    }),
+  }
+}
 
 window.__dash = () => (dash ? dash.report() : null)
 
