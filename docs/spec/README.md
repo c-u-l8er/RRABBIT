@@ -1398,3 +1398,1011 @@ which reads exactly like a regression. It is not. That diagnostic places its
 test quad at `x = 0`, which was in front of the camera before M4 introduced
 districts and is district 1's road afterwards. Run from district 0 it measures
 empty space. The diagnostic is pre-M4 and nobody had noticed.
+
+## 23. The window has a picture — the state was three's all along
+
+**2026-08-13.** §20 ended with "a diagonal boundary remains on the **luma**
+side", §18.2 recorded that "the two buffer paths disagree about which way is
+up", and the T&R guest work stopped at a `foot` window that had a rectangle,
+a title, a buffer and no picture. All three are the same fault, and it was
+never in the encoder, the channel or the decoder.
+
+Measured with a `foot` window from the `tr4` FreeBSD guest, x264, at the moment
+Greenfield's conversion pass runs:
+
+| GL state Greenfield inherits | value | Greenfield assumes |
+|---|---|---|
+| `CULL_FACE` | **enabled**, `BACK` / `CCW` | disabled |
+| `DEPTH_TEST` | **enabled** | disabled |
+| `BLEND` | **enabled** | disabled |
+| `UNPACK_FLIP_Y_WEBGL` | **true** | false |
+| clear colour | the road's navy | `(0,0,0,0)` |
+
+Upstream that context belongs to Greenfield alone, so its passes set only what
+they use. Here they inherit whatever three.js last left switched on.
+
+### 23.1 Back-face culling drew exactly half the window
+
+`YUV2RGBShader.updateShaderData` lays out **six** vertices — two triangles'
+worth — and `draw()` issues them as a `TRIANGLE_STRIP`. That still covers the
+quad, because the two triangles in the middle are degenerate. But a strip
+alternates winding, so the two real triangles come out with **opposite**
+winding, and back-face culling drops one of them.
+
+Half a window, split corner to corner, picture on one side and clear colour on
+the other. That is the "constant-slope diagonal" of §20.3, and it is why it
+survived `?uv=full`: it was never a sampling window, it was a missing triangle.
+
+**Only native windows were affected, and that is the tell.** `Scene`'s three
+entry points are not alike: `image/bitmap` and `image/png` are a `texImage2D`,
+which does not rasterise and so cannot be culled. Only `video/h264` runs a
+shader pass. Every report of this fault named native applications, for four
+weeks, and the shape of the report was the diagnosis.
+
+### 23.2 The flip was never a property of the format
+
+§18.2 branched on `mimeType` because an shm buffer needed the flip and an h264
+frame did not. That was three's `UNPACK_FLIP_Y_WEBGL` left on: it flips every
+plane upload, so which way a window was up depended on **which three.js texture
+happened to be uploaded last**. The h264 path then flipped a second time in its
+render-into-texture pass, and the two paths landed opposite ways round.
+
+With the unpack state pinned off, both land the same way and the branch is gone:
+
+- shm — upload row 0 → texel row 0, which is the surface's top row;
+- h264 — the YUV pass draws `v = minV` at clip `y = -1`, clip `y = -1` is
+  framebuffer row 0, framebuffer row 0 is destination texel row 0, and
+  `v = minV` is the source's first row. Same answer by a longer road.
+
+Either way texel row 0 is the top of the picture, and either way it wants the
+flip, because three samples `v = 0` at the bottom of a plane.
+
+### 23.3 §20.2 sampled the window the pass READS, not the one it WRITES
+
+Both are real and they are not the same rectangle.
+
+| | width | height |
+|---|---|---|
+| surface (`renderState.size`) | 696 | 468 |
+| destination texture (`renderState.texture.size`) | **768** | **512** |
+
+The pass calls `viewport(0, 0, 696, 468)` on a framebuffer the size of the whole
+768×512 texture, and **a GL viewport is anchored at the bottom-left** — so the
+picture is written to texels `[0..696) × [0..468)` and the margin is the top and
+the right. `adoptSurfaceTexture` was sampling the far corner, from
+`textureMinU`, which is where the pass reads inside the *padded decode*. The
+cost was a black band down one side and along the top, photographed before and
+after. `?uv=farcorner` still selects the old window; `?uv=full` still maps the
+whole allocation.
+
+### 23.4 The fix is a fence, and it is per-pass
+
+`fenceScenePasses` (shell.js) wraps all three of `Scene`'s entry points:
+neutralise the raster and unpack state on the way in, `renderer.resetState()` on
+the way out so three stops drawing the road on Greenfield's settings.
+
+Per-**pass**, not around `renderer.render` — the passes run in a microtask that
+`render()` queues, so anything set outside it is only still true by luck. The
+first attempt set the state in the pace wrapper and changed nothing on screen,
+which is the whole reason this is written down.
+
+### 23.5 Verified
+
+| | measurement |
+|---|---|
+| native `foot` (tr4 guest, x264) | `surfaces 1`, `rect [0,0,696,468]`, `hasBuffer true` |
+| the glass | `$ ls` / `$ ls bin` / `ls: bin: No such file or directory` — **legible, upright, filling the sign** |
+| decoded frame | I420, coded 768×514, visible 768×512, `copyTo` layout tight at stride 768/384/384 |
+| orientation, upload path | a red-top/blue-bottom bitmap through the fenced `image/bitmap` → glass reads **red at top, blue at bottom** |
+| web client regression | `simple-shm` 250×250 renders unchanged |
+| two windows together | `2 surface(s)`, one shm + one native, no console errors, no proxy errors |
+| frame cadence | median **17.4 ms**, p90 17.5 over 335 frames |
+
+The frame number is rAF cadence in headless SwiftShader, so it says the fence
+costs no frames **in this harness** — it is not a GPU cost measurement, and
+`renderer.resetState()` once per conversion pass has not been priced on real
+hardware.
+
+### 23.6 Two things this turned up and did not fix
+
+- **Every window is one sRGB encode too bright, and always has been.** A known
+  `#242424` uploaded through `image/bitmap` reads **105** on the glass;
+  `sRGB_encode(36/255) = 106`. The map's `colorSpace = SRGBColorSpace` decode is
+  not reaching the shader while the output encode is. It is **not** the h264
+  path — the bitmap path measures identically — so it is in how RRABBIT adopts
+  an external render-target texture, and it predates all of this.
+- **`vah264enc` still aborts the proxy.** `gst_frame_encoder.c:350` `g_error`s
+  when the encoded sample carries no `BUFFER_CONTENT_SERIAL`; `x264enc` copies
+  the meta, `vah264enc` does not propagate input metas. Falling back to the head
+  of the FIFO would work *if* output order equals input order — true for these
+  zerolatency, no-B-frame pipelines, but an assumption, not a measurement.
+
+## 24. In the distro, and in the machines rail
+
+**2026-08-13, same day as §23.** The fix was built, shipped into the running T&R
+guest, and looked at — with no browser in the loop for the guest half.
+
+### 24.1 The built bundle carries it
+
+`npm run build`, then grep the artifact for the strings the fix depends on —
+`video/h264`, `image/bitmap`, `UNPACK_FLIP_Y_WEBGL`, `resetState`, `CULL_FACE` —
+all present. String keys and GL constant lookups are property accesses, so
+minification cannot touch them, unlike the class-name checks of §18.3.
+
+Verified the built shell end to end, not just that it loads: `bridge.py` on 8913
+serving `dist/`, proxy started with `RRABBIT_ALLOW_ORIGIN=http://127.0.0.1:8913`,
+`foot` from the tr4 guest launched into it — **legible, upright, filling the
+sign**, same as the dev server.
+
+### 24.2 A running guest takes a new shell in about a second
+
+The image ships `dist/` + `bridge.py` to `/usr/local/share/rrabbit/`; replacing
+that directory over ssh and rebooting the guest is enough. Proved by hash rather
+than by looking — guest and workstation both
+`415a97c8c2eaa9ddca47ba0c554cdb4409e003aa430a13aa5eda98bd7c122b42`.
+
+**The 0.4 image was carrying five orphan `shell-*.js` bundles** from earlier
+builds. Same class as the addons manifest (§19): an overlay leaves files that
+then look like they belong. Replace `dist`, never overlay it.
+
+### 24.3 §"the shell cannot be evaluated in a VM" needs an amendment
+
+That note was written when the guest ran an older build and reported firefox at
+216% CPU. Measured now, on `tandr-desktop-0.4` with the current shell and two
+`simple-shm` windows:
+
+| | |
+|---|---|
+| the shell's own frame time | **17.1–17.2 ms** |
+| guest CPU / LOAD (its own tubes) | 74–79% / 2.08–3.08 |
+
+So it is not unusable — it renders the full cockpit at rAF cadence and costs most
+of a small guest to do it. "Expensive" was right; "un-demoable" was not. Still an
+`scfb` framebuffer with no 3D, so this is software rasterisation being fast
+enough, not hardware appearing.
+
+**Native windows still cannot originate inside the guest.** The image has no
+node, no gstreamer and no compositor-proxy by design ("Nothing here needs node" —
+`build-image.sh`), and the guest has no `/dev/dri` at all. Only in-browser shm
+clients run there. §23's fix hardens that path (the unpack state is pinned rather
+than inherited) but adds no new capability inside the VM.
+
+### 24.4 Seeing it
+
+QEMU hands over both directions, so a graphical guest needs no browser and no
+agent inside it: `vps.py screenshot <name> <path>` writes the framebuffer,
+`vps.py type <name> driver @tab driver @ret` types at the greeter. Both added to
+PARKVPS today. That is how every image in this section was captured, including
+the SDDM greeter — which ssh cannot see at all.
+
+RAVIO's **MACHINES** rail (gear **P**, the drive-in) lists PARKVPS's fleet and
+frames each guest at `http://127.0.0.1:8905/desktop/<name>`. That URL stands on
+its own and shows the T&R desktop running the fixed shell.
+
+**RAVIO itself could not be driven in the test harness** and that is not a RAVIO
+fault: headless Chrome on SwiftShader loses the context on load with RAVIO's five
+canvases where RRABBIT's four survive, and the dead dash canvas is the one that
+owns gear changes — so `g` does nothing and the app reads as broken. Not
+attributed further; that needs a real-GPU browser (§the start-menu note).
+
+### 24.5 Not done
+
+The golden image is **unchanged** — only the running `tr4` instance has the fix.
+Rebuilding it would mean running `make.sh`/`build-image.sh` while a parallel
+session has 161 uncommitted lines in exactly those two files, which is the
+live-tree hazard this repo has already been bitten by. Deliberately not run.
+
+See `docs/RUNBOOK.md` for the port map, the probes, and the traps.
+
+## 25. "Programs are not startable from the ST&RT menu"
+
+**2026-08-13.** Reported against the distro. Two separate things, and the second
+one is mine.
+
+### 25.1 What was actually true
+
+Web clients **do** start from the menu, in the guest, with a real click —
+`6 surface(s)`, `3 windows here`. Native programs do not, and cannot: the image
+ships no compositor-proxy (§24.3), so `PROXY_BASE` names `http://127.0.0.1:8912`
+inside a guest that has nothing on that port. Five of the seven rows.
+
+That part is a limitation. The fault is that **nothing said so.**
+
+### 25.2 The reporting half of "try, then report" never ran
+
+§"THERE IS NO PROBE" replaced a lying probe with a promise: offer the row, and
+let the first launch that actually fails record why and refuse the rest. The
+promise was wired to `app.onError`. Measured with the proxy stopped:
+
+| | before | after |
+|---|---|---|
+| `appStates[prog]` | `error` | `error` |
+| `onError` fired | **no** | — |
+| `state.error` | **null** | names the address |
+| `lastLaunch.ok` | **`true`** | `false`, with `why` |
+| the other native rows | **`ok:true`** | `ok:false`, and they say why |
+| anything on screen | **nothing** | `Text Editor: no compositor-proxy at …` |
+
+So: the menu shut, no window opened, every row still claimed it was fine, and the
+shell's own record said the launch succeeded. Exactly "I clicked it and nothing
+happened", which is the failure this shell is least willing to ship.
+
+**`onStateChange('error')` is the failure signal; `onError` is not.** Upstream
+calls `onError` only from the signalling socket's own `error` event — and a
+browser `WebSocket` error event carries no `.error`, so even when it fires it has
+nothing to say. `RemoteAppLauncher.error()` closes everything and reports through
+`onStateChange`. Both are wired now; the state change is the one that works.
+
+Two smaller things fixed with it, because each on its own would have left the
+same silence:
+
+- **`state.error` was never displayed anywhere** — it existed only in `__m1()`.
+  The failure now goes to `say()`, the strip the shell already uses to say things.
+- **`lastLaunch.ok` was set synchronously and never amended.** A launch that is
+  accepted and then fails now says so, so `__m1()` stops agreeing with a window
+  that is not there.
+- The refusal **names the address that did not answer** rather than saying
+  "compositor-proxy is not answering — npm run proxy". In the distro that
+  instruction is wrong: there is no proxy to start, and the URL is the fact.
+
+### 25.3 Verified in the guest, with real clicks
+
+`vps.py click` (added to PARKVPS today, alongside `screenshot` and `type` — the
+guest has a `usb-tablet`, so a pixel on the screenshot is a pixel to click). Web
+program from the menu → a window opens. Native program → the strip says
+`Text Editor: no compositor-proxy at http://127.0.0.1:8912`, and reopening the
+menu shows all five native rows greyed with that line on each.
+
+![the menu says why](../docs/m10-rows-refused.png)
+
+### 25.4 A probe that invalidated itself
+
+Worth recording because it nearly produced a wrong answer. I scanned for the
+menu's rows with `window.__dashAt(x, y)` — and `__dashAt` calls `hooks.dashHit`,
+which **is not pure**: it toggles the ST&RT menu and knocks the gear stick. 1500
+scan points closed the menu I was measuring, and the first reading said the menu
+would not stay open. `dash.hit()` is pure and documented as such; `hooks.dashHit`
+is the layer that acts on it, and `__dashAt`'s own comment says it really does
+knock the stick. Compute the rectangles from `layout()` instead:
+`s = W / 1920`, `ty = H - 1080 * s`, `clientX = design.x * s`,
+`clientY = design.y * s + ty`.
+
+## 26. Applications that actually open
+
+**2026-08-13.** §25 made the failure legible. It did not make anything start.
+Four separate reasons a program would not open, none of them the same fault.
+
+### 26.1 The proxy allowed one origin, and the shell has two
+
+`tools/proxy.sh` allowed `http://127.0.0.1:8911`. The built shell is served by
+`bridge.py` on **8913** — which is also the origin inside the T&R image. Every
+native launch from the built shell was refused by CORS and reported as
+**"compositor-proxy is not answering"**, while the proxy answered fine.
+
+`--allow-origin`'s help says *"Value can be comma seperated domains"*. It is not:
+the value went into the header verbatim, and `Access-Control-Allow-Origin` may
+name exactly one origin — so a list refused every entry on it. Patched to echo
+the request's origin when it is on the list
+(`patches/proxy-cli-multi-origin.md`), and `proxy.sh` now defaults to both ports
+and prints which it allowed.
+
+This is the one that had the worst shape: confidently wrong, about the wrong
+component, on a page that cannot probe.
+
+### 26.2 The built menu listed the programs that do not work and hid the one that does
+
+`proxy/applications.json` was not in the build, so every built shell — including
+the distro's — fell back to `NATIVE_MIRROR`, a hand-copied constant. It had
+drifted: five host programs, and **not** `foot · tr4`, which is the one native
+entry that demonstrably opens a window.
+
+The file now ships (`shipApplications()` in `vite.config.ts`, parsed at build
+time so a malformed file fails the build rather than the menu). The mirror stays
+as the fallback for a shell served from somewhere that has no `proxy/` at all.
+
+### 26.3 gnome-text-editor exited 0 in 76 ms, and Wayland had nothing to do with it
+
+The child inherits `DBUS_SESSION_BUS_ADDRESS`, finds the
+`gnome-text-editor --gapplication-service` already running on the host desktop,
+hands the request off to it and exits — the ordinary GTK single-instance
+handoff. Its entry now points `DBUS_SESSION_BUS_ADDRESS` at a path that does not
+exist, so GApplication cannot register and runs its own instance. **It opens.**
+
+**A correction:** the earlier note that "compositor-proxy sets no
+`WAYLAND_DISPLAY` for children" is wrong. It is absent from `proxy-cli.js` and
+`SessionProcess.js`, but `launchApplication` in the library sets it last, over
+`process.env` — the log line shows `WAYLAND_DISPLAY: "wayland-7"` and the proxy's
+own `Listening on:` line says `wayland-7`. That was always right, and it sent me
+looking at the wrong environment variable.
+
+**Also corrected:** §"the native-app path is broken on this host" no longer
+holds. `xterm` and `glxgears` both open through XWayland today.
+
+### 26.4 `open` and `closed` are the socket's states, not the program's
+
+Measured: a program that exits immediately cycles
+`open → closed → open → closed` as the launcher reconnects; one that is running
+sits at `open`. Neither says whether a window appeared, so neither can be used to
+report "it did not start" — which is why a program that failed this way was
+silent even after §25.
+
+A window is the only evidence a program ran. `launchProgram` now watches the
+surface count and, if nothing arrives in **12 s**, says
+`no window within 12s — the program may have exited`. It is a timeout, worded as
+what was observed rather than as a verdict, and it does **not** mark the proxy
+down: the proxy answered, and blaming it would refuse every other native row
+because one application on this host is unhappy. A named failure clears it, so
+one click never prints two reasons.
+
+### 26.5 Verified
+
+From the **built** shell on 8913, with `npm run proxy` at its defaults and no
+environment overrides: Text Editor opens (a real GNOME window, showing a real
+file), and `foot · tr4` opens beside it — `2 surface(s)`, `2 windows here`, both
+legible.
+
+Still true, and unchanged: **inside the T&R image there is no proxy at all**
+(§24.3), so native rows there refuse and now say the address that did not answer.
+
+## 27. The distro's shell, pointed at the host's proxy
+
+**2026-08-13.** §24.3 said native windows cannot originate inside the T&R image —
+no node, no gstreamer, no `/dev/dri`. True, and beside the point: the proxy does
+not have to be *ours*. It is reachable over the network, so the guest's shell can
+use the host's.
+
+### 27.1 Nothing has to be exposed
+
+Under QEMU user-mode networking the host answers on the default gateway, and
+SLIRP maps it to the host's **loopback** — so `--bind-ip=127.0.0.1` is already
+reachable from the guest at `10.0.2.2:8912`. Verified with `fetch` from inside
+tr4: the proxy's own 403 came back, which is exactly what the host gets.
+
+The guest's page origin is `http://127.0.0.1:8913` — the same literal string as
+the host's built shell, so §26.1's allow-list already covers it.
+
+### 27.2 `--base-url` is one address, and there are two ways in
+
+The proxy hands the client a `signalURL`/`baseURL` built from `--base-url`. A
+static value is right for exactly one caller: the host browser reaches the proxy
+on `127.0.0.1:8912`, the guest on `10.0.2.2:8912`, and whichever one is not in
+the flag gets sent to an address that is not there — the guest would have been
+told to connect to *itself*.
+
+Patched to answer with the host the client actually used (`publicBaseURL`, beside
+`pickAllowOrigin`; `patches/proxy-cli-multi-origin.md`). One proxy, both callers.
+
+### 27.3 Detected, not assumed
+
+`rrabbit-session` now appends `?proxy=…` **only when the default route is
+`10.0.2.2`** — QEMU's own gateway. Anywhere else that address belongs to somebody
+else's router, and pointing at it would fill the menu with programs that fail
+slowly instead of refusing honestly. `RRABBIT_PROXY` overrides either way, and
+the session logs which it chose.
+
+### 27.4 What is proven, and what is not — SUPERSEDED by §27.6, kept for the reasoning
+
+**Proven, from the host proxy's own log** — the component that cannot be wrong
+about this:
+
+```
+Launching application gnome-text-editor …
+Child process started.
+New signaling connection from http://10.0.2.2:8912/signal?compositorSessionId=…
+New Wayland client.
+```
+
+The guest reached the host, the host started a real application, the client
+connected back — **and the address it was told to come back to was
+`10.0.2.2`**, which is §27.2 working.
+
+**Not working: no window appears on the guest's road.** The map still counts four
+windows (`home 1`, `build 2`, `watch 1`), all `simple-shm`. The application is
+running on the host with a live Wayland client and nothing renders in the guest.
+
+Ruled out already: **not a missing decoder** — the image ships `openh264-2.6.0`
+and `ffmpeg-8.1.2`.
+
+Two candidates, and they are distinguishable:
+
+- the frames never arrive or never decode in the guest's Firefox;
+- a surface arrives and no sign is built from it (`adoptPending`). The §26.4
+  watchdog says `no window within 12s` only when the surface count does **not**
+  move, and it stayed quiet — which, if the shell was the current build, points
+  at the second.
+
+Neither can be settled without reading state out of a kiosk Firefox with no
+devtools. `bridge.py`'s `POST /api/report` + `?report=<secs>` exists for exactly
+that and is the instrument to use next.
+
+### 27.5 A harness note that cost real time
+
+Driving the guest by absolute clicks is workable but the shell reacts to misses:
+a click that lands on the road **drives**, and while driving the cockpit slides
+away, which dismisses the ST&RT menu. So a click that opens the menu followed by
+a click that misses a row leaves no menu and a moving road, and the next attempt
+looks like the menu refusing to open. Wait for `DRIVE 0`, and read the state off
+the map (`0`) rather than hunting with the camera — it names every window and
+which road it is on.
+
+### 27.6 RESOLVED — and the report endpoint is what resolved it
+
+![a host application on the guest's road](../docs/m12-host-app-in-guest.png)
+
+A GNOME Text Editor running on the Arch host, drawn as a window on the road
+inside the FreeBSD guest. `surfaces: 1`, `signs: 1`, `hasBuffer: true`,
+`mapped: true`, rect **1202×770**.
+
+**Both of §27.4's candidates were wrong**, and neither could have been
+distinguished by looking harder at the compositor. `POST /api/report` settled it
+in one boot, once it carried the right fields:
+
+| field | what it said | what it ruled out |
+|---|---|---|
+| `proxyBase` | `http://10.0.2.2:8912` | `?proxy=` not reaching the shell |
+| `programsFrom` | `applications.json` | the mirror still being used |
+| `h264` | `supported: true` | a missing decoder |
+| `appStates` | `open` | the launch failing |
+| **`views`** | **`[]`** | frames arriving and not being adopted |
+| **`errors`** | **`Failed to connect to application.`** | everything else |
+
+`views: []` with `appStates: open` is the pair that names it: the signalling
+socket connected and **no surface ever existed**. The error came from
+`onProtocolChannel` — the per-application channel closed before it ever opened.
+
+### 27.7 The proxy tells the client to connect somewhere it cannot know
+
+`NativeAppContext.js` builds each application's protocol-channel URL from
+`config.public.baseURL` — the single static `--base-url` — and **there is no
+request in scope there**, so unlike the HTTP replies (§27.2) it cannot answer
+with the host the client actually used. It can only repeat the flag, which said
+`127.0.0.1:8912`. Inside a guest, that is the guest.
+
+So the signalling socket connected (its URL comes from the HTTP reply, which
+§27.2 had already fixed) and the protocol channel dialled the guest itself.
+
+Corrected in `shell.js`, where the answer is known: we reached the proxy at
+`PROXY_BASE`, so that is its address *for us*, whatever it believes. A narrow
+rewrite over `window.WebSocket`, scoped to the proxy's own `/channel` and
+`/signal` paths and a no-op when the hosts already agree — vite's HMR socket
+shares that global and must not be touched.
+
+**Two transports, two places, and neither covers the other**: WebSocket URLs are
+corrected on the client because the server cannot know; the HTTP `baseURL` (used
+for clipboard and file transfer) is corrected on the server, where a request *is*
+in scope. Said here because one of them looks redundant until you ask which
+transport it carries.
+
+One `rejection: Error: websocket error` remains in the report — the reconnecting
+socket's first attempt. Nothing user-facing (`error: null`), and not chased.
+
+### 27.8 What the report endpoint needed to be useful
+
+It existed and it could not have answered this. It carried `surfaces`, `signs`
+and `error`, all of which said "nothing happened" without saying where. Added:
+`proxyBase`, `programsFrom`, `appStates`, `lastLaunch`, `views`, `h264`, and a
+bounded `errors` buffer — the shell had **no console capture at all**, so on the
+one machine that matters every error went to nobody.
+
+Bounded at 20, and **first** rather than last: the tube poll can emit hundreds of
+identical failures (§the note above `pollTubes`), and the error that explains a
+failure is almost always the first one.
+
+`rrabbit-session` gained `RRABBIT_URL_EXTRA`, because a kiosk with no address bar
+made every query-string diagnostic in this shell unreachable on the target.
+`?remote=…&report=45` launches at boot and posts what it managed to do — no
+clicking, which §27.5 is about.
+
+## 28. The windows have to be the OS's own
+
+**2026-08-13, and a scope correction from the operator.** §27 got a real GNOME
+Text Editor onto the guest's road. It is running on the *laptop*, forwarded in.
+That is a development bridge and it is **not the product**: a stranger who
+downloads T&R has no host proxy, so they get the refusal, and the address in it
+names a machine that is not theirs.
+
+`rrabbit-session`'s proxy default is therefore **off**. It first auto-detected
+the QEMU gateway and switched itself on — right for this laptop, wrong for
+everyone else. An operator who wants the bridge sets `RRABBIT_PROXY`; nobody
+gets it by accident.
+
+### 28.1 The real thing is available — measured, from inside the guest
+
+`pkg` on FreeBSD 15 has everything compositor-proxy needs:
+
+| | |
+|---|---|
+| `node24-24.18.0` (+ `node22`, `npm`) | the proxy itself |
+| **`gstreamer1-1.28.6`** | **the same version as the host** |
+| `gstreamer1-plugins-x264-1.28.6` | software encode, which is what a guest with no `/dev/dri` must do |
+| `mesa-dri-26.1.3`, `libdrm`, `graphene`, `libffi`, `glib` | the addon's pkg-config deps |
+| `cmake`, `ninja`, `meson`, `pkgconf` | to build it |
+
+The matching gstreamer version is the one that matters. §18.1 is this repo's
+signature failure — an addon built against a *different* gstreamer links,
+negotiates, logs nothing and emits no frames — and same-version on both sides
+removes it before it can happen.
+
+### 28.2 The three risks, named before starting
+
+1. **The addon may not build on FreeBSD.** It is C against gstreamer-gl, gbm and
+   libdrm, built by Greenfield's cmake. Nobody has compiled it there.
+2. **gstgl needs a GL context and the guest has no `/dev/dri`.** Software GL
+   (mesa `swrast`/llvmpipe, surfaceless EGL) is the only route. Plausible;
+   unproven.
+3. **It may build, run, and still be too slow to ship.** The guest already spends
+   ~75% of four vCPUs software-rasterising the shell (§24.3). Adding software GL
+   *and* software x264 for every window may not leave anything. This is the risk
+   that a successful build does not retire.
+
+### 28.3 What is NOT downloadable today, which is a separate blocker
+
+Worth stating because it is the shorter path to a page on computedriven.com and
+it is not the proxy's fault:
+
+- the published release (`v0.3`) carries only the two **server** images —
+  364 MB and 626 MB, headless, no X, no shell. **Nothing published runs RRABBIT
+  at all.**
+- the desktop image that does is **5.18 GiB**, and GitHub's per-file cap is 2 GB.
+
+Measured, not assumed: an 800 MiB sample of that image compresses **4.83×** with
+`zstd -9`, so the whole thing lands near **1.07 GiB** — under the cap. A
+compressed asset is the unblock, not different hosting.
+
+Also gating any rebuild: the golden predates this week's shell entirely, and
+`build-image.sh`/`make.sh` carry uncommitted work from a parallel session.
+
+### 28.4 Risk 1, first half: every dependency resolves on FreeBSD
+
+Measured inside `tr4`, after `pkg install`, against the exact list
+`tools/build-addons.sh` preflights:
+
+| module | version |
+|---|---|
+| glib-2.0 | 2.86.4 |
+| gstreamer-1.0 / -app / -video / -allocators | **1.28.6** |
+| gstreamer-gl-1.0 | **1.28.6** |
+| graphene-1.0 | 1.10.8 |
+| egl / opengl | 1.5 / 4.5 |
+| libffi | 3.6.0 |
+| gbm | 26.1.3 |
+| libdrm | 2.4.133 |
+
+Twelve of twelve, and gstreamer at the **same 1.28.6 as the workstation** —
+which is the version-skew trap of §18.1 closed before it can open.
+
+Two naming traps for whoever writes this into `build-image.sh`:
+
+- FreeBSD has **`gstreamer1-plugins`**, not `gstreamer1-plugins-base`. The
+  obvious name fails the whole `pkg install` line.
+- `gstreamer-gl-1.0` is **not** in it. It comes from its own port,
+  **`gstreamer1-plugins-gl`**, and it is the one module the addon cannot be
+  built without.
+
+Also present: `node24-24.18.0`, `cmake 3.31.12`, `ninja 1.13.2`.
+
+Nothing here says the C compiles — that is the next measurement, running now —
+only that it can be attempted, which yesterday was unknown.
+
+### 28.6 tr4 cannot build it either, and that settles where the build belongs
+
+With `llvm19-lite` installed, clang compiles and then cannot **link**:
+
+```
+ld: error: cannot open crt1.o: No such file or directory
+ld: error: unable to find library -lc
+```
+
+The image has no base-system development files — no CRT objects, no linkable
+libc. Those are pkgbase `FreeBSD-*-dev` sets and live in a `FreeBSD-base` repo
+this image does not even have configured; only `FreeBSD-ports` is.
+
+That is not a gap to fill. **A runtime image is not a build environment**, and
+installing ~1 GB of LLVM plus base dev sets into the thing users download to make
+it self-hosting would be the wrong trade in both directions.
+
+`builder` — the stock FreeBSD 15.1 cloud image `make.sh` already builds on — has
+`cc`, `clang`, `/usr/lib/crt1.o` and `/usr/lib/libc.so`. So the addon is built
+there and the binary is shipped, which is exactly what `ic32` already does and
+what `build-image.sh`'s `STACK_DIST` mechanism is shaped for.
+
+### 28.7 The real blocker: greenfield vendors libwayland-server, and it is Linux-only
+
+On the builder — full base system, `cc`, `crt1.o`, libc all present — the
+compile gets 30 objects in and stops:
+
+```
+native/wayland/src/wayland-server/wayland-os.c:34:10:
+  fatal error: 'sys/epoll.h' file not found
+```
+
+Greenfield does not link the system libwayland; it **vendors** it, and that copy
+uses Linux syscall APIs. The whole Linux-only surface, counted rather than
+guessed:
+
+| header | uses |
+|---|---|
+| `sys/epoll.h` | `epoll_create`/`_create1`/`_ctl`/`_wait` — 16 calls |
+| `sys/eventfd.h` | `eventfd` — 6 |
+| `sys/timerfd.h` | `timerfd_create` — 2 |
+| `sys/signalfd.h` | `signalfd` — 6 |
+
+No `linux/*` headers anywhere, and nothing else exotic. **That is a contained
+surface, and it is the exact set `libepoll-shim` exists to cover** — it
+implements all four over kqueue, and it is how wlroots and sway build on
+FreeBSD. FreeBSD also has its own `wayland-1.25.0`, so linking the system
+library instead of the vendored copy is a second route if the shim is not enough.
+
+This is the answer to "will it build on FreeBSD": **not as-is, and the reason is
+one library's event loop rather than anything about the encoder, gstreamer or
+the GPU.** Attempt with the shim is running.
+
+### 28.8 IT BUILDS ON FreeBSD — risk 1 retired
+
+On `builder` (FreeBSD 15.1, full base system), all three addons and all three
+shared libraries compile:
+
+```
+proxy-encoding-addon.node   proxy-poll-addon.node   wayland-server-addon.node
+libproxy-encoding.so        libwayland-server.so.0  libwestfield.so
+```
+
+`file` says ELF 64-bit FreeBSD; `strings libproxy-encoding.so` shows the x264
+pipeline compiled in; `ldd` reports **no unresolved libraries**.
+
+Three things make it build, and each was a separate stop:
+
+1. **`libepoll-shim`** — for the vendored libwayland-server's epoll/eventfd/
+   timerfd/signalfd (§28.7).
+2. **`-DHAVE_SYS_UCRED_H=1 -DHAVE_XUCRED_CR_PID=1`** — and this one is a
+   pleasant surprise: `wayland-os.c` *already has* a `#if defined(__FreeBSD__)`
+   branch using `struct xucred`. Upstream ported it and then guarded the include
+   behind a feature macro their CMake never defines, because their build only
+   ever ran on Linux. FreeBSD 15's `<sys/ucred.h>` has both `xucred` and
+   `cr_pid`; both were checked before being asserted.
+3. **`-I/usr/local/include`** — base `cc` does not search the ports include
+   path, so `EGL/egl.h` is missing even with mesa installed. The oldest FreeBSD
+   build wart there is, and nothing to do with Greenfield.
+
+Captured as **`tools/build-addons-freebsd.sh`**, the sibling of the Linux
+script, pinned to the same commit — keep the two on the same ref or the
+platforms diverge silently.
+
+**What this does and does not settle.** It settles that the code compiles and
+links on FreeBSD, which was the unknown. It does **not** settle risk 2 (gstgl
+needs a GL context and the guest has no `/dev/dri`, so software mesa is the only
+route) or risk 3 (the guest already spends ~75% of four vCPUs on the shell;
+software GL plus software x264 per window may leave nothing). Those are the next
+two measurements, in that order.
+
+## 29. The proxy runs in the OS, and then dies for want of a GPU
+
+**2026-08-13.** §28 got the addons built. This is the rest of the way, and the
+result is a hard, specific blocker with a clean shape.
+
+### 29.1 It runs
+
+The FreeBSD-native addons plus the proxy's JS (`ws`, `@gfld/xtsb`, the package
+itself — all platform-independent) installed to
+`/usr/local/share/rrabbit/gfproxy`, started by `rrabbit-session` beside the
+bridge:
+
+```
+Compositor proxy started. Listening on 127.0.0.1:8912
+```
+
+The shell's default `PROXY_BASE` is already `http://127.0.0.1:8912`, so inside
+the guest that is the guest — no `?proxy=`, no host, nothing borrowed.
+`programsFrom: applications.json`, listing `foot`, which is installed here.
+
+### 29.2 And then the session process segfaults
+
+```
+Can't open device path: /dev/dri/renderD128: No such file or directory
+Can't initialize EGL, wl_dmabuf and wl_drm disabled.
+Proxy session exited: SIGSEGV
+```
+
+`LIBGL_ALWAYS_SOFTWARE=1` and `GALLIUM_DRIVER=llvmpipe` do not help, and the
+reason is in the first line: the code opens the **DRM render node directly** to
+build its EGL display, rather than going through libGL where a software driver
+could answer.
+
+Note the second line: it *intends* to degrade — it disables `wl_dmabuf` and
+`wl_drm` and carries on. The crash is downstream of that, which means there is
+already a no-EGL path and something in it assumes the display exists. **That is
+a findable fix in C, and there is now a FreeBSD build environment to test one
+in.**
+
+### 29.3 A render node cannot be conjured in this VM
+
+`drm-66-kmod` — FreeBSD's port of the Linux DRM subsystem — installs exactly:
+
+```
+amdgpu.ko  i915kms.ko  radeonkms.ko  drm.ko  ttm.ko  dmabuf.ko
+```
+
+**No virtio-gpu. No vgem. No vkms.** There is no software or paravirtual DRM
+device for FreeBSD, so a QEMU guest cannot be given `/dev/dri` short of VFIO
+passthrough — which needs root and IOMMU, the premise PARKVPS exists without.
+
+### 29.4 The distinction that matters for the product
+
+This blocker is **VM-specific, not product-fatal**, and the difference is worth
+stating plainly because it cuts the opposite way to how it first reads:
+
+**Read §29.7 before trusting this table.** It was right about EGL and wrong
+about the session: the fourth crash had nothing to do with `/dev/dri` and would
+have hit on bare metal too.
+
+| where T&R runs | `/dev/dri` | native windows |
+|---|---|---|
+| real hardware — AMD, Intel, older Radeon | **yes**, via the drivers above | should work |
+| QEMU/KVM guest | **no**, and cannot be given one | blocked on §29.2 |
+
+The download page's own framing is "a USB or VM or your main HDD/SSD". On the
+metal, the drivers exist. In a VM — which is how nearly everyone will try it
+first — the no-EGL path has to be fixed, or native windows are a bare-metal-only
+feature and the page has to say so.
+
+### 29.5 Where this leaves the three risks
+
+| | |
+|---|---|
+| 1. does it build on FreeBSD | **retired** (§28.8) |
+| 2. GL context without `/dev/dri` | **landed, and it is a crash rather than slowness** |
+| 3. is it fast enough | **still unmeasured** — nothing has encoded a frame here yet |
+
+Risk 3 cannot be measured until risk 2 is cleared, and clearing risk 2 means
+either patching greenfield's EGL setup or testing on hardware that has a render
+node.
+
+### 29.6 Two real fixes, and the crash moved
+
+`patches/greenfield-surfaceless-egl.diff` — two hunks, both confirmed live in the
+FreeBSD build and both visible in the proxy log:
+
+```
+No DRM device -- falling back to surfaceless EGL
+Using EGL_PLATFORM_SURFACELESS_MESA (software rendering)
+EGL has no DRM device -- wl_dmabuf and wl_drm disabled, clients will use shm.
+```
+
+1. **`westfield_egl_new` no longer returns NULL without a device.**
+   `EGL_MESA_platform_surfaceless` is in the client extensions here, needs no
+   device, and resolves to llvmpipe. EGL now initialises in a guest with no
+   `/dev/dri`.
+2. **The dmabuf/drm globals are only created when there is a real DRM fd.**
+   Both exist to hand clients an fd to import through; with surfaceless there is
+   none, so each logged `Failed to get DRM FD from renderer` and the session
+   died. Clients fall back to shm, which is what a software renderer wants.
+
+A third thing was needed and is **not a patch**: `RENDERER_ALLOW_SOFTWARE=1`.
+Greenfield already refuses `EGL_MESA_device_software` unless that is set, and
+says so in its own error. It is in `rrabbit-proxy` now.
+
+**And it still SIGSEGVs**, past all three. `views: []`, `surfaces: 0`, and the
+shell reports the honest refusal.
+
+Three crashes in a chain, each fix revealing the next. **The next one needs a
+backtrace, not a fourth guess** — the session is a spawned child, so that means
+a core dump or attaching to it, and that is the next piece of work rather than
+more reading.
+
+Nothing about this is on the shipping path yet. `rrabbit-session` still defaults
+the proxy off for a downloaded image, and the native rows still refuse and name
+the address, which remains the honest state.
+
+### 29.7 The backtrace, and the fourth crash: a kqueue cannot be made non-blocking
+
+The backtrace was the right next step and it ended the guessing in one reading.
+
+Two things made it cheap. The session is a spawned child, but it does all its
+work on one IPC message, so **the whole of it can be run in the main process**:
+a dozen lines calling `initSurfaceBufferEncoding()` + `createSession()` with the
+config `proxy-cli` builds from `rrabbit-proxy`'s argv reproduces the SIGSEGV
+with no browser and no fork, under `gdb --args node`. And `curl` **does** spawn a
+session — the earlier note that only the browser could was wrong; `authRequest`
+wants an `x-compositor-session-id` **header**, nothing more.
+
+```
+Thread 1 "MainThread" received signal SIGSEGV
+0x00000008036a022f in uv_poll_start () from /usr/local/lib/libuv.so.1
+#1  start_poll () at .../dist/addons/proxy-poll-addon.node
+```
+
+`rdi` is 0 at the fault, which reads like a null handle and is not one:
+
+```
+uv_poll_start+23:  mov    %rdi,%r14        # r14 = the handle: 0x84319a540, valid
+uv_poll_start+43:  mov    0x8(%r14),%rdi   # rdi = handle->loop  -> 0
+uv_poll_start+47:  mov    0x68(%rdi),%rbx  # SIGSEGV
+```
+
+`handle->loop` is NULL, and `rax` still holds `0xffffffe7` — **-25, `UV_ENOTTY`**
+— because nothing in `uv_poll_start` writes rax before the fault. That is
+`uv_poll_init`'s return value. It returns *before* `uv__handle_init` when it
+fails, so the handle is untouched, and `start_poll` **never checks it**.
+
+`ktrace` names the syscall exactly:
+
+```
+fstat(13)                                   ok            <- the kqueue
+kevent(9, {ident=13, EVFILT_READ, EV_ADD})  0             <- uv__io_check_fd PASSES
+ioctl(13, FIONBIO)                          ENOTTY
+fcntl(13, F_SETFL, O_RDWR|O_NONBLOCK)       ENOTTY        <- libuv's own fallback
+SIGSEGV
+```
+
+`wl_event_loop_get_fd()` returns libwayland's epoll fd; libwayland's epoll here
+is **libepoll-shim**, and libepoll-shim's epoll is a **kqueue** (`kqueuex(1)`).
+`uv_poll_init` insists on making the polled fd non-blocking, tries `ioctl` and
+then `fcntl`, and a kqueue rejects both with `ENOTTY`. There is no third thing
+to try.
+
+**This one is not VM-specific.** Nothing in it touches `/dev/dri` — it is the
+wayland event loop fd, which is a kqueue on FreeBSD whether there is a GPU or
+not. §29.4's table needs reading again with that in mind: the "on the metal it
+should work" row was true about *EGL* and false about the session as a whole.
+
+`patches/greenfield-poll-uv-init-check.diff` does three things. It checks the
+return value. On failure it falls back to a thread parked in `poll(2)` on the fd
+that wakes the loop through a `uv_async_t` — legitimate precisely because
+`uv__io_check_fd` **succeeded**: the kernel is willing to report readiness on
+that fd, only the gratuitous FIONBIO is in the way. And it reports the first
+napi failure with any pending JS exception, which is what found §29.8 twenty
+minutes later.
+
+### 29.8 The fifth crash was not a crash — it was silence
+
+With the poll fixed the session came up and stayed up, `foot` connected, `New
+Wayland client.` was logged — and then nothing. The watcher span at **441,265
+`poll()` calls in ten seconds**, every one of them readable, with only 5
+`kevent(13)` in the whole trace: `wl_event_loop_dispatch` was never running, so
+nothing ever drained the queue.
+
+The new error reporting said why on the first run:
+
+```
+poll addon: napi_call_function(...) returned napi status 10
+poll addon: uncaught exception in the display fd callback:
+Error: ENOENT: no such file or directory, open '/proc/8358/status'
+    at NativeWaylandCompositorSession.findMatchingNativeAppContext
+```
+
+Greenfield matches a connecting client to the app that launched it by walking up
+its parent pids out of Linux's `/proc/<pid>/status`. **FreeBSD has no procfs
+mounted by default.** The throw happens inside a *native* callback, so it had
+nowhere to go: it stayed pending on the napi env, and status 10 is
+`napi_pending_exception` — every later callback failed the same way, and the
+upstream `NAPI_CALL` macro declines to rethrow when an exception is already
+pending. One unreadable file, and the compositor went permanently deaf on the
+first client to connect, without printing a character.
+
+`patches/greenfield-freebsd-proc-pid.diff` falls back to `ps -o ppid=,comm=`.
+It is JS rather than C, so `build-addons*.sh` cannot deliver it;
+`tools/patch-compositor-proxy.mjs` applies it to an installed proxy's `dist/`.
+
+### 29.9 Where this leaves the three risks
+
+The proxy's own HTTP API, on the image, with a real spawned session child:
+
+```
+GET /foot  ->  201
+{"baseURL":"ws://127.0.0.1:8922","signalURL":"...","key":"fe0f...","pid":"9526","name":"foot"}
+SESSION ALIVE          <- the thing that used to SIGSEGV instantly
+9526 foot              <- launched, running
+New Wayland client.    <- and no exception this time
+```
+
+| | |
+|---|---|
+| 1. does it build on FreeBSD | **retired** (§28.8) |
+| 2. GL context without `/dev/dri` | **retired** — EGL initialises, the session lives, a client connects |
+| 3. is it fast enough | **still unmeasured** — no frame has been encoded here yet |
+
+Idle cost of the fallback watcher, measured rather than assumed: **0.12 s of CPU
+over 15 s**, about 0.8%. The 441k-spin was the poisoned-callback state, not the
+thread design; once the callback drains the queue the thread blocks like any
+other poll.
+
+### 29.10 The sixth fault, and it works
+
+**Correction to a claim made an hour earlier in this section.** "The proxy logs
+no request at all, so the launch never leaves the page" was **wrong**. It rested
+on a page reload that was never confirmed to have happened — `MS/FRAME` is a
+frame *time*, not a counter, so it does not tell you a page reloaded. Restarting
+the session properly (kill the kiosk, log in at the greeter with
+`vps.py type tr4 driver @tab driver @ret`) and reading the proxy's own log shows
+the opposite: the request arrives, `foot` launches and connects, the browser
+opens its channels — **and then the session dies in the encoder.**
+
+```
+{name:"foot",msg:"warn: no decoration manager available - using CSDs"}   <- foot IS running
+{name:"app",msg:"channel (re)connection from .../channel?id=2&..."}      <- the browser IS attached
+libEGL warning: Not allowed to force software rendering when API explicitly selects a hardware device.
+[EGL] command: eglCreateContext, error: EGL_BAD_CONTEXT   (x10)
+** ERROR **: Failed to create GstGLContext: EGL_BAD_CONTEXT
+{name:"main",msg:"Proxy session exited: SIGTRAP"}
+```
+
+This is why the earlier `curl` test passed and the browser did not: the encoder
+is only built when a **browser attaches and a surface needs encoding**. A launch
+alone never reaches it.
+
+`egl_init` always records the display's `EGL_DEVICE_EXT`, and on the surfaceless
+path that is the **software** device — but the display was built by the
+*surfaceless* platform, not the *device* platform. Its only reader is
+`gst_frame_encoder_ensure_gst_gl_setup`, and a non-NULL device sends it down
+`gst_gl_display_egl_device_new_with_egl_device()`, which builds a **second,
+separate EGLDisplay** and then asks it to create a context sharing ours. Two
+displays cannot share a context: `eglQueryContext` answers `EGL_NOT_INITIALIZED`,
+`eglCreateContext` answers `EGL_BAD_CONTEXT`, and `gst_gl_display_create_context`
+calls `g_error` — which is fatal.
+
+One line, in `patches/greenfield-surfaceless-egl.diff`: report
+`EGL_NO_DEVICE_EXT` after a successful surfaceless init, and the encoder takes
+the other branch and wraps the display we already have.
+
+**`RRABBIT/docs/m14-foot-in-the-os.png`.** A live FreeBSD terminal on the road,
+sign reading `(foot)`, glass reading
+`driver@tr4:/usr/local/share/rrabbit/gfproxy $`, in a guest with **no
+`/dev/dri`** — surfaceless llvmpipe EGL, software x264, and the picture arrives
+in the browser. The map names it: `(foot) · home:1 · left · 270×234`.
+
+Six faults, all of them FreeBSD-specific, none of them requiring a GPU to fix.
+
+| | |
+|---|---|
+| 1. does it build on FreeBSD | **retired** (§28.8) |
+| 2. GL context without `/dev/dri` | **retired** — and a window with a picture in it |
+| 3. is it fast enough | **partly** — an idle session costs 0.8% CPU; a moving picture is unmeasured |
+
+**Build note:** copy addons from the cmake **install** tree
+(`ninja install` → `dist/addons/`), never from `build/`. The build-tree binaries
+carry the build RPATH; only the installed ones get `$ORIGIN/shared`, and
+`wayland-server-addon.node` taken from `build/` dies with
+`Shared object "libwestfield.so" not found`.
+
+**Found on the way, not fixed:** the ST&RT menu lists programs this proxy does
+not have (`Firefox`, `XTerm`, `glxgears` — a development host's list). Launching
+one gets a **404**, the shell reports it as `no compositor-proxy at …`, and
+because one failure sets `proxyUp = false` it then **refuses every other row,
+including `foot · tr4`, which works**. A 404 for "this proxy has no such
+program" is not the same fact as "there is no proxy", and conflating them hides
+a working program behind a broken one.
+
+### 29.11 The image gets its own programs, and the proxy gets committed
+
+The "development host's list" above was not a display bug — `vite.config.ts`
+bakes `proxy/applications.json` into the bundle, and that file is whatever the
+person at this keyboard is launching. A built shell therefore advertised
+`gnome-text-editor`, `glxgears`, and a `foot · tr4` entry **containing the
+absolute path of an ssh key in the builder's home directory**. None of those can
+exist on the target, and one of them names a stranger's key.
+
+- **`proxy/applications.image.json`** is now what a build ships: Terminal
+  (`foot`), Notes (`mousepad`, 2.2 MiB, GTK3 which firefox already pulls in),
+  Firefox, XTerm — programs that exist on the image. `RRABBIT_APPLICATIONS`
+  overrides it for a build meant to run here.
+- The build **fails loudly** if the shipped list contains a `/home/` or
+  `/Users/` path. Verified by trying: it names the offending key path.
+- **`rrabbit-proxy` and the proxy's start in `rrabbit-session` are now in the T&R
+  overlay**, so a rebuilt image carries them. Previously both lived only as hand
+  edits on one running guest, which is why §29.9's fixes would not have survived
+  an image rebuild.
+- `rrabbit-proxy` reads `--applications` from **the file the shell bundle
+  ships** (`dist/proxy/applications.json`). One file on the image, so the menu
+  and the proxy cannot disagree about what exists.
+- **`XDG_RUNTIME_DIR` or the wayland socket is named `0`.** FreeBSD has no
+  logind; SDDM sets it for a real session, so `rrabbit-session` is fine, but a
+  proxy started by hand is not — and the failure is silent and misdirecting:
+  `WAYLAND_DISPLAY="0"`, every native app falls back to X, and what you see is
+  `Gtk-WARNING: cannot open display: :2`. I lost a round to exactly this and
+  briefly believed the Notes entry was broken. `rrabbit-proxy` now makes a 0700
+  directory and says so. With it, `mousepad` survives where it died.
+
+`travel-and-rrabbit/sync-overlay.sh` pushes overlay changes into a **running**
+guest instead of rebuilding. It **reports by default**: the guest had accumulated
+hand edits (the proxy start) that the overlay lacked, so a blind push would have
+switched native windows back off.
