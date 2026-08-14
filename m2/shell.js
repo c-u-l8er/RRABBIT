@@ -419,9 +419,11 @@ const noteError = (kind, text) => {
 // kept apart from `timers` (cleared with `clearInterval`) for the same reason
 // the pacer's deferral is -- and cleared on a lost context, because a shell that
 // has stopped drawing has no business announcing that a window did not appear.
+// Cancel FUNCTIONS, not timer ids -- a watchdog re-arms itself once a second
+// while it waits, so any id captured here would be stale a second later.
 const launchWatchdogs = []
 function clearWatchdogs() {
-  for (const t of launchWatchdogs) clearTimeout(t)
+  for (const cancel of launchWatchdogs) cancel()
   launchWatchdogs.length = 0
 }
 function loseContext(reason) {
@@ -2841,19 +2843,65 @@ async function main() {
         // not as "failed". A slow program that arrives late still gets its
         // window; all that is lost is a line on the status strip.
         const before = state.surfaces ?? 0
-        const watchdog = setTimeout(() => {
-          if ((state.surfaces ?? 0) > before) return
-          // NOT a proxy verdict. The proxy answered -- it took the launch and
-          // ran something. Blaming it here is what would refuse every other
-          // native row because one application on this host is unhappy.
-          const why = 'no window within 12s — the program may have exited'
-          state.error = `${prog.id}: ${why}`
-          if (state.lastLaunch?.program === prog.id) {
-            state.lastLaunch = { ...state.lastLaunch, ok: false, why }
+        // AND IT KEEPS WATCHING AFTER IT HAS COMPLAINED, because the first
+        // version's complaint was measurably false. On this guest -- software
+        // EGL, software x264, four vCPUs already busy drawing the road --
+        // Firefox took well over a minute to put up its first surface, and the
+        // strip said "the program may have exited" while `ps` showed it alive
+        // and it went on to render perfectly. A message that contradicts what
+        // is on screen is worse than no message, and this one never withdrew.
+        //
+        // So the deadline announces SLOWNESS, in those words, and the watcher
+        // stays up until the window arrives or GIVE_UP passes. If it arrives,
+        // the complaint is retracted on the same line that made it.
+        const WAIT = 12000, GIVE_UP = 90000
+        const t0 = (performance?.now?.() ?? Date.now())
+        const waitedMs = () => (performance?.now?.() ?? Date.now()) - t0
+        let announced = false, timer = 0, stopped = false
+        const stop = () => { stopped = true; clearTimeout(timer) }
+        const check = () => {
+          if (stopped) return
+          const waited = waitedMs()
+          if ((state.surfaces ?? 0) > before) {
+            if (announced) {
+              // Retract. `lastLaunch` is what a report is read off, so the
+              // record has to say the launch was fine AND that it was slow --
+              // dropping the number would lose the only measurement here.
+              state.error = null
+              if (state.lastLaunch?.program === prog.id) {
+                state.lastLaunch = { ...state.lastLaunch, ok: true, why: null,
+                                     windowAfterMs: Math.round(waited) }
+              }
+              say(`${prog.name}: window arrived after ${Math.round(waited / 1000)}s`)
+            }
+            return
           }
-          say(`${prog.name}: ${why}`)
-        }, 12000)
-        launchWatchdogs.push(watchdog)
+          if (!announced && waited >= WAIT) {
+            announced = true
+            // NOT a proxy verdict. The proxy answered -- it took the launch and
+            // ran something. Blaming it here is what would refuse every other
+            // native row because one application on this host is unhappy.
+            //
+            // Nor a verdict on the PROGRAM. All that is known at this point is
+            // that no window has appeared yet, so that is all it says.
+            const why = `no window yet after ${WAIT / 1000}s — still waiting`
+            state.error = `${prog.id}: ${why}`
+            if (state.lastLaunch?.program === prog.id) {
+              state.lastLaunch = { ...state.lastLaunch, ok: false, why }
+            }
+            say(`${prog.name}: ${why}`)
+          }
+          if (waited < GIVE_UP) timer = setTimeout(check, 1000)
+          else if (announced) {
+            const why = `no window after ${GIVE_UP / 1000}s — giving up watching`
+            state.error = `${prog.id}: ${why}`
+            say(`${prog.name}: ${why}`)
+          }
+        }
+        timer = setTimeout(check, WAIT)
+        // A canceller rather than a timer id: this one re-arms, so the id the
+        // list would have captured stops being the live one after a second.
+        launchWatchdogs.push(stop)
         const app = launcherFor(prog.kind).launch(urlOf(prog), () => {})
         if (app) {
           // WHAT THE DELETED PROBE USED TO GUESS, LEARNED FROM AN ACTUAL ATTEMPT.
@@ -2875,7 +2923,7 @@ async function main() {
           const failed = (why) => {
             // A named failure beats a timeout, and both firing would print two
             // different reasons for one click.
-            clearTimeout(watchdog)
+            stop()
             state.error = `${prog.id}: ${why}`
             // The launch was ACCEPTED and then failed. Leaving `ok:true` on the
             // record is how "I clicked it and nothing happened" stayed
