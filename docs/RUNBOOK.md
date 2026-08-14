@@ -465,3 +465,61 @@ The three reasons, in the order to rule them out:
   this box the inherited `DISPLAY=:2` happens to *be* the proxy's XWayland
   (`ss -xlp | grep X11-unix` names the owner). That is a coincidence, not a
   design, and it will not hold on a machine with a different display count.
+
+---
+
+## 8. Black edges on a resize, and a window that is black outright
+
+Both were reported as separate faults on the image. They are one number.
+
+`adoptSurfaceTexture` maps the sign to a sub-rect of the destination texture,
+assuming the picture sits at the **far** corner and the encoder's padding at the
+origin. When that is the wrong way round the sign samples `padX` columns too far
+right and `padY` rows too far down, so **the black band IS the padding**:
+
+| | blackTop | blackBottom | blackLeft | blackRight |
+|---|---|---|---|---|
+| default (far corner) | 0 | **14** | 0 | **14** |
+| same window, `?uv=origin` | 0 | **0** | 0 | **0** |
+
+gnome-text-editor, 1010×627 surface in a 1024×640 texture, through the host
+proxy in Chrome, 2026-08-14. 14 is exactly `tw - width`.
+
+**It grows with the pad, which is why resizing "adds" black edges.** Resize that
+same window to 1200 wide in a 1280 frame — pad 80 — and `blackRight` goes to
+**83**. Push the stamped coded size far enough ahead of the surface and the sign
+samples almost nothing but padding, which is a window that is simply black.
+
+### Check it where it matters before changing the default
+
+The corner is not the shell's to choose — it follows where the decoder says the
+picture is, and **the guest runs Firefox's WebCodecs while the numbers above are
+Chrome's**. The earlier far-corner reading (27 black columns on the *left* of a
+613-in-640 frame) was taken before `patches/greenfield-webcodec-visible-size.patch`
+changed what size the destination is allocated at, so the two are measurements of
+different pipelines, not a contradiction.
+
+In `rrabbit-session`, on the image:
+
+```bash
+RRABBIT_URL_EXTRA="uv=origin&report=10"
+```
+
+then read `__edges()` out of the report (§3). Zero on all four edges means the
+default in `adoptSurfaceTexture` should become `origin` for that pipeline too.
+`?uv=full` samples the whole destination texture and shows where the padding
+actually is — but a client with its own shadow border confounds it, so prefer the
+`origin`/default comparison above.
+
+### The fix the code names for this cannot be built as written
+
+`askForRememberedSize`'s note says a resize "loses exactly one frame" and that
+"carrying the old picture into the new target is the fix". The first half is
+wrong and so the second is unbuildable. `setRenderTargetTextures` attaches
+**Greenfield's own** GL texture; Greenfield never allocates a second one. In one
+pass, `YUVA2RGBA.js:32-37` sets `renderState.size` (the shell's rebuild trigger),
+then `texImage2D(null)` over the same texture, then draws the new frame into it.
+By the time `adoptPending` sees the new size the old picture is already gone and
+the new one is already there — there is nothing to carry, and the "old target"
+and the new one are the same texture. A snapshot would have to be taken *before*
+the pass, and `fenceScenePasses` is the only place that sees it coming.

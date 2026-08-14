@@ -526,6 +526,28 @@ function adoptSurfaceTexture(rs, crop) {
   // way to SEE the margin rather than argue about it. `?uv=origin` puts the
   // picture back at the origin corner, which is what this did before the coded
   // size was known, and is how to re-check the corner if a client ever disagrees.
+  //
+  // A CLIENT DID DISAGREE, AND IT IS THE DEFAULT THAT IS WRONG HERE. Measured
+  // 2026-08-14, gnome-text-editor through the host proxy in Chrome, one window,
+  // one flag apart:
+  //
+  //   default (far)     blackTop 0  blackBottom 14  blackLeft 0  blackRight 14
+  //   ?uv=origin        blackTop 0  blackBottom  0  blackLeft 0  blackRight  0
+  //
+  // 14 is exactly `tw - width` (1024 - 1010). Resize the same window to 1200 in
+  // a 1280 frame and the band grows to 83 for a pad of 80 -- **the black band IS
+  // padX**, which is why a resize appears to "add black edges" and why a window
+  // whose stamped coded size runs far ahead of its surface goes black outright.
+  // Both of those were photographed on the image and reported as two faults.
+  //
+  // The default is NOT flipped here, because the corner is not ours to choose:
+  // it follows where the decoder says the picture is, and the guest runs
+  // FIREFOX's WebCodecs while this was measured in Chrome's. The earlier
+  // far-corner reading (27 black columns on the LEFT of a 613-in-640 frame) was
+  // taken before `patches/greenfield-webcodec-visible-size.patch` changed what
+  // size the destination is allocated at, so the two measurements are not in
+  // contradiction -- they are of different pipelines. Run `?uv=origin` in the
+  // guest and read `__edges()` before changing this line; runbook §8.
   const DIAG = new URLSearchParams(location.search).get('uv')
 
   // Where the surface sits inside the destination texture. The encoder pads up
@@ -1552,6 +1574,28 @@ function askForRememberedSize(k, view, district, milepost, size) {
   //   loses exactly one frame. A client that animates repaints immediately and
   //   nobody notices; a static one -- a dialog, a "restore session" prompt --
   //   has already painted its only frame, and its board stays black for good.
+  //
+  // CORRECTED 2026-08-14, and the correction matters because the fix named below
+  // CANNOT BE BUILT AS WRITTEN. The render target is new but its texture is not:
+  // `setRenderTargetTextures` attaches Greenfield's own GL texture, and
+  // Greenfield never allocates a second one. `YUVA2RGBA.convertYUVAArrayBufferInto`
+  // does, in one pass and in this order (YUVA2RGBA.js:32-37):
+  //
+  //     renderState.size = frameSize                                  // the shell's trigger
+  //     if (!sizeEquals(renderState.texture.size, opaque.codedSize))
+  //       renderState.texture.setContentBuffer(null, opaque.codedSize) // texImage2D(null)
+  //     ...then it draws the new frame into it
+  //
+  // So the old picture is discarded by `texImage2D(null)` and the new one written
+  // BEFORE `rs.size` is observable to `adoptPending` on the next shell frame.
+  // At rebuild time there is nothing left to carry: the "old target" and the new
+  // one are the same texture, and it already holds the new frame. Anything that
+  // wants the previous picture has to snapshot it BEFORE the pass runs, and
+  // `fenceScenePasses` in shell.js is the only place that sees "about to run".
+  //
+  // Which also means a resized window should not be black at all -- and the
+  // black one photographed on the image is explained by the uv corner instead
+  // (see `DIAG` in adoptSurfaceTexture: the black band IS padX).
   //
   // Measured on the image: a Firefox "Restore Session" dialog took the canonical
   // 960x600, its sign was correctly 300x187.5, and the glass was empty. Windows
