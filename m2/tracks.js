@@ -494,6 +494,99 @@ export const recordingOf = (id) => {
   return t ? { steps: t.rec.map((s) => ({ ...s })), cut: t.recCut, whole: t.recCut === 0 } : null
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REPLAY: A TRACK CHECKS, A MACRO REPEATS.
+//
+// This is the whole difference and it is worth stating before any of the code.
+// A macro replays a fixed sequence and does whatever that sequence now lands on
+// -- which on a world that has moved is a confident wrong action. A track
+// declares what it ASSUMED and refuses when the assumption is gone.
+//
+// So REFUSAL IS A CORRECT OUTCOME here, not a failure path. A replay that stops
+// and names the road that disappeared has done its job. One that quietly drives
+// somewhere else has not, however far it got.
+//
+// TWO PHASES, AND THE SPLIT IS FORCED RATHER THAN CHOSEN:
+//
+//   precheck   roads, answerable now, before anything moves. A recording whose
+//              third step names a deleted road should never take the first.
+//   at arrival windows, which are NOT answerable now -- surfaces arrive after
+//              this module loads. `load` already makes exactly this split for
+//              `in`, for exactly this reason, and says so.
+//
+// The second phase is also the honest answer to the check/use race: the world
+// can move BETWEEN the precheck and the step, so every step is re-checked
+// immediately before it runs. That narrows the window; it does not close it, and
+// nothing here should claim otherwise.
+//
+// NO SILENT REPAIR. A step whose road is gone is refused by name. It is never
+// mapped onto a nearby road, the root, or the next entry -- the same law D′
+// states for the edit algebra, and for the same reason: a replay that fixed
+// itself would be a different drive wearing the original's identity.
+
+export const REFUSE = {
+  EMPTY: 'TRACK_EMPTY',
+  ROAD_GONE: 'TRACK_ROAD_GONE',
+  ROAD_CLOSED: 'TRACK_ROAD_CLOSED',
+  WINDOW_GONE: 'TRACK_WINDOW_GONE',
+  BUSY: 'TRACK_BUSY',
+}
+
+// What one step assumes, answered as far as it can be answered WITHOUT having
+// arrived. `null` means nothing here refuses it; it does not mean the step will
+// succeed, and the caller re-asks at arrival.
+export function checkStep(s) {
+  if (!s) return { code: REFUSE.EMPTY, why: 'no step' }
+  if (s.k === 'go' || s.k === 'land') {
+    if (!ws.has(s.to)) return { code: REFUSE.ROAD_GONE, why: `road ${s.to} is gone`, road: s.to }
+    if (!ws.get(s.to)?.open) return { code: REFUSE.ROAD_CLOSED, why: `road ${s.to} is closed`, road: s.to }
+    return null
+  }
+  if (s.k === 'in') {
+    // The district half IS answerable now; the window on it is not.
+    if (!ws.has(s.district)) return { code: REFUSE.ROAD_GONE, why: `road ${s.district} is gone`, road: s.district }
+    return null
+  }
+  return null
+}
+
+// THE WHOLE RECORDING, BEFORE ANYTHING MOVES.
+//
+// `deferred` is reported rather than folded into `ok`, because "nothing refuses
+// this yet" and "this is checked" are different claims and collapsing them is
+// how a precheck starts overpromising. A plan with 9 deferred window steps is
+// 9 questions that have not been asked.
+export function precheck(id) {
+  const t = get(id)
+  if (!t) return { ok: false, steps: 0, deferred: 0, refusals: [{ i: -1, code: REFUSE.EMPTY, why: 'no such track' }] }
+  if (!t.rec.length) return { ok: false, steps: 0, deferred: 0, refusals: [{ i: -1, code: REFUSE.EMPTY, why: 'nothing recorded' }] }
+  const refusals = []
+  let deferred = 0
+  t.rec.forEach((s, i) => {
+    if (s.k === 'in' || s.k === 'out') deferred++
+    const bad = checkStep(s)
+    if (bad) refusals.push({ i, ...bad, step: { ...s } })
+  })
+  return {
+    ok: refusals.length === 0,
+    steps: t.rec.length,
+    deferred,
+    refusals,
+    // Stated on the plan itself so a caller cannot read `ok` as "this will work".
+    note: 'roads are checked; windows are answered at arrival',
+    cut: t.recCut,
+    whole: t.recCut === 0,
+  }
+}
+
+// The steps a replayer should walk. A copy, and `out` is dropped: leaving a
+// window is a thing that HAPPENED and worth recording, but replaying it is a
+// no-op the driver already does on its way to the next road.
+export function replaySteps(id) {
+  const t = get(id)
+  return t ? t.rec.filter((s) => s.k !== 'out').map((s) => ({ ...s })) : []
+}
+
 // Dropping just the recording, which is not the same act as deleting the track.
 // The reel needs both: a drive worth forgetting is not a piece of work worth
 // forgetting, and conflating them would make clearing a mistake cost the trail

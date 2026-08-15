@@ -79,6 +79,14 @@ import {
   goDistrict,
   goWindow,
   goTrack,
+  replayTrack,
+  stopReplay,
+  pauseReplay,
+  resumeReplay,
+  stepReplay,
+  stepBack,
+  isReplaying,
+  replayState,
   goExit,
   goDash,
   flattenTo,
@@ -117,7 +125,10 @@ import {
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
-import { attachReel, openReel, closeReel, reelReport } from './reel.js'
+import {
+  attachReel, openReel, closeReel, reelReport,
+  attachTransport, transportStart, transportStop, transportReport,
+} from './reel.js'
 
 // THE DECODER'S OWN GEOMETRY -- the runbook's probe for a picture that does not
 // line up, and the one that found section 23. A padded decode and a shifted
@@ -528,6 +539,10 @@ function loseContext(reason) {
 function offerReload(reason) {
   const status = document.getElementById('status')
   if (!status || document.getElementById('reload-btn')) return
+  // Same reason as `say`: an offer to reload inside a hidden panel is not an
+  // offer. This is the one path where the shell is already broken, so it is the
+  // worst one to have swallowed.
+  status.hidden = false
   // The strip is deliberately unclickable so it can never eat a press meant for
   // the road (see index.html). That rule is right and it is suspended for exactly
   // this: there is no road left to press.
@@ -694,6 +709,29 @@ function buildWorld(canvas) {
     card: (gear) => {
       const g = GEARS.find((x) => x.id === gear) || GEARS[GEARS.length - 1]
       const here = [...signs.values()].filter((s) => s.district === state.district).length
+      // THE THIRD PLACE THAT KNEW R WAS UNBUILT, and the one that got missed.
+      // `unbuilt` opened the gate and the mirror caption was rewritten, but this
+      // branch is `gear !== 'D'` -- so the reel opened over a TV still reporting
+      // "not built · no scene behind this gear yet" about the scene in front of
+      // it. Caught from a screenshot of the guest, which is the only place all
+      // three surfaces are visible at once.
+      if (gear === 'R') {
+        const n = tracks.list().length
+        const t = tracks.active()
+        const r = t ? tracks.recordingOf(t.id) : null
+        return {
+          head: 'R · REEL', sub: 'THE TRACKS',
+          big: `${n} track${n === 1 ? '' : 's'}`,
+          // The same two numbers the reel's own columns carry, for the same
+          // reason -- the trail is walkable and the recording is what happened,
+          // and seeing them differ is the point.
+          line: t
+            ? `on ${tracks.labelOf(t)}  ·  ${t.history.length} on the trail  ·  ${r?.steps.length ?? 0} recorded`
+            : 'no track selected',
+          foot: 'a number drives one  ·  Esc for D',
+          footWarn: false,
+        }
+      }
       if (gear !== 'D') {
         return { head: g.id + ' · ' + g.name, sub: g.sub.toUpperCase(),
                  big: 'not built', line: 'no scene behind this gear yet',
@@ -706,7 +744,9 @@ function buildWorld(canvas) {
         big: ws.get(state.district)?.name || state.district,
         line: `${here} window${here === 1 ? '' : 's'} here  ·  ${signs.size} open  ·  `
             + (state.tubeError ? 'bridge unreachable' : (state.tubeReader || 'bridge waiting')),
-        foot: 'G · next gear      0 · the map',
+        // The letters are advertised beside G because a direct key nobody is
+        // told about is a direct key nobody presses.
+        foot: 'G · next gear   R · the reel   0 · the map',
         footWarn: !!state.tubeError,
       }
     },
@@ -732,8 +772,13 @@ function buildWorld(canvas) {
     // tracking it.
     onGear: (id) => {
       state.gear = id
-      if (id === 'R') openReel()
-      else closeReel()
+      // And the same exclusion from the other side: shifting into R over an
+      // open map has to put the map away, or the reel covers a scene that still
+      // believes it is showing and still holds `selected`.
+      if (id === 'R') {
+        closeMap()
+        openReel()
+      } else closeReel()
     },
     // The list, as the TV needs to draw it. Derived from the ledger every call
     // rather than kept in a second array -- one source, so a chip cannot label
@@ -755,13 +800,14 @@ function buildWorld(canvas) {
     // RAVIO's pill says which lane is on and what milepost you are at. The same
     // question asked of the grid this fork actually has: which workspace, and
     // which DASH you are standing at.
-    pill: () => ({
-      lane: 'T&R · ' + String(ws.get(state.district)?.name || state.district).toUpperCase() + ' IS ON',
-      big: String(dashNear(camera.position.z)),
-      right: state.mode === 'flat' ? 'STANDING IN A WINDOW'
-           : state.mode === 'flying' ? 'IN FLIGHT' : 'ON THE ROAD',
-      warn: state.mode === 'flat',
-    }),
+    // THE PILL IS OFF. It said which road you were on and which dash you were
+    // near -- and the TV two feet below it already says the road, in larger
+    // type, beside the window count. So it was a second answer to a question
+    // already answered, sitting in the middle of the windscreen.
+    //
+    // `pillPlate` returns on null, so this costs nothing and is one line to put
+    // back if the milepost turns out to be worth its glass.
+    pill: () => null,
   })
 
   // Hand the stage to both personalities. `session` is still null here -- it is
@@ -870,8 +916,33 @@ function buildWorld(canvas) {
   attachReel({
     track: goTrack,
     leave: () => dash?.setGear('D', 'reel'),
+    // Replaying is Travel's business for the same reason driving is: the reel
+    // picks WHICH track and never how to walk it.
+    //
+    // The transport comes up with the replay and goes down with it, here rather
+    // than inside `replayTrack`, so travel.js stays unaware there is a bar.
+    replay: (id, opts) => {
+      const out = replayTrack(id, opts ?? {})
+      if (out.started) transportStart()
+      return out
+    },
+  })
+
+  // The bar's four verbs. `stop` also takes the bar down, because a transport
+  // outliving the thing it transports is the same unreadable state as a gear
+  // with no scene behind it.
+  attachTransport({
+    pause: pauseReplay,
+    resume: resumeReplay,
+    step: stepReplay,
+    back: stepBack,
+    stop: () => { stopReplay('transport'); transportStop() },
+    state: replayState,
   })
   hooks.closeWindow = requestCloseWindow
+  // Every way a replay can end -- completion, refusal, Esc, the exit button --
+  // goes through `stopReplay`, which fires this. One place, not five.
+  hooks.replayEnded = transportStop
 
   // FLY TO A WINDOW THAT HAS JUST APPEARED.
   //
@@ -1162,7 +1233,24 @@ function buildWorld(canvas) {
         if (dash.setGear(GEARS[(i + n) % GEARS.length].id, 'key')) break
       }
     } else if (ev.key === 'Escape') {
+      // The replay branch that used to be here has moved to travel.js's
+      // capture-phase listener. This one is bubble phase and three branches over
+      // there can stop propagation before it, which is why Esc appeared dead.
       dash.setGear('D', 'key')
+    // THE GEAR'S OWN LETTER GOES STRAIGHT THERE. `G` walks the gate one detent
+    // at a time, which is right when you are browsing it and wrong when you know
+    // where you are going -- reaching the reel from D meant three presses past
+    // two gears that refuse.
+    //
+    // EVERY GEAR, NOT A KEY FOR THE REEL. A letter bound to one scene would be
+    // the second-way-in that `t` already was; a letter bound to the GATE is the
+    // same control the stick is, reached from the keyboard. P and C still refuse
+    // through `setGear`, so an unbuilt gear says so rather than going quiet.
+    //
+    // `r` is safe beside the ctrl+alt+shift+R release chord: this handler
+    // returns above on any modifier, so the chord never reaches it.
+    } else if (/^[prcd]$/i.test(ev.key)) {
+      dash.setGear(ev.key.toUpperCase(), 'key')
     }
   })
 
@@ -1220,13 +1308,26 @@ function syncRoads() {
   // are TRACKS now -- ten trails, not n roads -- so the sentence was describing
   // a feature that no longer exists while sitting above the one that replaced
   // it. The count still has to be live for the same reason it always did.
+  // AND THE HINT PANEL IS GONE TOO, for a better reason than "it was in the
+  // way": it had gone STALE and was teaching the wrong thing. "1..9 switch
+  // tracks (1 then 0 for ten)" describes the fixed ten-track model that sparse
+  // 1-999 replaced -- the same drift its own comment above warned about, one
+  // model later. A permanent panel that has to be re-edited every time the shell
+  // changes is a panel that will be wrong again.
+  //
+  // What it taught now lives where it is needed instead: the TV's footer carries
+  // `G · next gear   R · the reel   0 · the map`, and the reel states its own
+  // grammar in its subtitle.
   if (want.size !== lastRoadCount) {
     lastRoadCount = want.size
     const el = document.getElementById('status')
+    // HIDDEN, NOT EMPTIED. Clearing the text left the panel's border and
+    // background painted around nothing -- a small empty box in the corner,
+    // which is what got reported. The element stays in the tree because boot
+    // failures still write to it; `hidden` comes off the moment anything does.
     if (el) {
-      el.textContent =
-        `${want.size} workspaces -- 1..9 switch tracks (1 then 0 for ten), 0 opens the map. ` +
-        'Scroll: open windows at the entrance, then the lanes out at the far end.'
+      el.textContent = ''
+      el.hidden = true
     }
   }
 
@@ -2775,6 +2876,11 @@ window.__tracks = (n) => {
     tracks: r.tracks.map((t) => ({ ...t, name: t.name || null, on: t.at ? (ws.get(t.at)?.name ?? t.at) : null })),
   }
 }
+// The door counters that found the `[hidden]` bug are gone. What they proved is
+// worth keeping as a note rather than as code: every handler in the chain was
+// working, and the only broken thing was a CSS rule that made the result
+// invisible. When a control "does not respond", measure whether its EFFECT is
+// reaching the screen before measuring whether its input is reaching the code.
 window.__tracksReset = () => tracks.reset()
 // The reel, and the recording a row is claiming. `__rec` prints the STEPS --
 // `__tracks` deliberately prints only their count, because a few thousand of
@@ -2785,6 +2891,26 @@ window.__reel = (openIt) => {
   return reelReport()
 }
 window.__rec = (id) => tracks.recordingOf(id ?? tracks.activeIndex())
+// REPLAY, from a console. `__plan` asks what a track assumes WITHOUT driving it,
+// which is the probe worth having: "would this run, and if not which step" is a
+// question you want answered before the camera starts moving.
+window.__plan = (id) => tracks.precheck(id ?? tracks.activeIndex())
+window.__replay = (id, gap) => replayTrack(id ?? tracks.activeIndex(), gap ? { gap } : {})
+window.__replayStop = () => { stopReplay('console'); transportStop() }
+window.__replayState = () => ({
+  running: isReplaying(), now: replayState(), last: state.lastReplay ?? null, transport: transportReport(),
+})
+// The transport from a console, so "the bar does not respond" and "the bar is
+// not wired" stop looking the same.
+window.__walk = (id) => {
+  const out = replayTrack(id ?? tracks.activeIndex(), { paused: true })
+  if (out.started) transportStart()
+  return out
+}
+window.__step = () => (stepReplay(), replayState())
+window.__back = () => (stepBack(), replayState())
+window.__pause = () => (pauseReplay(), replayState())
+window.__play = () => (resumeReplay(), replayState())
 window.__map = (openIt) => {
   if (openIt === false) closeMap()
   else if (openIt === true) openMap()
@@ -3055,8 +3181,14 @@ window.__pointAt = (u, v) => {
 
 async function main() {
   const status = document.getElementById('status')
+  // ANYTHING WORTH SAYING UN-HIDES THE PANEL. The road-count branch hides it once
+  // the hint is gone (see above), so a boot message written into a hidden element
+  // would be a failure reported nowhere -- exactly what this mechanism exists to
+  // prevent.
   const say = (t) => {
-    if (status) status.textContent = t
+    if (!status) return
+    status.textContent = t
+    status.hidden = !t
   }
   // The same line, reachable from module scope. `loseContext` fires from a canvas
   // event that has no way into this closure, and a failure nobody can see reported

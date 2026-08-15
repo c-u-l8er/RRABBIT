@@ -196,6 +196,255 @@ const leaveTrack = () => {
   switchingTrack = true
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REPLAYING A TRACK. tracks.js decides what a step ASSUMES; this decides how to
+// go there, which is the same division the reel already runs on.
+//
+// It drives one step at a time on a timer rather than in a loop, because the
+// flight is animated and a loop would ask the camera for six places at once and
+// arrive at the last. The gap is also what makes a replay watchable -- a route
+// that completes instantly is indistinguishable from a route that did nothing.
+let replaying = null
+
+export const isReplaying = () => !!replaying
+
+// WHAT THE TRANSPORT NEEDS TO DRAW, and nothing it does not. `steps` is dropped
+// because a bar that re-read the whole recording every frame would be paying for
+// the one thing it never shows; `now` and `next` are the two the operator is
+// actually looking at -- what just happened and what is about to.
+export function replayState() {
+  if (!replaying) return null
+  const s = replaying.steps
+  return {
+    id: replaying.id,
+    i: replaying.i,
+    total: replaying.total,
+    paused: replaying.paused,
+    now: replaying.i > 0 ? { ...s[replaying.i - 1] } : null,
+    next: s[replaying.i] ? { ...s[replaying.i] } : null,
+    ran: replaying.ran.length,
+    // Both clocks, because they answer different questions. `at` is where this
+    // step sat in the ORIGINAL drive; `elapsed` is how long this replay has been
+    // going. A step recorded 4s in can be replayed 40s in, and conflating them
+    // would make a paused replay look like a slow one.
+    elapsed: Date.now() - replaying.startedAt,
+    refusals: replaying.refusals.map((r) => ({ ...r })),
+  }
+}
+
+// PAUSE IS NOT STOP. A paused replay keeps its place, its evidence and its
+// refusal list; a stopped one is over. Two words because they are two states,
+// and a transport that only had "stop" would make stepping impossible.
+export function pauseReplay() {
+  if (!replaying || replaying.paused) return false
+  clearTimeout(replaying.timer)
+  replaying.timer = 0
+  replaying.paused = true
+  return true
+}
+
+export function resumeReplay() {
+  if (!replaying || !replaying.paused) return false
+  replaying.paused = false
+  replaying.timer = setTimeout(() => replaying && replaying.tick(), 0)
+  return true
+}
+
+// ONE STEP, AND IT LEAVES YOU PAUSED. Stepping out of a running replay would be
+// two controls fighting over the same clock, so this pauses first -- pressing
+// step always means "advance exactly one and hold", whatever it was doing.
+export function stepReplay() {
+  if (!replaying) return false
+  pauseReplay()
+  replaying.tick({ once: true })
+  return true
+}
+
+// STEPPING BACKWARD, AND WHY IT IS EVEN POSSIBLE.
+//
+// You cannot undo a drive -- there is no inverse of "enter this window". What
+// makes this work is the granularity rule the ops already follow: every step
+// records an ARRIVAL, not a delta. So the state after step k is fully described
+// by step k, and going back to k-1 is not an undo at all -- it is re-performing
+// step k-1 and landing where it left you.
+//
+// That property is the whole argument for "record the arrival, not the input"
+// stated as a capability rather than a principle: arrival-based ops are
+// SEEKABLE and input-based ones are not. Forty wheel deltas cannot be rewound;
+// `park(road, z)` can be re-run.
+//
+// AT THE FIRST STEP IT HOLDS RATHER THAN GUESSING. There is no recorded state
+// from before step 1 -- the drive started wherever the operator happened to be
+// -- so `i` goes to 0 and nothing drives. Inventing a starting position would be
+// the silent repair the forward path already refuses to do.
+export function stepBack() {
+  if (!replaying || replaying.i <= 0) return false
+  pauseReplay()
+  replaying.i--
+  const s = replaying.steps[replaying.i - 1]
+  if (!s) return true // back at the start: hold, drive nothing, claim nothing
+  const bad = replaying.perform(s, replaying.i - 1)
+  if (bad) {
+    // A refusal going BACKWARD does not end the replay. Forward, a refusal means
+    // the route cannot continue; backward it only means this position cannot be
+    // restored, and the operator is still free to step forward or stop.
+    replaying.refusals.push({ ...bad, back: true })
+    return false
+  }
+  return true
+}
+
+// Stop, on purpose or because something refused. Kept separate from the refusal
+// itself so "the operator stopped it" and "the world had moved" never share a
+// reason string.
+// A REPLAY IS A ROUND TRIP.
+//
+// You pressed replay to WATCH a route, not to be moved by it -- so leaving one
+// puts you back on the road and in the window you were in when it started.
+// Reported as the driver not being returned to the lane/window they were last
+// viewing, and it is the right rule for the same reason `back` is: an inspection
+// that relocates you has spent your place to show you something.
+//
+// `driveToTrack` is the existing primitive for exactly this -- it releases a
+// window first, sets `goingBack` so the journey home is not recorded onto the
+// trail, and re-enters the window if one was wanted. Reused rather than
+// re-derived; a second way to arrive somewhere would be a second set of bugs.
+function goHome(h) {
+  if (!h) return
+  const road = ws.get(h.district)?.open ? h.district : null
+  if (!road) return // the road you started from is gone; stay put and say nothing false
+  const want = h.flat && h.flat.district === road ? h.flat : null
+  driveToTrack(road, want)
+}
+
+export function stopReplay(why = 'stopped') {
+  if (!replaying) return null
+  clearTimeout(replaying.timer)
+  const ev = { ...replaying, steps: undefined, done: true, why }
+  const home = replaying.home
+  replaying = null
+  state.lastReplay = ev
+  // AFTER `replaying` is null, so the drive home cannot be mistaken for a step
+  // of the replay it is ending -- `arrive` would otherwise record it and the
+  // transport would still be reading a live state while the camera moved.
+  goHome(home)
+  // EVERY EXIT TAKES THE BAR DOWN, from here, rather than each caller
+  // remembering to. The transport was left showing a finished replay because
+  // exactly one path -- completion inside `tick` -- did not call
+  // `transportStop`, and a control surface that outlives its subject is how
+  // "there is no way to exit" happens.
+  hooks.replayEnded?.()
+  return ev
+}
+
+export function replayTrack(id, { gap = 900, onStep = null, paused = false } = {}) {
+  if (replaying) return { started: false, code: tracks.REFUSE.BUSY, why: 'a replay is already running' }
+
+  // PHASE ONE -- before anything moves. A recording whose third step names a
+  // deleted road must not take the first one.
+  const plan = tracks.precheck(id)
+  if (!plan.ok) {
+    state.lastReplay = { id, started: false, refusals: plan.refusals, plan }
+    return { started: false, code: plan.refusals[0]?.code, why: plan.refusals[0]?.why, plan }
+  }
+
+  const steps = tracks.replaySteps(id)
+  replaying = {
+    id, i: 0, total: steps.length, steps, timer: 0, gap,
+    // STARTING PAUSED IS A FIRST-CLASS WAY IN, not a special case. "Show me this
+    // route one step at a time" and "run it" are the same track and the same
+    // machinery; only the clock differs.
+    paused: !!paused,
+    // EVIDENCE, gathered as it goes rather than reconstructed after. `ran` is
+    // what actually executed, which is the only honest answer to "how far did
+    // it get" once a refusal can stop it half way.
+    ran: [], refusals: [], startedAt: Date.now(), plan,
+    // WHERE YOU WERE WHEN YOU PRESSED IT. Taken before the first step moves
+    // anything, and the same shape `leaveTrack` already uses to remember a
+    // track's window -- so the two agree about what "where you were" means.
+    home: {
+      district: state.district,
+      flat: state.mode === 'flat'
+        ? { district: state.flatDistrict, milepost: state.flatMilepost }
+        : null,
+    },
+  }
+
+  // GOING TO WHERE ONE STEP LEFT YOU. Factored out because stepping BACKWARD
+  // needs exactly this and nothing else -- see `stepBack`.
+  //
+  // It returns the refusal rather than stopping, so the caller decides whether a
+  // refusal ends the replay (forwards) or merely declines to move (backwards).
+  const perform = (s, at) => {
+    // PHASE TWO -- re-check immediately before executing. The world can move
+    // between the precheck and here, and this is the narrowest the window gets.
+    // It does not close it: a road can still go away between this line and the
+    // drive below. That residue is real and is not claimed away anywhere.
+    const bad = tracks.checkStep(s)
+    if (bad) return { ...bad, i: at, step: { ...s } }
+
+    if (s.k === 'go' || s.k === 'land') goDistrict(s.to)
+    else if (s.k === 'in') {
+      // THE WINDOW HALF, asked at the only moment it can be answered. `goWindow`
+      // returning nothing means there is no surface at that milepost any more --
+      // a refusal, not a miss, and the replay stops on it like any other.
+      if (!goWindow(s.district, s.milepost)) {
+        return { code: tracks.REFUSE.WINDOW_GONE, why: `no window at ${s.district}:${s.milepost}`, i: at, step: { ...s } }
+      }
+    }
+    return null
+  }
+  replaying.perform = perform
+
+  // THE END IS A PLACE TO STAND, NOT AN EXIT.
+  //
+  // It used to `stopReplay('complete')` on the last step, which threw you out of
+  // the transport at the exact moment the route finished -- so you could not
+  // step BACK through what you had just watched, and the bar vanished before you
+  // could read where it ended. Holding paused at the end keeps `back` live and
+  // leaves the leaving to you.
+  const holdAtEnd = () => {
+    replaying.paused = true
+    clearTimeout(replaying.timer)
+    replaying.timer = 0
+  }
+
+  const tick = ({ once = false } = {}) => {
+    if (!replaying) return
+    const s = replaying.steps[replaying.i]
+    if (!s) return void holdAtEnd()
+
+    const bad = perform(s, replaying.i)
+    if (bad) {
+      replaying.refusals.push(bad)
+      return void stopReplay(bad.code)
+    }
+
+    replaying.ran.push({ i: replaying.i, k: s.k, at: Date.now() - replaying.startedAt, was: s.t })
+    onStep?.(replaying.i, s, replaying.total)
+    replaying.i++
+    // FINISHED IS DECIDED HERE, NOT ONE GAP LATER -- the end of the list is
+    // knowable the moment you reach it, so waiting a gap to discover it left the
+    // bar reading `5 / 5` with a live replay behind it. It now HOLDS rather than
+    // stops (see holdAtEnd), so the same line that used to be the exit is the
+    // one that parks you at the end with `back` still available.
+    if (replaying.i >= replaying.steps.length) return void holdAtEnd()
+    // `once` is the step button: advance exactly one and hold. Anything else
+    // keeps the clock, unless a pause landed while this step was executing.
+    if (!once && !replaying.paused) replaying.timer = setTimeout(tick, replaying.gap)
+  }
+
+  // Held on the state so pause/resume/step can drive the same function the timer
+  // does. Two entry points into one stepper, rather than a second stepper that
+  // has to be kept in agreement with the first.
+  replaying.tick = tick
+
+  // The first step goes on the same timer as the rest, so a one-step recording
+  // and a ten-step one behave the same way rather than the first being special.
+  if (!replaying.paused) replaying.timer = setTimeout(tick, 0)
+  return { started: true, total: steps.length, plan, paused: replaying.paused }
+}
+
 // Switching tracks from the map, which is the same act as pressing the number.
 export function goTrack(n) {
   leaveTrack()
@@ -1597,6 +1846,19 @@ function installInput() {
     window.addEventListener(
       type,
       (ev) => {
+        // A CONTROL OF OURS OVER THE WINDOW KEEPS ITS OWN PRESSES.
+        //
+        // This swallowed every pointer event in flat mode and exempted exactly
+        // one thing: the map. That was complete when the map was the only
+        // surface the shell put over a window -- and it stopped being complete
+        // the moment the reel and the transport existed.
+        //
+        // The transport is the one that bit: a replay whose step ENTERS a window
+        // puts the shell in flat mode, and from that instant every button on the
+        // bar was dead while still looking pressable. That is the "exit does not
+        // work" report, and it is worse than a dead button because the bar is
+        // the only way out of the mode it is reporting on.
+        if (ev.target?.closest?.('#transport, #reel, #map')) return
         if (state.mode === 'flat' && !mapIsOpen()) {
           ev.stopPropagation()
           handler?.(ev)
@@ -2115,6 +2377,22 @@ function installInput() {
       // (invariant 8 forwards it, which is why the way out is a chord) -- but
       // not while a menu of ours is open over it, because there Esc is aimed at
       // the menu, like it is everywhere else in computing.
+      // A REPLAY IS THE TOPMOST THING ESC CAN MEAN, so it is answered before the
+      // map and before the gear.
+      //
+      // IT LIVES HERE AND NOT IN shell.js, WHICH IS THE FIX. It was in shell's
+      // gear listener, which is on `window` in the BUBBLE phase -- reachable
+      // only if nothing in this capture-phase listener stops propagation first,
+      // and there are three branches here that do. Reported as "pressing esc
+      // doesn't work", and the honest reading is that I put a key on the one
+      // path in this file that another handler is allowed to eat.
+      if (ev.key === 'Escape' && isReplaying()) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        stopReplay('escape')
+        return
+      }
+
       if (ev.key === 'Escape' && mapIsOpen()) {
         ev.preventDefault()
         ev.stopImmediatePropagation()
@@ -2189,6 +2467,19 @@ function installInput() {
       // From inside a window it opens the map ON that window AND LEAVES YOU IN
       // IT: a menu does not close the document in order to open itself.
       if (ev.key === '0' && digits === '') {
+        // ONE SCENE AT A TIME, and this cost a round trip to find. The reel
+        // paints at z-40 and the map at z-6, so a map opened while the reel was
+        // up went BEHIND it -- `0` did exactly what it was asked and looked like
+        // a dead key, which is the worst shape a bug can take. Reported as
+        // "switching back and forth between 0 and R doesn't work".
+        //
+        // Closing it here rather than inside `openMap` keeps map.js and reel.js
+        // from importing each other: the caller knows about both, the scenes
+        // know about neither.
+        //
+        // `closeReel` runs its `leave`, so the stick comes out of R too -- the
+        // gate must not report a scene the map is now standing in front of.
+        if (reelIsOpen()) closeReel()
         if (!flat) return void toggleMap()
         if (mapIsOpen()) return void closeMap()
         openMapAt(state.flatDistrict, state.flatMilepost)

@@ -455,7 +455,13 @@ function panel() {
       '<p class="hint">Every workspace in this network, and every exit between them. Rows are hops from ' +
       `<b>${esc(ws.get(ws.root())?.name ?? 'the root')}</b>, so an arrow pointing back up a row is a loop.</p>` +
       '<p class="hint">Click a workspace to see what is on it, rename it, change its number, or rewire its exits. Click one of its windows to leave the map and come out on the road beside that window.</p>' +
-      '<p class="keys">drag to pan · wheel to zoom · 0 or Esc closes &middot; 1&ndash;9 switch tracks (1 then 0 for ten)</p></aside>'
+      // THE SECOND COPY OF THE STALE HINT. The status panel carried the same
+      // sentence and was deleted for being wrong; this one survived the grep
+      // because it is worded differently, and it was then the only surface in
+      // the shell still teaching the fixed ten-track model. Tracks are 1-999 and
+      // sparse, and a number commits the moment it cannot grow (tracks.js), so
+      // "1 then 0 for ten" describes a rule that no longer exists.
+      '<p class="keys">drag to pan · wheel to zoom · 0 or Esc closes &middot; a number switches track &middot; R for the reel</p></aside>'
     )
   }
   const n = ws.get(selected)

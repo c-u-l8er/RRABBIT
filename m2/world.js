@@ -540,6 +540,10 @@ export const hooks = {
   // renaming a workspace from inside a window types the name into the
   // application as well.
   shellKeyboard: null,
+  // Fired by `stopReplay` on every exit path so the transport comes down with
+  // the thing it was transporting. A hook rather than an import because travel.js
+  // must not learn that a bar exists.
+  replayEnded: null,
 }
 
 // WHERE the next adopted window stands: `{ side, dash }`, and the dash may be null
