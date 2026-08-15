@@ -34,7 +34,19 @@ import * as tracks from './tracks.js'
 // Same shape as map.js: the shell hands the reel the verbs it does not own.
 // Driving belongs to travel.js and always has -- the reel decides WHICH track,
 // never how to get there.
-let go = { track: null }
+// THE REEL IS GEAR R, not a screen with a key of its own.
+//
+// It was bound to `t` for about an hour, which was wrong twice over: the cockpit
+// already has a detent labelled REEL sitting next to PARK and CAMERA, and the
+// gate refuses a gear whose scene does not exist. So the scene existing is the
+// whole of what R was waiting for, and adding a letter beside it would have been
+// a second way in with its own rules -- the thing map.js declines to do for the
+// same reason one paragraph up from its `openMapAt`.
+//
+// `leave` is how the reel says it has closed itself, so the stick can come out
+// of R. Without it Esc would hide the reel and leave the cockpit reporting a
+// gear with nothing behind it.
+let go = { track: null, leave: null }
 export function attachReel(handlers) {
   go = { ...go, ...handlers }
 }
@@ -133,7 +145,7 @@ function render(force = false) {
   const n = tracks.list().length
   el.innerHTML =
     `<h2>REEL</h2>` +
-    `<p class="sub">${n} track${n === 1 ? '' : 's'} · up to ${tracks.MAX} · press a number to drive one, 0 for the map, esc to close</p>` +
+    `<p class="sub">${n} track${n === 1 ? '' : 's'} · up to ${tracks.MAX} · gear R · press a number to drive one, esc back to D</p>` +
     `<table><thead><tr>` +
     `<th>#</th><th>name</th><th>parked on</th><th>trail</th><th>recording</th><th></th>` +
     `</tr></thead><tbody>${rows()}</tbody></table>` +
@@ -216,6 +228,10 @@ export function closeReel() {
   poll = 0
   if (el) el.hidden = true
   hooks.shellKeyboard?.(false)
+  // AFTER the flag is down, so a `leave` that shifts the gear cannot re-enter
+  // this function and recurse: `setGear('D')` fires `onGear`, which calls
+  // `closeReel` again, which now returns false at the guard above.
+  go.leave?.()
   return true
 }
 

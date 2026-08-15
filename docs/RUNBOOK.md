@@ -664,6 +664,35 @@ Measured on this machine, one window, proxy on loopback, by counting the branch:
 | before | **1** | 33 | **2031 ms** |
 | after | **0** | 42 | 0 |
 
+### A window that is black WITH GL errors is a dead texture handle, not the UVs
+
+`View.ensureRenderStatesForMatchingScenes` runs from `applyTransformations` —
+every pass — and it ends by destroying the renderState of any view whose region
+no longer intersects the scene:
+
+```js
+if (visibleRegion === undefined) {
+  renderState.destroy()             // deleteTexture — the GL name is GONE
+  delete this.renderStates[sceneId]
+}
+```
+
+Come back into the output and `RenderState.create` makes a **brand new**
+`Texture`. But `adoptSurfaceTexture` handed the OLD one to
+`setRenderTargetTextures`, so the sign's material points at a deleted GL texture.
+Forced on a live sign — the same two lines, from the console — that produced
+**240 GL errors** in a few seconds and a sign that never came back. A window that
+leaves the ledger's rect and returns is the ordinary way in.
+
+No size comparison can see it: the replacement settles at the same surface size
+and the same allocation, so every size-based rebuild trigger compares equal.
+`adoptPending` now compares the **texture object's identity** (`texSwapped`), and
+`syncPopups` keeps a `texObj` for the same reason.
+
+**So `__m1().glErrors` is the discriminator.** Black glass with `glErrors` at 0 is
+a mapping or padding question (§8). Black glass with `glErrors` climbing is a dead
+handle, and the sign needs rebuilding, not remapping.
+
 ### Ask the window how long it took
 
 ```js

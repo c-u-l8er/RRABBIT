@@ -683,7 +683,10 @@ function buildWorld(canvas) {
     // anything in front of them. The list shrinks as the scenes get built; it is
     // not a placeholder for "coming soon", it is the shell declining to claim
     // something it cannot do.
-    unbuilt: ['P', 'R', 'C'],
+    // R COMES OFF THE LIST: the reel exists now. P and C do not, and the gate
+    // still refuses them for the reason `setGear` gives -- a stick reporting a
+    // scene that is not behind it is unreadable from the cockpit.
+    unbuilt: ['P', 'C'],
     // What the TV shows. Passed in as a callback rather than imported inside
     // dash.js, for the same reason the map's actions are: shell.js is the only
     // module allowed to know about Travel, RRABBIT and the compositor at once.
@@ -706,23 +709,30 @@ function buildWorld(canvas) {
         footWarn: !!state.tubeError,
       }
     },
-    // The housings are drawn; the GLASS is empty and says which nothing it is,
-    // because the camera and the reel are the two scenes that would fill them
-    // and neither exists yet. A dark housing with no caption is indistinguishable
-    // from a rendering fault.
+    // The housings are drawn; the GLASS is empty and says which nothing it is.
+    // A dark housing with no caption is indistinguishable from a rendering fault.
+    //
+    // THE RIGHT CAPTION MOVED WHEN THE REEL LANDED. It used to say both C and R
+    // were unbuilt, and leaving it would have been the same fault the caption
+    // exists to prevent -- a viewer reading "R · REEL is not built" off a
+    // cockpit whose gate will happily shift into R.
     mirrors: () => ({
       mirrorLive: { left: false, right: false },
       mirrorTag: { left: 'BEHIND', right: 'AHEAD' },
       mirrorEmpty: {
         left: ['NO REAR VIEW', 'the road behind is not rendered yet'],
-        right: ['NO REEL LOADED', 'C · CAMERA and R · REEL are not built'],
+        right: ['NO REEL IN THE GLASS', 'shift to R for the reel · C · CAMERA is not built'],
       },
     }),
-    // Changing gear is Travel's business the moment there is a scene to change
-    // to; until then it only moves the stick, and this hook is where that will
-    // be wired rather than a second gear variable somewhere else.
+    // AND HERE IS WHERE IT GOT WIRED. The note this replaces said changing gear
+    // becomes Travel's business "the moment there is a scene to change to" --
+    // the reel is that scene, so R now opens it and every other detent closes
+    // it. One gear variable, still, and the scene follows it rather than
+    // tracking it.
     onGear: (id) => {
       state.gear = id
+      if (id === 'R') openReel()
+      else closeReel()
     },
     // The list, as the TV needs to draw it. Derived from the ledger every call
     // rather than kept in a second array -- one source, so a chip cannot label
@@ -850,7 +860,16 @@ function buildWorld(canvas) {
   })
   // The reel needs exactly one verb and it is the same one: which track, never
   // how to get there. Driving stays in travel.js.
-  attachReel({ track: goTrack })
+  //
+  // `leave` is the second half of the gear wiring and it has to exist: the reel
+  // closes itself on Esc and on a number being pressed, and without a way to say
+  // so the stick would sit in R with no reel in front of it -- the unreadable
+  // cockpit state the gate's own refusal exists to prevent, arrived at from the
+  // other direction.
+  attachReel({
+    track: goTrack,
+    leave: () => dash?.setGear('D', 'reel'),
+  })
   hooks.closeWindow = requestCloseWindow
 
   // FLY TO A WINDOW THAT HAS JUST APPEARED.

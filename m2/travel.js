@@ -23,7 +23,7 @@ import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
 import { rampMeshes, dashActionOf, setRampHover } from './ramps.js'
 import { toggleMap, closeMap, openMap, openMapAt, openMapAtDash, isOpen as mapIsOpen } from './map.js'
-import { toggleReel, closeReel, isOpen as reelIsOpen } from './reel.js'
+import { closeReel, isOpen as reelIsOpen } from './reel.js'
 
 let renderer, gl, scene, camera, session
 export function attachTravel(c) {
@@ -2138,21 +2138,17 @@ function installInput() {
       // Above the flat branch as well as below it, because the map can be open
       // over a flattened window now.
       if (ev.target?.closest?.('#map input, #map select')) return
-      // The reel's name boxes are text fields over the same shell, so a `t`
-      // typed into one must stay in it rather than shutting the screen it is on.
+      // The reel's name boxes are text fields over the same shell, so a digit
+      // typed into a track's name must name it rather than switching track --
+      // the same exemption `#map input` gets one line up, for the same reason.
       if (ev.target?.closest?.('#reel input')) return
 
       if (!flat && (ev.key === 'o' || ev.key === 'O')) return void toggleMap()
 
-      // T FOR TRACKS, and it is not `r` for reel because `r` is already "R for
-      // road" in the release chord below. Two meanings for one letter separated
-      // only by whether three modifiers were held is the kind of binding that
-      // reads fine here and is impossible to remember at the keyboard.
-      //
-      // `0` opens the map, which is the graph of ROADS. `t` opens the reel,
-      // which is the list of WORK. They are deliberately different screens
-      // because two tracks parked on one road are one node and two rows.
-      if (!flat && (ev.key === 't' || ev.key === 'T')) return void toggleReel()
+      // NO KEY FOR THE REEL. It is gear R, reached by the gate or by `G · next
+      // gear` like every other scene, and a letter beside that would be a second
+      // way in with its own rules. This branch briefly bound `t`; the cockpit
+      // already had the detent and it was only ever waiting for the scene.
       if (!/^[0-9]$/.test(ev.key)) return
       // THE DIGITS BELONG TO THE APPLICATION ONLY IN FULL SCREEN. The line this
       // replaces was `if (flat) return`, which gave them up the moment you stood

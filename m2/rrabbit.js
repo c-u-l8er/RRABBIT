@@ -997,6 +997,12 @@ function makeSign(view, milepost, district, side, dash) {
     // its UVs are the unpadded fallback -- so this has to be compared, not
     // assumed settled.
     coded: rs.texture?.size ? { w: rs.texture.size.width, h: rs.texture.size.height } : null,
+    // THE TEXTURE OBJECT THIS SIGN'S RENDER TARGET WAS ATTACHED TO. Kept for
+    // identity alone: Greenfield destroys and recreates a view's renderState
+    // whenever it leaves and re-enters the scene region, and the replacement can
+    // be the same size in every respect while being a different GL name. See
+    // `texSwapped` in adoptPending.
+    texObj: rs.texture,
     // The window rect this sign was built against, kept so adoptPending can tell
     // that a client has DECLARED one since -- a change that moves the picture
     // without changing the buffer size, and would otherwise never be noticed.
@@ -1706,7 +1712,31 @@ function adoptPending() {
         ? { w: rs.texture.size.width, h: rs.texture.size.height }
         : null
       const codedMoved = JSON.stringify(nextCoded) !== JSON.stringify(existing.coded ?? null)
-      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved || codedMoved)) {
+      // THE TEXTURE ITSELF CAN BE REPLACED UNDER A STANDING SIGN, and no
+      // comparison of SIZES can see it.
+      //
+      // `View.ensureRenderStatesForMatchingScenes` runs from
+      // `applyTransformations`, i.e. every pass, and it ends by destroying the
+      // renderState of any view whose region no longer intersects the scene:
+      //
+      //     if (visibleRegion === undefined) {
+      //       renderState.destroy()            // deleteTexture -- the GL name is GONE
+      //       delete this.renderStates[sceneId]
+      //     }
+      //
+      // Come back into the output and `RenderState.create` makes a BRAND NEW
+      // `Texture`. But `adoptSurfaceTexture` handed the OLD one to
+      // `setRenderTargetTextures`, so the sign's material still points at a
+      // deleted GL texture and draws black -- for good, because the new
+      // renderState settles at the same surface size and the same allocation, so
+      // every size-based trigger above compares equal and no rebuild is ever
+      // asked for. A window that leaves the ledger's rect and comes back is the
+      // ordinary way in.
+      //
+      // Identity, not size. Holding the dead `Texture` object is harmless: it is
+      // only ever compared, and it is dropped on the rebuild it triggers.
+      const texSwapped = !!rs && rs.texture !== existing.texObj
+      if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved || codedMoved || texSwapped)) {
         // A resized surface is a new texture allocation. Rebuild the sign in
         // place, at the SAME milepost.
         //
@@ -1967,7 +1997,10 @@ function syncPopups() {
         crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '-',
         rs.texture?.size ? `${rs.texture.size.width}x${rs.texture.size.height}` : '-',
       ].join('|')
-      if (q && (q.size.w !== size.w || q.size.h !== size.h || q.rebuildKey !== rebuildKey)) {
+      // `texObj` for the same reason the toplevel keeps one: a destroyed and
+      // recreated renderState is a different GL texture at an identical size,
+      // and identity is the only thing that sees it.
+      if (q && (q.size.w !== size.w || q.size.h !== size.h || q.rebuildKey !== rebuildKey || q.texObj !== rs.texture)) {
         sign.mesh.remove(q.mesh)
         q.rt.dispose()
         sign.popups.delete(pk)
@@ -1983,7 +2016,7 @@ function syncPopups() {
         // stays glued to the window through the flatten.
         mesh.userData.popupView = view
         sign.mesh.add(mesh)
-        q = { mesh, rt, size, rebuildKey }
+        q = { mesh, rt, size, rebuildKey, texObj: rs.texture }
         sign.popups.set(pk, q)
         state.popupQuads++
       }
