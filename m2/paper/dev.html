@@ -25,8 +25,13 @@
 <div class="cards" id="cards"></div>
 <div class="grid" id="grid"></div>
 
+<h1 style="margin-top:28px">runefort — welcome.json, the same three draw commands</h1>
+<p class="sub" id="sub2">loading…</p>
+<div class="grid" id="rgrid"></div>
+
 <script type="module">
 import { layoutBend, cardOf, THEME } from './bend-layout.js'
+import { layoutRune, floorsOf } from './rune-layout.js'
 import { paint, paintCard, measurerFor } from './paint.js'
 
 // Hardcoded because a static server has no readdir. The corpus is fixed at v0.1
@@ -91,4 +96,32 @@ document.getElementById('sub').textContent =
   `${painted} documents · ${cmds} draw commands · ${overflowed} overflow · ` +
   `${unknown} unknown block kinds (fallback-rendered) · ${Math.round(performance.now() - t0)}ms total`
 window.__paper = { painted, cmds, overflowed, unknown }
+
+// ---- runefort: a floor is a pane -----------------------------------------
+const rgrid = document.getElementById('rgrid')
+const fort = await (await fetch('/runefort.com/forts/welcome.json')).json()
+const floors = floorsOf(fort)
+const kinds = new Set()
+let rcmds = 0, rrooms = 0
+
+for (const fl of floors) {
+  const { c, ctx } = canvasFor(W, H)
+  const r = layoutRune(fl, { width: W, height: H, measure: measurerFor(ctx) })
+  paint(ctx, r.commands)
+  for (const cm of r.commands) kinds.add(cm.op)
+
+  const fig = document.createElement('figure')
+  fig.appendChild(c)
+  const cap = document.createElement('figcaption')
+  cap.textContent = `${fl._building} / ${fl.id} · ${r.stats.rooms} rooms · ${r.cols}×${r.rows} · ` +
+    `${r.commands.length} cmds${r.compressed ? ' · compressed' : ''}${r.stats.clipped ? ` · ${r.stats.clipped} clipped` : ''}`
+  fig.appendChild(cap)
+  rgrid.appendChild(fig)
+  rcmds += r.commands.length; rrooms += r.stats.rooms
+}
+
+document.getElementById('sub2').textContent =
+  `${floors.length} floors · ${rrooms} rooms · ${rcmds} draw commands · ` +
+  `command kinds used: {${[...kinds].sort().join(', ')}} — same closed set as bendscript`
+window.__rune = { floors: floors.length, rooms: rrooms, cmds: rcmds, kinds: [...kinds].sort() }
 </script>

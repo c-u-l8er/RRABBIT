@@ -225,7 +225,7 @@ Smallest first, each rung falsifiable on its own.
 | 1 | `bend-layout.js` — `.bend` → draw commands, pure | **done** — `node test/paper-layout.mjs`, 145 assertions over the real 20-doc corpus |
 | 1b | `paint.js` + `dev.html` — commands → 2-D canvas | **done** — all 20 painted, 479 commands, 0 blank |
 | 2 | `paper.js` — one pane on one road slot | a screenshot from the guest |
-| 3 | `.rune` panes via the same seam | a `.rune` layout on a road |
+| 3 | `.rune` panes via the same seam | **done** — `node test/rune-layout.mjs`, 59 assertions; 4 real floors, 15 rooms, **no fourth command kind** |
 | 4 | the **card** tier + a shared atlas | frame time flat in N (§4) |
 | 5 | IndexedDB store + district-chunk streaming | 10k panes placed, measured |
 | 6 | `CSS3DRenderer` **read** tier | text selectable in the pane you stand in |
@@ -260,8 +260,53 @@ a markdown viewer, and until the rail existed not one of them reached a pixel.
 > **A renderer is not tested by whether it drew something. It is tested by whether the thing the
 > format exists for reached the screen.**
 
+## 12. What the second format settled, and two things it exposed
+
+Rung 3 existed to falsify one claim: that `rect` / `line` / `text` is a **closed** set rather than
+"the three things the first format happened to need". A second, unrelated format — grids, not prose
+— was the test.
+
+**It needed no fourth command.** 4 floors, 15 rooms, 148 commands, kinds used `{line, rect, text}`.
+A room border is drawn as four thin rects rather than a stroked path, precisely because adding
+`strokeRect` would be the fourth command arriving through the back door.
+
+### 12.1 The shipped documents are not the spec's shape
+
+The protocol spec §3 describes a flat `{ runefort, grid, rooms, claims, neighbors, state_bindings }`.
+The **only real RuneFort document in the repo** — `runefort.com/forts/welcome.json` — is
+`campus → buildings → floors → rooms`, with `columns` / `cell_height` / `gap` on the floor and
+`state_class` written straight onto the room. `@runefort/core` ships `rune-campus.js`,
+`rune-building.js` and `rune-elevator.js`, so the hierarchy is the implemented model.
+
+Meanwhile the protocol spec's §11 still lists **"Nesting. A room inside a room (zoomable). Worth
+adding to core, or push to a vocabulary?"** as an *open question for v0.2*. The shipped app answered
+it and the spec was never told.
+
+`floorsOf()` normalises both and `stats.shape` reports which arrived, because rendering only the spec
+shape would render nothing that exists, and rendering only the app shape would silently bless the
+drift. **This is a runefort.com spec issue, not an RRABBIT one** — flagged here because this is where
+it surfaced.
+
+### 12.2 A canvas pane cannot be a conformant Runefort renderer
+
+Renderer contract §5 MUST-4: *"Each room MUST be focusable (keyboard) and have a stable accessible
+name."* MUST-5 requires arrow/`hjkl` focus movement along neighbour edges.
+
+A canvas has no focus and no accessibility tree. The **paint** tier therefore satisfies §5.1 (layout,
+which explicitly allows "visually equivalent"), §5.3 (state classes, visually) and §5.2 in part — and
+**cannot** satisfy §5.4 or §5.5 at all. It is a *viewer*, not a conformant renderer, and should not
+be described as one.
+
+This is the strongest argument yet for rung 6: the **read** tier uses `CSS3DRenderer` and real
+`@runefort/core` Custom Elements, which have real focus and a real accessible name for free.
+Conformance is not a nice-to-have that arrives with polish — it arrives with the DOM or it does not
+arrive.
+
 ## DOCTRINE
 
+- **falsifiable, survived** — `{rect, line, text}` is closed. A second format with no prose in it
+  fit without widening the set. Had RuneFort needed an arc or a gradient the honest move would have
+  been to widen the set on the record, not to special-case one renderer.
 - **measured** — a `.bend` document averages 1,067 bytes across the 20-document v0.1 corpus
   (min 300, max 4,224). A live window costs ~3 MB of VRAM for its colour target alone plus a
   process. The two are not the same kind of object and no scale claim should treat them as one.
