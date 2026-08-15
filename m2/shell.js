@@ -837,6 +837,14 @@ function buildWorld(canvas) {
   const paperArg = new URLSearchParams(location.search).get('papers')
   if (paperArg === 'seed') {
     seedPapers().then((r) => { state.paperSeed = r }, (e) => { state.paperSeed = { error: String(e?.message ?? e) } })
+  } else if (paperArg === 'store') {
+    // Rung 5's instrument: ten thousand documents in a real IndexedDB store, of
+    // which one road's worth is streamed in.
+    setTimeout(() => {
+      import('./paper/bench.js')
+        .then((m) => m.runStoreBench())
+        .catch((e) => { state.paperBench = { error: String(e?.message ?? e) } })
+    }, 2500)
   } else if (paperArg === 'bench') {
     // Rung 4's instrument. Deferred a beat so the first frames -- shader compiles,
     // the road's own first draw -- are not folded into the N=0 baseline, which is

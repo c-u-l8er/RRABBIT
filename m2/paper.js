@@ -170,13 +170,23 @@ function placeMesh(p, m) {
   m.position.set(x, ROAD_Y + STAND_Y + H / 2, z)
 }
 
-function build(p) {
+// A PANE IS A RECORD UNTIL IT IS ON SCREEN.
+//
+// The first version added a frame and a post to the scene in `build()` for every
+// pane the moment it was placed, hidden or not. At the four hundred rung 4 sweeps
+// that is 800 objects; at the ten thousand this rung is about it is TWENTY
+// THOUSAND, and three.js visits every one of them per frame to discover it is
+// invisible. `visible = false` skips the draw, not the walk.
+//
+// So nothing enters the scene graph until a tier asks for it, and everything
+// leaves when the tier goes back to `hidden`. A pane that is not on your road now
+// costs one JS object and its document, and nothing else at all.
+function materialize(p) {
+  if (p.frame) return
   shared()
   p.frame = new THREE.Mesh(frameGeo, frameMat)
   p.frame.rotation.y = -p.side * 0.42
   p.post = new THREE.Mesh(postGeo, postMat)
-  scene.add(p.frame)
-  scene.add(p.post)
 
   const x = ws.laneX(p.district) + p.side * STAND_X
   const z = dashZ(p.dash)
@@ -184,6 +194,18 @@ function build(p) {
   // z-fight with the document it is framing.
   p.frame.position.set(x + p.side * 0.5, ROAD_Y + STAND_Y + H / 2, z - 0.5)
   p.post.position.set(x, ROAD_Y + (STAND_Y + H / 2) / 2, z)
+  scene.add(p.frame)
+  scene.add(p.post)
+}
+
+function dematerialize(p) {
+  if (!p.frame) return
+  scene.remove(p.frame)
+  scene.remove(p.post)
+  // Geometry and material are SHARED across every pane and must not be disposed
+  // here -- disposing them would take the next pane's furniture with it.
+  p.frame = null
+  p.post = null
 }
 
 // Put a document on a road. Returns the pane, or a reason -- never a silent no-op,
@@ -224,7 +246,8 @@ export function placePaper(doc, { district = state.district, side = 1, dash = nu
     paintMesh: null, cardMesh: null, cardGeo: null, frame: null, post: null, last: null,
   }
   papers.set(key, p)
-  build(p)
+  // No scene objects yet. `syncPaper` materialises it if and when it is on screen,
+  // which is what makes placing ten thousand of them cheap.
   return { ok: true, paper: p, dash: at, side: s }
 }
 
@@ -233,7 +256,7 @@ export function removePaper(key) {
   if (!p) return false
   releasePaint(p)
   releaseCard(p)
-  for (const m of [p.frame, p.post]) if (m) scene.remove(m)
+  dematerialize(p)
   papers.delete(key)
   return true
 }
@@ -251,29 +274,122 @@ const READ_Z = 1500
 // Past this a pane is not drawn at all. A card is cheap; it is not free, and a
 // road can be longer than anyone can see down.
 const KEEP_Z = 9000
+// How many panes may hold a canvas at once, regardless of how many are close
+// enough to qualify. See the second pass in `syncPaper` for the measurement that
+// set it: this is a frame-budget cap, not a view-distance one.
+const PAINT_MAX = 24
 
 // Reconcile every pane with where the camera is. THIS IS THE CULLING: a pane on
 // another road holds no pixels, a pane far up this one is a card, and only what is
 // close is laid out. All three are decisions about what to DRAW -- the document
 // stays in `papers` either way, which is what makes the cheap tiers cheap.
 export function syncPaper() {
+  // Entering a road is what triggers a chunk load. Checked here rather than hooked
+  // to a navigation event because every path that changes `state.district` -- the
+  // gates, the map, a replay, a track switch -- lands in this loop on the next
+  // frame anyway, and one check beats five call sites that must each remember.
+  if (store && state.district !== resident) streamDistrict(state.district)
+
   const camZ = 260 + (state.roadZ ?? 0)
+
+  // FIRST PASS: distance, and the two tiers distance alone can decide.
+  const near = []
   for (const p of papers.values()) {
     const here = p.district === state.district && !state.overview
     const d = Math.abs(dashZ(p.dash) - camZ)
-    const want = !here || d > KEEP_Z ? 'hidden' : d < READ_Z ? 'paint' : 'card'
-    if (want === p.tier) continue
-    p.tier = want
+    p.dist = d
+    if (!here || d > KEEP_Z) p.want = 'hidden'
+    else if (d >= READ_Z) p.want = 'card'
+    else { p.want = 'paint'; near.push(p) }
+  }
 
-    if (want === 'paint') { releaseCard(p); ensurePaint(p) }
-    else if (want === 'card') { releasePaint(p); ensureCard(p) }
-    else { releasePaint(p); releaseCard(p) }
+  // SECOND PASS: the paint budget.
+  //
+  // MEASURED, and the reason this pass exists. With distance as the only criterion
+  // a 500-pane road put 128 documents at the paint tier at once -- 128 canvases,
+  // 128 textures, 128 materials -- and the best-case frame went from 17 ms to
+  // 33 ms. The bound held (canvases tracked what was in view, not the corpus) and
+  // the bound was still too loose: READ_Z asks "could this be read from here",
+  // which at a shallow angle down a long road is true of far more panes than
+  // anyone is actually reading.
+  //
+  // So distance decides eligibility and COUNT decides the tier. The nearest
+  // PAINT_MAX are laid out; everything else in range is a card, which it was
+  // going to look like at that distance anyway.
+  if (near.length > PAINT_MAX) {
+    near.sort((a, b) => a.dist - b.dist)
+    for (let i = PAINT_MAX; i < near.length; i++) near[i].want = 'card'
+  }
 
-    const vis = want !== 'hidden'
-    if (p.frame) p.frame.visible = vis
-    if (p.post) p.post.visible = vis
+  for (const p of papers.values()) {
+    if (p.want === p.tier) continue
+    p.tier = p.want
+    if (p.want === 'paint') { releaseCard(p); materialize(p); ensurePaint(p) }
+    else if (p.want === 'card') { releasePaint(p); materialize(p); ensureCard(p) }
+    else { releasePaint(p); releaseCard(p); dematerialize(p) }
   }
 }
+
+// ---- district streaming (rung 5) --------------------------------------------
+//
+// A DISTRICT IS THE CHUNK, and the workspace graph already drew the boundaries --
+// you are always standing in exactly one, and its exits are its neighbours. So
+// streaming is not a spatial grid laid over the world; it is the partition the
+// world already had.
+//
+// Entering a district loads its records and leaves every other district's panes
+// unbuilt. That is what keeps `papers` -- and therefore the per-frame loop in
+// `syncPaper` -- proportional to the road you are on rather than to the corpus.
+
+let store = null
+let resident = null
+let streaming = false
+const streamStats = { loads: 0, lastMs: null, lastCount: null, error: null }
+
+export function useStore(s) {
+  store = s
+  resident = null
+}
+
+// Bring `district` in and drop whatever was resident. Idempotent, and a no-op
+// without a store so the bench and the demo seed keep working unstreamed.
+export function streamDistrict(district = state.district) {
+  if (!store || streaming || district === resident || !district) return false
+  streaming = true
+  const prev = resident
+  resident = district
+  const t0 = performance.now()
+
+  // The OUTGOING district is dropped first and synchronously. Loading before
+  // dropping would hold two districts at once, which is precisely the peak this
+  // rung exists to avoid -- and the peak is what runs a host out of memory, not
+  // the steady state.
+  if (prev) for (const [k, p] of [...papers]) if (p.district === prev) removePaper(k)
+
+  return store.chunk(district).then((recs) => {
+    for (const r of recs) {
+      placePaper(r.doc, { district: r.district, side: r.side, dash: r.dash, format: r.format, unslotted: true })
+    }
+    syncPaper()
+    streamStats.loads++
+    streamStats.lastMs = +(performance.now() - t0).toFixed(1)
+    streamStats.lastCount = recs.length
+    streamStats.error = null
+    return recs.length
+  }).catch((e) => {
+    streamStats.error = String(e?.message ?? e)
+    return 0
+  }).finally(() => {
+    streaming = false
+  })
+}
+
+// Is a chunk load in flight? A caller that reports pane counts without asking this
+// is reporting a snapshot taken mid-stream: the outgoing district's panes are
+// already dropped and the incoming district's have not landed, so the honest state
+// of the world reads as zero.
+export const streamBusy = () => streaming
+export const streamResident = () => resident
 
 // Raycast targets, for travel.js's pointer pass. Same shape as `rampMeshes`.
 export function paperMeshes() {
@@ -298,8 +414,15 @@ export const paperReport = () => ({
   // Canvases actually held, which is the number the lazy-allocation change exists
   // to keep small. It should equal the paint-tier count and nothing more.
   paintCanvases: [...papers.values()].filter((p) => p.canvas).length,
+  // Objects actually in the scene graph. three.js walks every one of these per
+  // frame whether or not it draws, so this -- not `count` -- is the number that
+  // has to stay bounded as the corpus grows.
+  sceneObjects: [...papers.values()].reduce((n, p) =>
+    n + (p.frame ? 2 : 0) + (p.paintMesh ? 1 : 0) + (p.cardMesh ? 1 : 0), 0),
+  paintMax: PAINT_MAX,
   atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
+  stream: { resident, ...streamStats, store: store?.kind ?? null },
   bench: state.paperBench ?? null,
   seed: state.paperSeed ?? null,
 })

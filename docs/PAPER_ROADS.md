@@ -227,7 +227,7 @@ Smallest first, each rung falsifiable on its own.
 | 2 | `paper.js` — panes on a road slot | **done** — 5 panes on the road in the FreeBSD guest, both tiers visible (§13) |
 | 3 | `.rune` panes via the same seam | **done** — `node test/rune-layout.mjs`, 59 assertions; 4 real floors, 15 rooms, **no fourth command kind** |
 | 4 | the **card** tier + a shared atlas | **done** — 400 panes, best-case frame flat, 56 canvases not 400 (§14) |
-| 5 | IndexedDB store + district-chunk streaming | 10k panes placed, measured |
+| 5 | IndexedDB store + district-chunk streaming | **done** — 10,000 documents, 500 on the road, 24 canvases (§15) |
 | 6 | `CSS3DRenderer` **read** tier | text selectable in the pane you stand in |
 | 7 | WRL wiring (§9) | two roads with the same arrangement seal to the same id |
 
@@ -414,8 +414,99 @@ because the bound is the road ahead, not the corpus.
 - The bench measures rAF intervals. It is not a profiler and cannot say *where* time went — only
   whether it grows with N.
 
+## 15. Rung 5 — ten thousand documents, and three instruments that lied first
+
+`?papers=store` seeds a real IndexedDB store and streams one road's chunk out of it. Measured in the
+guest:
+
+```
+store            idb
+corpus           10000 documents across 24 districts
+written/refused  10000 / 0
+open / write     55.9 ms / 2336.7 ms
+chunk load       204.8 ms          <- entering the road
+resident panes   500               (bounded by the DISTRICT)
+scene objects    1386              (bounded by what is DRAWN)
+paint canvases   24                (bounded by a BUDGET)
+tiers            paint 24 / card 438 / hidden 38
+atlas            5 pages, 438 cards, 5 textures
+frame            min 17.1 ms   med 152.04 ms   hz 0
+```
+
+**The question was never "can 10,000 panes be drawn"** — they cannot all be on one road and nobody
+would look at them. It was whether the cost of standing on a road is proportional to *that road* or
+to the corpus behind it. Three numbers answer it, and none of them moved with the corpus: 10,000
+stored, 500 resident, 24 canvases held.
+
+### 15.1 A pane is a record until it is on screen
+
+`build()` used to add a frame and a post to the scene the moment a pane was placed. At 400 that is
+800 objects; at 10,000 it is **twenty thousand**, and three.js visits every one per frame to discover
+it is invisible — `visible = false` skips the draw, not the walk. Nothing enters the scene graph now
+until a tier asks for it. A pane on another road costs one JS object and its document.
+
+### 15.2 The store is the first thing here that could not use `localStorage`
+
+`tracks.js`, `layout.js` and `workspaces.js` all persist to `localStorage`, which is 5–10 MB. A
+million documents is ~1 GB (§3), so this is the first part of the shell that had to reach for
+IndexedDB. The store is split adapter-from-logic — validation, chunking and the district index are
+pure and run under `node` (`test/store.mjs`, 55 assertions, 10k put in 15 ms), while `idbAdapter` and
+`memoryAdapter` are the two backs. Same discipline as injecting `measure` in `bend-layout.js`, and for
+the same reason: IndexedDB does not exist under `node`, so a store written straight against it could
+only ever be tested through the FreeBSD deploy loop.
+
+### 15.3 The bound that was true and still too loose
+
+With distance as the only criterion, a 500-pane road put **128** documents at the paint tier at once
+and best-case frame time went 17 ms → **33 ms**. The bound was working exactly as designed — canvases
+tracked what was in view rather than the corpus — and it was still wrong, because `READ_Z` asks
+"could this be read from here", which down a long road at a shallow angle is true of far more panes
+than anyone is reading.
+
+So distance now decides *eligibility* and **count decides the tier**: the nearest `PAINT_MAX = 24` are
+laid out and everything else in range is a card, which is what it looked like at that distance anyway.
+128 canvases → 24, and 33.16 ms → 17.10 ms, back to one vsync.
+
+> **A bound can be correct and still be the wrong bound.** "Bounded by what is in view" was true the
+> whole time; it just was not a frame budget.
+
+### 15.4 Three instruments that produced plausible wrong numbers
+
+Rung 5 cost more cycles to *measure* than to build, and every one of them was the instrument rather
+than the code:
+
+1. **A stale overlay reads exactly like a fresh one.** A `Ctrl+R` swallowed by the `beforeunload`
+   dialog left the previous run's panel on screen. Caught only because two runs reported timings
+   agreeing to three decimal places — which is impossible. The overlay now prints `ran at <ISO>` and
+   `+N ms after load`. Same failure class as the stopped counter in `TRACKS_HANDOFF.md` §3.
+2. **A snapshot taken mid-stream reads as an empty world.** One run reported `resident=watch loads=1
+   got=500` beside `resident panes 0` — four numbers that look contradictory and are not. The shell
+   had moved district, the auto-stream dropped the outgoing panes *synchronously* and was still
+   fetching the incoming ones. Every count was correct for the instant sampled, and that instant was
+   the gap between two districts. The bench now waits for `!streamBusy() && streamResident() ===
+   state.district` and prints `settled` / `IN FLIGHT`.
+3. **The shell moves district during startup, later than any settle window.** Three attempts to bind
+   the chunk to "the district the shell is on" all came back `seeded into home / district now build`.
+   The `arrived` hook takes the camera to a newly adopted window and clients connect on their own
+   schedule. Racing it was the wrong shape; **every real road gets a chunk** instead — which is also
+   what a real corpus looks like, since documents live on the road they belong to and not on the one
+   you happen to boot into.
+
+### 15.5 What rung 5 did not establish
+
+- `med 152 ms` is still noise-dominated (§14.1) and is not a per-pane cost. The `min` is the estimator.
+- Nothing was measured above 10,000. The claim is that cost tracks the road rather than the corpus,
+  evidenced at 10k; it is not a claim about a million.
+- The chunk load (~200 ms) blocks nothing but is not incremental — entering a road with a very large
+  chunk would show up as a hitch. Paging a chunk is not built.
+
 ## DOCTRINE
 
+- **measured** — with a 10,000-document store, standing on a road costs 500 records, 1,386 scene
+  objects and 24 canvases, and best-case frame time is one vsync. The corpus does not appear in any
+  of those three numbers.
+- **corrected** — "bounded by what is in view" was a true bound and the wrong one. A frame budget is
+  a count, not a distance. §15.3.
 - **measured** — best-case frame time is flat in N to within one vsync across N=0→400, and paint
   canvases are bounded by view distance (56) rather than by N. Both in the guest, brake verified off.
 - **corrected** — the median is not usable as a per-pane cost in this scene, and the first version of
