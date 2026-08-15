@@ -543,8 +543,12 @@ proxy in Chrome, 2026-08-14. 14 is exactly `tw - width`.
 
 **It grows with the pad, which is why resizing "adds" black edges.** Resize that
 same window to 1200 wide in a 1280 frame — pad 80 — and `blackRight` goes to
-**83**. Push the stamped coded size far enough ahead of the surface and the sign
-samples almost nothing but padding, which is a window that is simply black.
+**83**. Push the stamped coded size ahead of the surface and more of the sign samples
+padding — **but this alone cannot reach a wholly black window**, and it was
+briefly claimed here that it could. The stamp's own guard is `cw < sw * 2`, so
+`padX < width` always, so the sampled window always overlaps the picture. Worst
+case is somewhere under half. A window that is black *all over* is the dead
+texture handle below, not this.
 
 ### Check it where it matters before changing the default
 

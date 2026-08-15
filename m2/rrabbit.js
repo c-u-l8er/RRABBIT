@@ -522,11 +522,20 @@ function adoptSurfaceTexture(rs, crop) {
   // numbers -- and dividing the UVs by the decoder's one is dividing by a
   // texture that does not exist.
   //
-  // `__codedSize` is kept as a DIAGNOSTIC (`__views().coded`) because decoder
-  // coded size vs destination size is a real thing to be able to compare. It is
-  // no longer arithmetic.
-  const tw = rs.texture?.size?.width || rs.__codedSize?.w || width
-  const th = rs.texture?.size?.height || rs.__codedSize?.h || height
+  // `__codedSize` is kept as a DIAGNOSTIC ONLY (`__views().decoderCoded` and
+  // `codedFromThisSurface`) because decoder coded size vs destination size is a
+  // real thing to compare. It is not arithmetic anywhere.
+  // AND THE DECODER'S NUMBER IS NOT A SECOND OPINION. This fell back to
+  // `rs.__codedSize` when `rs.texture.size` was falsy, which reads as if the two
+  // were both candidates for the same fact. They are not: one is the allocation,
+  // the other is a global that belongs to whichever surface decoded last.
+  // `Texture.size` starts at ZERO_SIZE, so the fallback is reachable -- before
+  // any pass has run -- and reaching it would put a foreign number in the
+  // denominator at exactly the moment a sign is first built. The surface's own
+  // size is the honest answer there, and it makes tw === width, which is the
+  // unpadded case every shm client is in anyway.
+  const tw = rs.texture?.size?.width || width
+  const th = rs.texture?.size?.height || height
   // WHICH CORNER THE PICTURE IS IN -- DERIVED, and it is the ORIGIN.
   //
   // This was CHOSEN before, from one photograph ("a 613-wide surface in a
