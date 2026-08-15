@@ -158,7 +158,18 @@ export function lastRampZ(district) {
   return z
 }
 
-export const exitZOf = (district) => Math.min(lastWindowZ(district), lastRampZ(district)) - GATE_GAP
+// The furthest pane down a road. Panes are a third slot occupant (see `papers`)
+// and the gate has to clear them for the same reason it clears windows: the exit
+// is the END of the road, and a document standing past it reads as a road that
+// kept going after it ended.
+export function lastPaperZ(district) {
+  let z = 0
+  for (const p of papers.values()) if (p.district === district) z = Math.min(z, dashZ(p.dash))
+  return z
+}
+
+export const exitZOf = (district) =>
+  Math.min(lastWindowZ(district), lastRampZ(district), lastPaperZ(district)) - GATE_GAP
 
 // How many dashes a road needs: enough to run past its own exit gate, and never
 // fewer than enough to carry its furthest ramp. Capped, because the count is a

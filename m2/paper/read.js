@@ -53,10 +53,16 @@ export function attachRead(ctx) {
   layer.id = 'paper-read-layer'
   layer.style.cssText = [
     'position:fixed', 'inset:0', 'z-index:35',
-    // POINTER EVENTS OFF UNTIL A PANE IS OPEN. The layer covers the whole viewport;
-    // left interactive it would eat every click meant for the road, the gantry and
-    // the cockpit -- the same fault the flat-mode `swallow` had when it exempted
-    // only `#map` (TRACKS_HANDOFF.md §3).
+    // POINTER EVENTS OFF, ALWAYS, ON THE LAYER. Reported: "clicking anywhere on
+    // the dashboard does nothing". The layer is `inset:0`, so flipping IT to
+    // `auto` while a pane was open made the whole viewport eat every click meant
+    // for the road, the gantry and the cockpit -- while the pane itself, a few
+    // hundred pixels of it, was the only thing that needed them.
+    //
+    // This is the same fault the flat-mode `swallow` had when it exempted only
+    // `#map` (TRACKS_HANDOFF.md §3), and the comment that used to sit here CITED
+    // that fault while committing it. The layer never takes the pointer; only the
+    // pane's own root element does, in `openRead`.
     'pointer-events:none',
   ].join(';')
   document.body.appendChild(layer)
@@ -99,7 +105,8 @@ export function openRead(pane, { resolve } = {}) {
   object.scale.setScalar(SCALE)
   scene3d.add(object)
 
-  layer.style.pointerEvents = 'auto'
+  // The PANE takes the pointer. The layer never does.
+  root.style.pointerEvents = 'auto'
   current = { pane, object, root }
 
   // TAKE THE KEYBOARD FROM THE CLIENTS. Greenfield binds keydown/keyup to its own
@@ -120,7 +127,6 @@ export function closeRead() {
   if (!current) return false
   scene3d.remove(current.object)
   current.root.remove()
-  layer.style.pointerEvents = 'none'
   current = null
   hooks.shellKeyboard?.(false)
   return true

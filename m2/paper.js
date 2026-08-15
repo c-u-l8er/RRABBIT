@@ -73,7 +73,11 @@ const keyOf = (district, side, dash) => `${district}:${side > 0 ? 'r' : 'l'}:${d
 let postGeo = null, postMat = null, frameGeo = null, frameMat = null, paintGeo = null
 function shared() {
   if (postGeo) return
-  postGeo = new THREE.BoxGeometry(6, STAND_Y + H / 2, 6)
+  // STAND_Y, NOT STAND_Y + H/2. The post runs from the road to the pane's BOTTOM
+  // EDGE; the taller version put its top at the pane's CENTRE, so 98 units of post
+  // stood up through the middle of every document. Reported as "the post is
+  // sticking through the screen", which is exactly what it was.
+  postGeo = new THREE.BoxGeometry(6, STAND_Y, 6)
   postMat = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 })
   frameGeo = new THREE.PlaneGeometry(W + 10, H + 10)
   frameMat = new THREE.MeshBasicMaterial({ color: 0x2de2e6 })
@@ -208,7 +212,7 @@ function materialize(p) {
   // Half a unit behind the pane along its own normal, so the border does not
   // z-fight with the document it is framing.
   p.frame.position.set(x + p.side * 0.5, ROAD_Y + STAND_Y + H / 2, z - 0.5)
-  p.post.position.set(x, ROAD_Y + (STAND_Y + H / 2) / 2, z)
+  p.post.position.set(x, ROAD_Y + STAND_Y / 2, z)
   scene.add(p.frame)
   scene.add(p.post)
 }

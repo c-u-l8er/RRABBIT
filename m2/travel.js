@@ -16,9 +16,12 @@
 
 import * as THREE from 'three'
 import { createAxisEventFromWheelEvent } from '@gfld/compositor'
-import { state, signs, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
+import { state, signs,
+  papers, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
+import { paperMeshes } from './paper.js'
+import { apply as applyOp } from './ops.js'
 import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
 import { rampMeshes, dashActionOf, setRampHover } from './ramps.js'
@@ -2190,7 +2193,7 @@ function installInput() {
     // upright loses to the upright and a ramp board in front of a window takes the
     // click -- whatever is nearest wins, which is what everything else in a world
     // does.
-    const meshes = [...gantryMeshes(), ...rampMeshes(), ...liveSigns()]
+    const meshes = [...gantryMeshes(), ...rampMeshes(), ...liveSigns(), ...paperMeshes()]
     return raycaster.intersectObjects(meshes, false)[0] ?? null
   }
 
@@ -2290,7 +2293,25 @@ function installInput() {
     if (!hit) return
     const action = actionAt(hit)
     if (action) return doGantryAction(action)
-    flattenTo(signs.get(hit.object.userData.signKey).milepost)
+
+    // A PANE IS ENTERED THROUGH THE SEAM, exactly as a program enters one. This
+    // is the click OP_VOCABULARY_DRAFT.md §9 is about: the pointer emits the same
+    // `read` op `window.__op` does, and the log cannot tell them apart except by
+    // the `by` field it records and never consults.
+    const paperKey = hit.object.userData.paperKey
+    if (paperKey) {
+      const p = papers.get(paperKey)
+      if (p) applyOp({ op: 'read', district: p.district, side: p.side, dash: p.dash }, { by: 'pointer' })
+      return
+    }
+
+    // GUARDED, because the raycast now returns things that are not windows. It
+    // read `signs.get(key).milepost` unconditionally, so any hit without a
+    // `signKey` threw inside the handler -- and a listener that throws stops
+    // handling clicks, which does not read as an exception, it reads as a
+    // dashboard whose buttons stopped working.
+    const sign = signs.get(hit.object.userData.signKey)
+    if (sign) flattenTo(sign.milepost)
   })
 
   // A HOVER HAS TO BE ABLE TO END, and on a canvas that fills the window the ways
