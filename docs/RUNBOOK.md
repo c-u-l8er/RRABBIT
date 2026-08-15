@@ -591,3 +591,74 @@ does not remap — Greenfield's keydown/keyup are bound to the canvas and its
 `focus`/`blur` handlers are the routing (`hooks.shellKeyboard`). Gating it would
 not fix a route, it would stop every keystroke reaching every application, since
 there is no shell-side sender to let through.
+
+---
+
+## 10. "It does not update immediately" — the proxy parks the first frame
+
+A native client's next paint is granted by **compositor-proxy's own clock**
+(§7): `wl_surface.frame` is intercepted and answered from `FrameFeedback`, never
+forwarded. Before queueing a callback, `commitNotify` asks whether the browser is
+still alive by comparing the last encoder-feedback message against a window, and
+a surface that fails goes on `parkedFeedbackClockQueue`.
+
+**That queue has no timer.** The clock tick walks `feedbackClockQueue` only, so a
+park lasts until the next feedback message arrives — and the browser sends those
+from `setInterval(feedbackLoop, 1000)`, only for a surface that has already
+completed a decode.
+
+Two thresholds were wrong, and both are now patched
+(`patches/greenfield-frame-feedback-park.diff`, applied by
+`tools/patch-compositor-proxy.mjs`):
+
+1. `clientFeedbackTimestamp` started at **0** — "last heard from at the epoch" —
+   so **every surface failed the test on its first commit**, however healthy the
+   browser was. **A menu is a new surface every time it opens**, which is why one
+   paints and then sits still.
+2. **1500 ms against a 1000 ms sender** is one and a half sending periods of
+   margin. A main thread that slips half a second — a guest doing software H.264
+   decode of a full-screen window does that routinely — trips it while the
+   browser is working perfectly, and pays a full parked second. Now 5000.
+
+The parking itself is kept: it is real backpressure for a browser that has gone
+away.
+
+Measured on this machine, one window, proxy on loopback, by counting the branch:
+
+| | parked | ran | worst stale |
+|---|---|---|---|
+| before | **1** | 33 | **2031 ms** |
+| after | **0** | 42 | 0 |
+
+### Ask the window how long it took
+
+```js
+__lat()      // { n, samples, p50, p90, max, pendingMs } — ms from keypress to picture
+```
+
+The clock starts on a keydown or press and stops on the next decoded frame **for
+the surface you are standing in** — armed only while flat, and matched by
+renderState, because five `simple-shm` clients paint continuously and a timer
+stopped by "any pass" reports a millisecond or two forever and proves the
+opposite of the truth.
+
+Host, eight keystrokes into a flattened gnome-text-editor: **p50 40 ms → 21 ms**
+across the patch. On the image, run it there — `pendingMs` staying non-zero means
+the picture is not late, it is not coming, which is `__fed()`'s question, not
+this one.
+
+### What was ruled out, so it is not re-checked
+
+- **The idle brake** — `pace()` returns 0 whenever `mode !== 'driving'`, so a
+  flattened window runs at full rate and `flushPace()` releases any deferral on
+  any input.
+- **The stubbed `gfScene.render`** — the upload runs from
+  `Renderer.updateRenderStatesPixelContent`, before the scene render, so
+  suppressing the scene cannot delay a pixel.
+- **The `InputQueue` gate** — bounded by one rAF: `renderFrame` is cleared inside
+  its own `.then`, and `ensureQueueDrain` falls back to a fresh `createRenderFrame()`.
+- **KCP adding a hop** — `Channel.send` does `kcp.send()` + `kcp.flush(false)`,
+  which emits an unsent segment immediately; the 100 ms is the *update* interval.
+- **WebCodecs holding frames** — both decoder configs set `optimizeForLatency`.
+- **A surface that can never send feedback** — `sendFeedback` resets `durations`
+  to `[avgDuration]`, so once one frame decodes the array is never empty again.

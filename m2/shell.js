@@ -1593,12 +1593,79 @@ function tallyFed(renderState) {
   else fedByRenderState.set(renderState, { n: 1, was: 0, at: 0 })
 }
 
+// INPUT TO PICTURE, IN MILLISECONDS -- the one number "it does not update
+// immediately" is actually about.
+//
+// Measured on the host it is ~36 ms (58/22/52/37/1/36 over six keystrokes into a
+// flattened gnome-text-editor), which is two frames and invisible. Reported from
+// the image it is plainly visible. Same code, so the difference is in what the
+// guest's browser and the encoder cost, and NEITHER of those can be argued about
+// from here -- they have to be read off the machine that is slow.
+//
+// The clock starts on a keystroke or a press and stops on the next decoded frame
+// FOR THE SURFACE YOU ARE STANDING IN. That last part is the whole reason this
+// is not a one-liner: five simple-shm clients paint continuously, so a timer
+// stopped by "any pass" would report a millisecond or two forever and prove the
+// opposite of the truth. Armed only while flat, for the same reason.
+const lat = { pending: 0, samples: [], n: 0, missed: 0 }
+
+function markInput() {
+  if (state.mode !== 'flat') return
+  // FIRST press of a burst, not the last: holding a key repeats, and restarting
+  // the clock on each repeat would measure the gap between repeats instead.
+  if (!lat.pending) lat.pending = performance.now()
+}
+
+function markPicture(renderState) {
+  if (!lat.pending || state.mode !== 'flat') return
+  // Only the surface being typed into. Walked rather than cached because a
+  // view object is replaced when a surface is remapped, and a cached one would
+  // silently stop matching -- which reads as "no frames" rather than as a stale
+  // handle. The walk is behind the `pending` guard, so it costs nothing except
+  // in the few frames after an actual keystroke.
+  let mine = null
+  for (const s of signs.values()) {
+    if (s.district === state.flatDistrict && s.milepost === state.flatMilepost) { mine = s; break }
+  }
+  if (!mine || mine.view?.renderStates?.[SCENE_ID] !== renderState) return
+  const dt = performance.now() - lat.pending
+  lat.pending = 0
+  lat.n++
+  lat.samples.push(Math.round(dt))
+  if (lat.samples.length > 40) lat.samples.shift()
+}
+
+for (const ev of ['keydown', 'pointerdown']) {
+  window.addEventListener(ev, markInput, { capture: true, passive: true })
+}
+
+// HOW LONG FROM A KEYSTROKE TO THE PICTURE THAT ANSWERS IT.
+//
+// `p50`/`p90` rather than a mean, because the complaint is about the slow ones
+// and a mean hides them behind the fast ones. `pending` non-zero at read time
+// means a press is still unanswered -- if it stays non-zero the picture is not
+// late, it is not coming, which is a different fault (see `__fed`).
+window.__lat = () => {
+  const s = [...lat.samples].sort((a, b) => a - b)
+  const at = (q) => (s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))] : null)
+  return {
+    mode: state.mode,
+    n: lat.n,
+    samples: [...lat.samples],
+    p50: at(0.5),
+    p90: at(0.9),
+    max: s.length ? s[s.length - 1] : null,
+    pendingMs: lat.pending ? Math.round(performance.now() - lat.pending) : 0,
+  }
+}
+
 function fenceScenePasses(gfScene) {
   for (const mime of ['video/h264', 'image/bitmap', 'image/png']) {
     const real = gfScene[mime].bind(gfScene)
     gfScene[mime] = (contents, renderState) => {
       passes[mime] = (passes[mime] ?? 0) + 1
       tallyFed(renderState)
+      markPicture(renderState)
       // Shape-agnostic: greenfield has moved this field around, and a probe that
       // throws while measuring is worse than no probe.
       try {

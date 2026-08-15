@@ -1,0 +1,51 @@
+A surface is not stale before it has ever been heard from
+
+A native client's next paint is granted by compositor-proxy's own clock:
+`wl_surface.frame` is intercepted and answered from `FrameFeedback`, never
+forwarded to the browser. Before queueing a callback, `commitNotify` asks
+whether the browser is still alive by comparing the last encoder-feedback
+message against a 1500 ms window, and a surface that fails goes on
+`parkedFeedbackClockQueue`.
+
+THAT QUEUE HAS NO TIMER. The clock tick walks `feedbackClockQueue` only, so a
+park lasts until the next feedback message arrives -- and the browser sends
+those from `setInterval(feedbackLoop, 1000)`, and only for a surface that has
+already completed a decode.
+
+Two things follow, and both were measured rather than reasoned.
+
+1. `clientFeedbackTimestamp` starts at **0**, which reads as "last heard from at
+   the epoch". So every surface fails the test on its FIRST commit, however
+   healthy the browser is. Measured with one window, a proxy on loopback and a
+   browser on the same machine:
+
+       PARKSTATS parked=1 ran=33 worstStaleMs=2031
+
+   One park, at the start, on a pipeline that was never late. A menu is a new
+   surface every time it opens, so a menu paints once and then sits still --
+   photographed.
+
+2. 1500 ms against a 1000 ms sender is one and a half sending periods of
+   margin. A main thread that slips half a second -- which a guest doing
+   software H.264 decode of a full-screen window does routinely -- trips the
+   test while the browser is working perfectly, and pays a full parked second.
+
+The parking itself is kept: it is real backpressure for a browser that has gone
+away. It is the two thresholds that were wrong.
+
+--- a/src/FrameFeedback.ts
++++ b/src/FrameFeedback.ts
+@@ constructor
+     parkedFeedbackClockQueue: ... = []
+-    clientFeedbackTimestamp = 0
++    // Not 0: that reads as "last heard from at the epoch" and parks the first
++    // commit of every surface before the browser has had any chance to report.
++    clientFeedbackTimestamp = performance.now()
+     frameCallbackDelay = 0
+@@ commitNotify
+-        const clockQueue = performance.now() - this.clientFeedbackTimestamp > 1500
++        // Five missed messages is a browser that has gone away; one and a half
++        // is jitter. The sender's period is 1000 ms (EncoderFeedback.js).
++        const clockQueue = performance.now() - this.clientFeedbackTimestamp > 5000
+             ? this.parkedFeedbackClockQueue
+             : feedbackClockQueue

@@ -119,6 +119,50 @@ function readProcInfoRRABBIT(pid) {
     return undefined;
 }`,
   },
+  {
+    // See patches/greenfield-frame-feedback-park.diff and runbook section 10.
+    //
+    // A native client's next paint is granted by the proxy's own clock, and
+    // `commitNotify` first asks whether the browser is still alive by comparing
+    // the last encoder-feedback message against a 1500 ms window. A surface that
+    // fails that test has its frame callbacks put on `parkedFeedbackClockQueue`,
+    // WHICH HAS NO TIMER -- the tick only ever walks `feedbackClockQueue`, so a
+    // park lasts until the next feedback message arrives and not one moment
+    // less.
+    //
+    // `clientFeedbackTimestamp` starts at 0, so EVERY SURFACE FAILS THE TEST ON
+    // ITS FIRST COMMIT. Measured on this machine with one healthy window and a
+    // proxy on loopback: `parked=1 ran=33 worstStaleMs=2031`. The browser was
+    // never late; the clock had simply never been set. A menu is a new surface
+    // every time it opens, which is why one paints and then sits still.
+    name: 'Frame feedback: a surface is not stale before it has ever been heard from',
+    file: 'node_modules/@gfld/compositor-proxy/dist/FrameFeedback.js',
+    why: 'Without this every new surface has its first frame callbacks parked with nothing scheduled to release them, so a window paints once and waits up to a second for the browser\'s next once-per-second feedback message.',
+    before: `    clientFeedbackTimestamp = 0;
+    parkedFeedbackClockQueue = [];`,
+    after: `    // RRABBIT patch -- see patches/greenfield-frame-feedback-park.diff.
+    // Was 0, which reads as "last heard from at the epoch" and parks the first
+    // commit of every surface before the browser has had any chance to report.
+    clientFeedbackTimestamp = node_perf_hooks_1.performance.now();
+    parkedFeedbackClockQueue = [];`,
+  },
+  {
+    // The second half, and the one that bites on a slow machine rather than on
+    // every surface. The browser sends feedback from `setInterval(..., 1000)`,
+    // so a 1500 ms window is one and a half sending periods of margin. Any main
+    // thread that slips half a second -- which a guest doing software H.264
+    // decode of a full-screen window does routinely -- trips the test while the
+    // browser is working perfectly, and pays a full parked second for it.
+    //
+    // 5000 still notices a browser that has genuinely gone away, within five
+    // seconds, which is what the check is for. It does not remove the parking.
+    name: 'Frame feedback: five missed messages is gone, one and a half is jitter',
+    file: 'node_modules/@gfld/compositor-proxy/dist/FrameFeedback.js',
+    why: 'A 1500 ms window against a 1000 ms sender parks a healthy client on ordinary main-thread jitter, and a park has no timer to release it.',
+    before: `        const clockQueue = node_perf_hooks_1.performance.now() - this.clientFeedbackTimestamp > 1500 ? this.parkedFeedbackClockQueue : feedbackClockQueue;`,
+    after: `        // RRABBIT patch -- 1500 -> 5000. See patches/greenfield-frame-feedback-park.diff.
+        const clockQueue = node_perf_hooks_1.performance.now() - this.clientFeedbackTimestamp > 5000 ? this.parkedFeedbackClockQueue : feedbackClockQueue;`,
+  },
 ]
 
 let applied = 0
