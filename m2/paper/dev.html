@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>paper panes — bendscript corpus</title>
+<!--
+  A DEV HARNESS FOR THE PAINTING HALF, and the reason it exists is that the 3D
+  shell cannot be opened on the dev host (TRACKS_HANDOFF.md §1). A 2-D canvas is
+  not a WebGL context, so everything up to "hang it on a road" can be looked at
+  here. Served from the ProjectAmp2 root so it can reach bendscript.com's corpus:
+  launch.json entry `paper-dev`, port 8132.
+-->
+<style>
+  body { background:#0a0c14; color:#d7dbe8; font:14px ui-sans-serif, system-ui, sans-serif; margin:0; padding:20px; }
+  h1 { font-size:16px; font-weight:700; color:#f2c14e; margin:0 0 4px; }
+  p.sub { color:#8b93a7; margin:0 0 18px; font-size:12px; }
+  .grid { display:flex; flex-wrap:wrap; gap:18px; }
+  figure { margin:0; }
+  canvas { display:block; border:1px solid #232838; background:#03040a; }
+  figcaption { font:11px ui-monospace, monospace; color:#8b93a7; margin-top:5px; max-width:512px; }
+  .ovf { color:#e2564d; }
+  .cards { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 24px; }
+</style>
+<h1>paper panes — the bendscript v0.1 corpus, laid out and painted</h1>
+<p class="sub" id="sub">loading…</p>
+
+<div class="cards" id="cards"></div>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+import { layoutBend, cardOf, THEME } from './bend-layout.js'
+import { paint, paintCard, measurerFor } from './paint.js'
+
+// Hardcoded because a static server has no readdir. The corpus is fixed at v0.1
+// by bendscript.com's own spec §8.2, so this list is as stable as the corpus is.
+const DOCS = [
+  '01-plain-prose', '02-heading-paragraph', '03-marks', '04-typed-link',
+  '05-document-edges', '06-list-quote-code', '07-memory-vocab', '08-nested-lists',
+  '09-embed-divider', '10-multi-mark-span', '11-untyped-link', '12-all-core-predicates',
+  '13-edge-meta', '14-supersedes-tombstone', '15-argument-vocab', '16-spec-vocab',
+  '17-cross-doc-edges', '18-unicode-emoji', '19-large-document', '20-adversarial',
+]
+const BASE = '/bendscript.com/test-corpus/v0.1/'
+const W = 512, H = 340, DPR = 2
+
+// A deterministic stand-in for a resolver, so all four §6.4 states are visible on
+// one screen. The real shell asks its store; nothing here is fetched.
+const STATES = ['resolved', 'pending', 'broken', 'unauthorized']
+let n = 0
+const resolve = () => STATES[n++ % 4]
+
+function canvasFor(w, h) {
+  const c = document.createElement('canvas')
+  c.width = w * DPR; c.height = h * DPR
+  c.style.width = w + 'px'; c.style.height = h + 'px'
+  const ctx = c.getContext('2d')
+  ctx.scale(DPR, DPR)
+  return { c, ctx }
+}
+
+const grid = document.getElementById('grid')
+const cards = document.getElementById('cards')
+let painted = 0, overflowed = 0, unknown = 0, cmds = 0
+const t0 = performance.now()
+
+for (const name of DOCS) {
+  const doc = await (await fetch(BASE + name + '.bend.json')).json()
+
+  const { c, ctx } = canvasFor(W, H)
+  const r = layoutBend(doc, { width: W, height: H, measure: measurerFor(ctx), resolve })
+  paint(ctx, r.commands)
+
+  const fig = document.createElement('figure')
+  fig.appendChild(c)
+  const cap = document.createElement('figcaption')
+  cap.innerHTML = `${name} · ${r.commands.length} cmds · h=${Math.round(r.height)}` +
+    (r.overflow ? ' · <span class="ovf">overflows</span>' : '') +
+    (r.stats.unknown ? ` · ${r.stats.unknown} unknown kinds` : '') +
+    (r.truncated ? ' · <span class="ovf">TRUNCATED</span>' : '')
+  fig.appendChild(cap)
+  grid.appendChild(fig)
+
+  const cd = canvasFor(190, 74)
+  paintCard(cd.ctx, cardOf(doc), { width: 190, height: 74, theme: THEME })
+  cards.appendChild(cd.c)
+
+  painted++; cmds += r.commands.length
+  if (r.overflow) overflowed++
+  unknown += r.stats.unknown
+}
+
+document.getElementById('sub').textContent =
+  `${painted} documents · ${cmds} draw commands · ${overflowed} overflow · ` +
+  `${unknown} unknown block kinds (fallback-rendered) · ${Math.round(performance.now() - t0)}ms total`
+window.__paper = { painted, cmds, overflowed, unknown }
+</script>
