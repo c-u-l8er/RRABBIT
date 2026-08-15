@@ -49,3 +49,28 @@ away. It is the two thresholds that were wrong.
 +        const clockQueue = performance.now() - this.clientFeedbackTimestamp > 5000
              ? this.parkedFeedbackClockQueue
              : feedbackClockQueue
+
+---
+
+And a third, on the same clock: a countdown that subtracts zero never finishes.
+
+The tick subtracts `tickInterval` from each pending callback's
+`frameCallbackDelay` and fires it at <= 0. The period is programmed from the
+browser -- `nextTickInterval = Math.floor(clientRefreshInterval)` -- and
+`refreshInterval` is sampled in EncoderFeedback.js from a rAF chain that starts
+at 0 and only re-samples on a change of more than 16 ms:
+
+    if (Math.abs(newRefreshInterval - refreshInterval) > 16) refreshInterval = newRefreshInterval
+
+A page whose frame deltas are consistently under 16 ms -- a display faster than
+about 62 Hz, or any run of quick frames -- never lifts `refreshInterval` off 0.
+`tickInterval` is then 0, every tick subtracts 0, and once `frameCallbackDelay`
+has grown past zero (it is `max(encode, decode)`, so it does as soon as anything
+has been measured) NO FRAME CALLBACK IS EVER DELIVERED AGAIN.
+
+Not observed on this host, which samples ~16.7 ms and lands the other side of the
+threshold. It is one comparison away and the failure is total.
+
+@@ updateDelay
+-        nextTickInterval = Math.floor(clientRefreshInterval)
++        nextTickInterval = Math.max(1, Math.floor(clientRefreshInterval))

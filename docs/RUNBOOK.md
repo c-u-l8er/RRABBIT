@@ -124,6 +124,14 @@ What is left is why the browser-side compositor's registry burst never reaches
 logs `Data connection closed. Code: 1001.` a few ms after the client connects,
 which is the next thread to pull. Still OPEN.
 
+**And it is probably not a Firefox fault at all.** `gnome-text-editor` shows the
+identical symptom — connects, `appStates: open`, `no window yet after 12s`,
+never maps — whenever it is launched into a proxy session that has already been
+reloaded against. Restart the proxy AND reload the page (§1) and the same entry
+maps every time. So the thing to chase is the session/channel setup that goes
+stale, and Firefox is simply the client that loses that race every time instead
+of sometimes. Do not start from "what does Firefox need".
+
 ---
 
 ## 3. Measurements that settle arguments

@@ -163,6 +163,34 @@ function readProcInfoRRABBIT(pid) {
     after: `        // RRABBIT patch -- 1500 -> 5000. See patches/greenfield-frame-feedback-park.diff.
         const clockQueue = node_perf_hooks_1.performance.now() - this.clientFeedbackTimestamp > 5000 ? this.parkedFeedbackClockQueue : feedbackClockQueue;`,
   },
+  {
+    // A COUNTDOWN THAT SUBTRACTS ZERO NEVER FINISHES, and this one can.
+    //
+    // The tick subtracts `tickInterval` from each pending callback's
+    // `frameCallbackDelay` and fires it at <= 0. The period is programmed from
+    // the browser: `nextTickInterval = Math.floor(clientRefreshInterval)`, where
+    // `refreshInterval` is sampled in EncoderFeedback.js from a rAF chain that
+    // starts at 0 and only re-samples on a change of more than 16 ms
+    // (`if (Math.abs(newRefreshInterval - refreshInterval) > 16)`).
+    //
+    // So a page whose frame deltas are consistently UNDER 16 ms -- a display
+    // faster than about 62 Hz, or any run of quick frames -- never lifts
+    // `refreshInterval` off 0. Then `tickInterval` is 0, every tick subtracts 0,
+    // and once `frameCallbackDelay` has grown past zero (it is
+    // `max(encode, decode)`, so it does the moment anything has been measured)
+    // NO FRAME CALLBACK IS EVER DELIVERED AGAIN. The window paints its first
+    // frames and stops for good.
+    //
+    // Not observed here -- this host samples ~16.7 ms and lands the other side of
+    // the threshold -- but it is one comparison away and the failure is total, so
+    // it is floored rather than left to the display's refresh rate.
+    name: 'Frame feedback: a tick of zero never finishes the countdown',
+    file: 'node_modules/@gfld/compositor-proxy/dist/FrameFeedback.js',
+    why: 'A browser reporting a refresh interval under 16 ms leaves the tick at 0, the countdown subtracts nothing, and every later frame callback is withheld for ever.',
+    before: `        nextTickInterval = Math.floor(clientRefreshInterval);`,
+    after: `        // RRABBIT patch -- floored at 1. See patches/greenfield-frame-feedback-park.diff.
+        nextTickInterval = Math.max(1, Math.floor(clientRefreshInterval));`,
+  },
 ]
 
 let applied = 0
