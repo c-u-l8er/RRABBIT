@@ -93,10 +93,36 @@ not a crash, not the DBus handoff of §2 above, and not Firefox's own
 `wayland-proxy` between its processes.
 
 `appStates: open` with `views: []` is §3's signature: the signalling socket
-connected and no surface was ever created. The next thing to look at is which
-globals Firefox binds and what it is waiting on before it will map a toplevel —
-`wl_output`'s `done`, `wl_shm` formats, or a `zwp_linux_dmabuf` roundtrip that
-never answers. Not yet done.
+connected and no surface was ever created.
+
+**`WAYLAND_DEBUG=1` in the app's `env` block settles where it stops**, because the
+proxy pipes child stderr into its own log. The whole trace is two lines:
+
+```
+-> wl_display#1.get_registry(new id wl_registry#2)
+-> wl_display#1.sync(new id wl_callback#3)
+```
+
+and then nothing. **Not one `wl_registry.global` comes back, and the
+`wl_callback.done` never arrives.** Firefox is blocked on its first roundtrip,
+before it has seen a single interface name.
+
+That rules out most of the obvious list, and they should not be re-checked:
+
+- **not a missing global** — it never received the list to find one missing;
+- **not an interface version** — same;
+- **not GDK falling back to X11** — `GDK_BACKEND=wayland` pinned, and the trace
+  above is Wayland protocol;
+- **not Firefox's own `wayland-proxy`** — `MOZ_DISABLE_WAYLAND_PROXY=1` changes
+  nothing;
+- **not a startup race against the protocol channel** — a `sh -c 'sleep 4; exec
+  firefox …'` entry behaves identically. The channel is created when the client
+  connects, so delaying the process delays both sides equally.
+
+What is left is why the browser-side compositor's registry burst never reaches
+*this* client when it reaches `gnome-text-editor` on the same proxy. The proxy
+logs `Data connection closed. Code: 1001.` a few ms after the client connects,
+which is the next thread to pull. Still OPEN.
 
 ---
 
