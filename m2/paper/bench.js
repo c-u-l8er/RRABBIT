@@ -430,3 +430,130 @@ function draw(out) {
     `${v.medianNoiseDominated ? 'NON-MONOTONIC = noise-dominated, do not quote as per-pane cost' : 'monotonic'}\n` +
     `tainted rows: ${v.taintedRows} (hz != 0 means the idle brake was capping)   took ${v.tookMs} ms`
 }
+
+
+
+// ---- rung 6: the read tier, driven through the seam --------------------------
+//
+// Seeds panes, then enters one BY APPLYING AN OP -- not by calling `openRead`.
+// That is the whole demonstration: a program has no API of its own here. It emits
+// the same op a pointer does, and the log shows both indistinguishably except for
+// the `by` field the seam records and never consults.
+export async function runReadDemo() {
+  const { seedPapers } = await import('../paper.js')
+  const { apply, log, plan, opCounts, precheck } = await import('../ops.js')
+  const { papers } = await import('../world.js')
+
+  // SEED EVERY ROAD, for the reason §15.4 of PAPER_ROADS.md already recorded: the
+  // shell's `arrived` hook takes the camera to a newly adopted window on the
+  // client's schedule, which lands after any settle window worth waiting for. The
+  // first run of this demo seeded `home`, the shell moved to `build`, and the
+  // panel reported `matched=0` beside five perfectly good panes. Racing it was
+  // wrong in rung 5 and it is wrong here.
+  await settleDistrict()
+  const roads = ws.list().map((n) => n.id).filter(Boolean)
+  let placed = 0
+  const refused = []
+  for (const road of roads) {
+    const r = await seedPapers(road)
+    placed += r.placed
+    refused.push(...r.refused)
+  }
+  const seeded = { placed, refused, roads }
+  await sampleFrames(20)
+
+  // The NEAREST pane on this road. Reading whatever comes first out of a Map would
+  // make the screenshot depend on iteration order.
+  const all = [...papers.values()]
+  const here = all.filter((p) => p.district === state.district)
+  here.sort((a, b) => (a.dist ?? 1e9) - (b.dist ?? 1e9))
+  const target = here[0]
+  // `target null` with five panes placed is not diagnosable from the outside, and
+  // the last three rungs each lost a cycle to exactly that. So the panel prints
+  // what the filter SAW: how many panes the bench can reach, which roads they
+  // claim, and which road the shell says it is on.
+  const seen = {
+    papersSize: papers.size,
+    reachable: all.length,
+    districts: [...new Set(all.map((x) => x.district))],
+    stateDistrict: state.district,
+    matched: here.length,
+  }
+
+  const attempts = []
+  if (target) {
+    const { dashZ } = await import('../world.js')
+    // PARK IN FRONT OF IT, THEN READ IT -- two of the draft's own sixteen verbs and
+    // one proposed one, all through `apply`. Driving to a thing before entering it
+    // is what a human does; the program does the same, in the same order, through
+    // the same door, which is the §9 claim in one sequence.
+    const steps = [
+      { op: 'park', road: target.district, z: dashZ(target.dash) + 140 },
+      { op: 'read', district: target.district, side: target.side, dash: target.dash },
+    ]
+    // Precheck the whole plan first -- the draft's §2 split, roads before anything
+    // moves. A route whose second step names a dead pane never takes the first.
+    attempts.push(['precheck plan', JSON.stringify(precheck(steps))])
+    for (const st of steps) attempts.push([`apply ${st.op}`, JSON.stringify(apply(st, { by: 'program' }))])
+    // And a refusal, so the panel shows the seam saying no as well as yes.
+    attempts.push(['apply bad dash', JSON.stringify(apply({ op: 'read', district: target.district, side: 1, dash: 999 }, { by: 'program' }))])
+    await sampleFrames(20)
+  } else {
+    attempts.push(['no pane', JSON.stringify(seeded)])
+  }
+
+  await sampleFrames(20)
+  const rep = paperReport()
+  const out = {
+    kind: 'read',
+    seeded,
+    reading: rep.reading,
+    target: target ? target.key : null,
+    format: target?.format ?? null,
+    attempts,
+    seen,
+    log: log(),
+    plan: plan(),
+    counts: opCounts(),
+    at: new Date().toISOString(),
+    uptimeMs: Math.round(performance.now()),
+  }
+  state.paperBench = out
+  drawRead(out)
+  return out
+}
+
+function drawRead(o) {
+  if (typeof document === 'undefined') return
+  let el = document.getElementById('paper-seam')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'paper-seam'
+    el.style.cssText = [
+      'position:fixed', 'right:16px', 'top:16px', 'z-index:60',
+      'background:rgba(3,4,10,.94)', 'border:1px solid #f2c14e', 'border-radius:6px',
+      'padding:12px 14px', 'color:#d7dbe8',
+      'font:12px ui-monospace,"DejaVu Sans Mono",monospace', 'white-space:pre',
+      'pointer-events:none', 'max-width:46vw',
+    ].join(';')
+    document.body.appendChild(el)
+  }
+  el.textContent = [
+    'THE SEAM — rung 6',
+    `  ran at ${o.at}  (+${o.uptimeMs} ms)`,
+    '',
+    `  seeded         ${o.seeded.placed} panes across ${o.seeded.roads.length} roads` +
+      (o.seeded.refused.length ? `  refused ${o.seeded.refused.join(',')}` : ''),
+    `  target         ${o.target}  [${o.format}]`,
+    `  reading        ${o.reading ?? '(none)'}`,
+    `  seen           size=${o.seen.papersSize} reachable=${o.seen.reachable} matched=${o.seen.matched}`,
+    `  pane roads     ${o.seen.districts.join(', ') || '(none)'}`,
+    `  state.district ${o.seen.stateDistrict}`,
+    '',
+    ...o.attempts.map(([k, v]) => `  ${k.padEnd(16)} ${v}`),
+    '',
+    `  op log — ${o.counts.length} entries, ${o.counts.applied} applied, ${o.counts.refused} refused`,
+    ...o.log.map((e) => `    ${String(e.t).padStart(6)}ms  ${String(e.op).padEnd(7)} by=${e.by}`),
+    `  plan (${o.plan.length}): ${o.plan.map((e) => e.op).join(' -> ') || '(empty)'}`,
+  ].join('\n')
+}

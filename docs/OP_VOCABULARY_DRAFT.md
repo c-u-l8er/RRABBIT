@@ -182,6 +182,70 @@ have been published.
 5. **Sequencing.** This is a refactor before a feature — visible progress pauses. That cost is real
    and it is a scheduling decision, not a technical one.
 
+## 8b. WHAT THE EXPERIMENT FOUND (added 2026-08-15, after rung 6)
+
+**§9's test has been run.** `m2/ops.js` implements the seam; `test/ops.mjs` is the experiment. This
+section reports the result. **Nothing here is ratified** — §8's five questions are still yours.
+
+Rung 6 of `PAPER_ROADS.md` forced the issue rather than choosing the timing: the moment a pane
+accepts a click, that click either passes the same seam a recorded op does, or the recorder acquires
+a second vocabulary — which is exactly the accretion §0 exists to stop.
+
+### 8b.1 The seam held
+
+Four ops built: **`drive`** and **`park`** (two of the sixteen in §3, wired to the same `goDistrict`
+a gate calls) and **`read`** / **`unread`** (proposed, §8b.3). Three consumers — a pointer, a
+program, a replay — reach an identical world through one `apply()`. `test/ops.mjs` §3 asserts it by
+running the same sequence all three ways and comparing.
+
+**No consumer needed a special case.** §6 of that file asserts it mechanically: the same op applied
+under six different `by` values produces byte-identical effects, so the seam cannot grow a branch on
+who is calling without a test failing. `by` is recorded and never consulted.
+
+`replay()` is a `for` loop over `apply` — which is the strongest form the claim can take, because
+anything replay needed that `apply` lacked would appear right there as a branch.
+
+### 8b.2 The finding: §5's reasoning about `out` needs one more condition
+
+§5 drops `out` from the plan because *"replaying it is a no-op the driver already performs"*. That
+reasoning is sound, and it is **not sound in general**. Measured (`test/ops.mjs` §4):
+
+A human reads pane A, leaves, reads pane B. `unread` is not plannable, so the plan is
+`[read A, read B]`. If `read` **refuses** while another pane is open — which is what
+`PAPER_ROADS.md` §5 originally specified, as a hard refusal — then **replaying that plan fails at
+step 2** with the first pane still open. The human succeeded; the replay of their own recording does
+not.
+
+> **A non-plannable op is only safe to drop when the op that follows it IMPLIES it.**
+
+`out` satisfies this because entering a window implicitly leaves the previous one. `unread` did not,
+until `read` was changed to **supersede** rather than refuse. The refusal is still enforced — one
+pane at a time — but by the second read closing the first, not by saying no.
+
+This is a condition §5 should state, whatever the ruling. It is cheap to satisfy and silent when
+violated: the recording looks fine and only fails when replayed.
+
+### 8b.3 The sixteen are already not sixteen
+
+`read` and `unread` are not in §3's table, because §3 predates paper roads. A whole class of object
+now stands on roads and can be entered, and it needed two verbs nobody had budgeted.
+
+That is **evidence for freezing rather than against it** — but it sharpens §8.1: the question is not
+"can we enumerate the verbs" (we could not, one rung later) but "is the set closed **at a version**,
+with additions being a deliberate act". `test/ops.mjs` §8 pins the table's contents, so adding a verb
+breaks a test and has to be argued for rather than slipping in because a feature needed it.
+
+### 8b.4 What is still open, unchanged
+
+- **§4's load-bearing item is NOT done.** Preconditions are hand-written JS closures. They are total
+  (a throw is caught and reported as a refusal) and bounded, but they are **not data and not sealed
+  into a track's identity** — so a track can still be edited to weaken its own guard. The seam makes
+  this easier to fix later; it does not fix it.
+- **Nothing was rerouted.** travel.js's own callers are untouched; the ops call the same functions a
+  gate does. So this is additive and reversible, and the "refactor before a feature" cost in §8.5 has
+  not been paid — it is still ahead.
+- The recording still covers 4 of ~15 verbs (§8b.1's four are the seam's, not the recorder's).
+
 ## 9. DOCTRINE
 
 - **proposed** — that a closed op vocabulary applied through one seam is what makes tracks

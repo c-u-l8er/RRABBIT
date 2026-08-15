@@ -124,7 +124,9 @@ import {
 } from './rrabbit.js'
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
-import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPapers, clearPapers } from './paper.js'
+import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPapers, clearPapers, registerPaperOps, paperUnread } from './paper.js'
+import { attachRead, renderRead } from './paper/read.js'
+import { apply as applyOp, log as opLog, plan as opPlan, opCounts, replay as replayOps, precheck as precheckOps, register as registerOp } from './ops.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 import {
   attachReel, openReel, closeReel, reelReport,
@@ -823,6 +825,32 @@ function buildWorld(canvas) {
   attachGantry(ctx)
   attachRamps(ctx)
   attachPaper(ctx)
+  attachRead(ctx)
+  registerPaperOps()
+  // THE DRAFT'S OWN VERBS THROUGH THE SAME DOOR. `drive` and `park` are two of the
+  // sixteen in OP_VOCABULARY_DRAFT.md §3 and they are wired here rather than left
+  // to the pane ops alone, because §9's test is about whether ONE seam serves
+  // unrelated consumers. Two nav ops and two pane ops sharing `apply` is the
+  // evidence; one op proving it about itself would not be.
+  //
+  // These do not replace travel.js's own callers. Nothing in the shell was
+  // rerouted -- the seam calls the same `goDistrict` a gate does, so the op path
+  // is additive and cannot destabilise driving.
+  registerOp('drive', {
+    pre: (op) => (ws.has(op.road) ? true : 'OP_NO_ROAD'),
+    perform: (op) => { goDistrict(op.road, { atHead: true }) },
+  })
+  registerOp('park', {
+    pre: (op) => {
+      if (!ws.has(op.road)) return 'OP_NO_ROAD'
+      return Number.isFinite(op.z) ? true : 'OP_BAD_Z'
+    },
+    perform: (op) => { goDistrict(op.road, { at: op.z }) },
+  })
+  // Escape inside a read pane leaves it, and does so THROUGH THE SEAM -- read.js
+  // raises the intent and paper.js turns it into an op, so there is no path into
+  // or out of a pane that the log does not see.
+  hooks.paperUnread = paperUnread
   attachBack(backTarget)
   syncGantries()
   syncRamps()
@@ -837,6 +865,12 @@ function buildWorld(canvas) {
   const paperArg = new URLSearchParams(location.search).get('papers')
   if (paperArg === 'seed') {
     seedPapers().then((r) => { state.paperSeed = r }, (e) => { state.paperSeed = { error: String(e?.message ?? e) } })
+  } else if (paperArg === 'read') {
+    setTimeout(() => {
+      import('./paper/bench.js')
+        .then((m) => m.runReadDemo())
+        .catch((e) => { state.paperBench = { error: String(e?.message ?? e) } })
+    }, 2500)
   } else if (paperArg === 'store') {
     // Rung 5's instrument: ten thousand documents in a real IndexedDB store, of
     // which one road's worth is streamed in.
@@ -1988,6 +2022,11 @@ function frame(now = 0) {
 
     renderer.resetState()
     renderer.render(scene, camera)
+    // The CSS3D layer draws AFTER the WebGL frame and shares its camera. It is a
+    // no-op unless a pane is being read, so the cost when nobody is reading is one
+    // null check -- and the layer's own `pointer-events` stays off, which is what
+    // keeps it from eating clicks meant for the road.
+    renderRead()
     state.frames++
     leaveNeutralVertexState()
 
@@ -2336,6 +2375,14 @@ window.__ramps = () => rampReport()
 // point: "there are 40 panes" and "40 panes are being laid out" are different
 // facts and only the second one is a cost. See docs/PAPER_ROADS.md.
 window.__papers = () => paperReport()
+
+// THE SEAM, from the console. `__op` is the same door a click uses -- which is the
+// point of OP_VOCABULARY_DRAFT.md §9's test and the reason there is no separate
+// "programmatic API" here. The vocabulary IS the API.
+window.__op = (op) => applyOp(op, { by: 'program' })
+window.__opLog = () => ({ log: opLog(), plan: opPlan(), counts: opCounts() })
+window.__opReplay = (steps) => replayOps(steps ?? opPlan(), { by: 'replay' })
+window.__opPrecheck = (steps) => precheckOps(steps ?? opPlan())
 window.__seedPapers = (d) => seedPapers(d)
 window.__clearPapers = () => clearPapers()
 window.__placePaper = (doc, opts) => placePaper(doc, opts)

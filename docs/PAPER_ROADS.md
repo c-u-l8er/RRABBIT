@@ -228,7 +228,7 @@ Smallest first, each rung falsifiable on its own.
 | 3 | `.rune` panes via the same seam | **done** — `node test/rune-layout.mjs`, 59 assertions; 4 real floors, 15 rooms, **no fourth command kind** |
 | 4 | the **card** tier + a shared atlas | **done** — 400 panes, best-case frame flat, 56 canvases not 400 (§14) |
 | 5 | IndexedDB store + district-chunk streaming | **done** — 10,000 documents, 500 on the road, 24 canvases (§15) |
-| 6 | `CSS3DRenderer` **read** tier | text selectable in the pane you stand in |
+| 6 | `CSS3DRenderer` **read** tier | **done** — real DOM, real focus, §5.4/§5.5 conformance, driven through the seam (§16) |
 | 7 | WRL wiring (§9) | two roads with the same arrangement seal to the same id |
 
 Rungs 1–3 do not need the op vocabulary. **Rung 6 does** — the moment a pane accepts a click, that
@@ -500,8 +500,91 @@ than the code:
 - The chunk load (~200 ms) blocks nothing but is not incremental — entering a road with a very large
   chunk would show up as a hitch. Paging a chunk is not built.
 
+## 16. Rung 6 — the tier that can claim conformance, and the seam it forced
+
+This rung was gated on the op-vocabulary ruling and was built anyway, at Travis's direction. It is
+built **as the experiment §9 of that draft asked for**, not as ratification: see
+`OP_VOCABULARY_DRAFT.md` §8b, which is the deliverable for the ruling. Nothing in §8 of the draft is
+answered here.
+
+Measured in the guest:
+
+```
+seeded         20 panes across 4 roads
+target         build:r:8  [bend]      reading  build:r:8
+precheck plan  {"ok":true,"i":-1}
+apply park     {"ok":true,"op":"park","result":null}
+apply read     {"ok":true,"op":"read","result":{"ok":true,"pane":"build:r:8"}}
+apply bad dash {"ok":false,"why":"OP_NO_PANE","detail":"read"}
+op log — 2 entries, 2 applied, 1 refused
+    0ms  park  by=program        1ms  read  by=program
+plan (2): park -> read
+```
+
+The read pane on screen is real DOM: it scrolls, and it shows the paragraph *past* the point where
+the canvas tier had stopped and drawn its `more below` mark. A pane you can read to the end of is the
+difference this tier makes, and it is visible in one frame beside a canvas pane that cannot.
+
+### 16.1 This is the only tier that can claim Runefort conformance
+
+§12.2 recorded that a canvas pane **cannot** be a conformant Runefort renderer: §5.4 requires every
+room to be focusable with a stable accessible name, §5.5 requires focus to move along neighbour
+edges, and a canvas has no focus and no accessibility tree. Those do not arrive with polish.
+
+The read tier emits real elements, so it can. `test/dom-spec.mjs` is the claim, as **93 assertions
+against the element tree rather than a sentence in a document**:
+
+- §5.1 — CSS grid lines from `position`/`size` (0-based protocol → 1-based grid, the off-by-one that
+  silently moves every room up and left), and deterministic DOM order.
+- §5.3 — `runefort-state-cold|warm|hot|fault|idle`, with unknown classes degrading to cold per §2.4.
+- §5.4 — every room `tabindex="0"` with a non-empty `aria-label`, falling back to the id.
+- §5.5 — neighbours on the element, **symmetric for navigation** even where the declaration is
+  directed. A directed-only adjacency makes focus a trap: you can arrow in and not back out.
+
+BendScript gains what a canvas could never give it either — real `h1`–`h6` (the outline a screen
+reader navigates by), real anchors, and `aria-disabled` on broken references, which is a thing a
+colour cannot say.
+
+### 16.2 The element spec, and why it is not DOM
+
+`bendToSpec` / `runeToSpec` return `{tag, attrs, children}` trees; `read.js` mounts them. Same move
+as the draw commands one layer down, and for the same reason: `node` has no `document`, and the
+properties that most need testing here are exactly the ones a screenshot cannot check. "It is
+accessible" is the canonical claim that rots silently.
+
+### 16.3 Why the read tier supersedes instead of refusing
+
+§5 of this document originally specified "a pane MUST NOT be promoted to read tier while another is
+already there" as a **hard refusal**. `test/ops.mjs` §4 measured what that does to replay: a human
+who reads A, leaves, then reads B produces the plan `[read A, read B]` — `unread` is not plannable —
+and **replaying it refuses at step 2**. The recording is honest; replaying it fails.
+
+So `read` closes whatever is open. One pane at a time is still enforced; it is enforced by the
+second read closing the first. The general rule this produced is now in the draft's §8b.2: **a
+non-plannable op is only safe to drop when the op that follows it implies it.**
+
+### 16.4 What rung 6 did not do
+
+- **Nothing was rerouted.** The ops call the same `goDistrict` a gate calls; travel.js's own callers
+  are untouched. The seam is additive and reversible, so the refactor cost in the draft's §8.5 is
+  still ahead, not paid.
+- **Preconditions are still hand-written JS**, not the sealed data the draft's §4 asks for. Total and
+  bounded, but a track can still be edited to weaken its own guard.
+- **A pointer does not yet reach the seam.** The demo drives it with `by: 'program'`; the pane is
+  inert to clicks. Wiring the raycast is small, and it is the last thing that should happen before
+  the vocabulary is ruled on rather than the first.
+- CSS3D does not composite with WebGL depth, so the read pane is always in front. Correct for one
+  pane and wrong for two, which is why only one may be at this tier.
+
 ## DOCTRINE
 
+- **falsifiable, survived** — the seam serves three consumers with no per-consumer branch, asserted
+  mechanically rather than by inspection (`test/ops.mjs` §3 and §6). This is the draft's §9 test and
+  it passed.
+- **found** — a non-plannable op is only safe to drop from a plan when its successor implies it.
+  §5 of the draft is right about `out` and right for a reason it does not state.
+- **measured** — the read tier meets Runefort §5.1/§5.3/§5.4/§5.5 in 93 assertions. §12.2's statement
+  that a canvas tier cannot is unchanged and both remain true.
 - **measured** — with a 10,000-document store, standing on a road costs 500 records, 1,386 scene
   objects and 24 canvases, and best-case frame time is one vsync. The corpus does not appear in any
   of those three numbers.

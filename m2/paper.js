@@ -43,6 +43,8 @@ import { layoutBend, cardOf, THEME } from './paper/bend-layout.js'
 import { layoutRune, floorsOf, RUNE_THEME } from './paper/rune-layout.js'
 import { paint, paintCard, measurerFor } from './paper/paint.js'
 import { allocCard, freeCard, drawCard, planeFor, atlasReport, CARD_W, CARD_H } from './paper/atlas.js'
+import { openRead, closeRead, readingKey, isReading } from './paper/read.js'
+import { register as registerOp, apply as applyOp } from './ops.js'
 
 let scene = null
 export function attachPaper(c) {
@@ -168,6 +170,19 @@ function placeMesh(p, m) {
   const x = ws.laneX(p.district) + p.side * STAND_X
   const z = dashZ(p.dash)
   m.position.set(x, ROAD_Y + STAND_Y + H / 2, z)
+}
+
+// Where the read tier's DOM object stands: exactly where the quad it replaces
+// does. The CSS3D layer has its own scene and its own renderer but the SAME
+// camera, so a pose in world units is all it needs -- and using the quad's pose
+// rather than a fresh one is what makes reading a pane continuous with driving
+// past it instead of a modal that replaces the world.
+function readPoseOf(p) {
+  const x = ws.laneX(p.district) + p.side * STAND_X
+  return {
+    position: new THREE.Vector3(x, ROAD_Y + STAND_Y + H / 2, dashZ(p.dash)),
+    rotation: new THREE.Euler(0, -p.side * 0.42, 0),
+  }
 }
 
 // A PANE IS A RECORD UNTIL IT IS ON SCREEN.
@@ -321,7 +336,12 @@ export function syncPaper() {
     for (let i = PAINT_MAX; i < near.length; i++) near[i].want = 'card'
   }
 
+  // A PANE BEING READ IS NEVER RETIERED. Driving away from one would otherwise
+  // release the canvas under a DOM object that is still on screen, and the reader
+  // would be left holding a document whose backing had been collected.
+  const held = readingKey()
   for (const p of papers.values()) {
+    if (held && p.key === held) continue
     if (p.want === p.tier) continue
     p.tier = p.want
     if (p.want === 'paint') { releaseCard(p); materialize(p); ensurePaint(p) }
@@ -403,6 +423,41 @@ export function paperMeshes() {
 
 export const paperAt = (hit) => papers.get(hit?.object?.userData?.paperKey) ?? null
 
+// ---- the ops (rung 6) --------------------------------------------------------
+//
+// THE ONLY WAY A PANE IS ENTERED OR LEFT. Not one path for a click and another for
+// a replay -- `apply()` is the single door, and `test/ops.mjs` §3 is the assertion
+// that three consumers reach the same world through it.
+//
+// The preconditions are TOTAL: a malformed world evaluates false, never throws
+// (OP_VOCABULARY_DRAFT.md §4). They are still hand-written JS rather than the
+// sealed data the draft asks for -- that is §4's open item and it is not answered
+// here.
+export function registerPaperOps() {
+  registerOp('read', {
+    pre: (op) => {
+      const p = papers.get(keyOf(op.district, op.side, op.dash))
+      if (!p) return 'OP_NO_PANE'
+      if (p.district !== state.district) return 'OP_PANE_NOT_HERE'
+      return true
+    },
+    perform: (op) => {
+      const p = papers.get(keyOf(op.district, op.side, op.dash))
+      p.readPose = readPoseOf(p)
+      // Force the paint tier under it, so leaving the read tier does not land on
+      // an empty frame while the canvas is laid out.
+      if (p.tier !== 'paint') { releaseCard(p); materialize(p); ensurePaint(p); p.tier = 'paint' }
+      return openRead(p)
+    },
+  })
+  registerOp('unread', { pre: () => true, perform: () => { closeRead(); return { ok: true } } })
+}
+
+// What Escape inside a read pane calls. A hook rather than a direct import because
+// read.js must not learn that the seam exists -- it draws a pane, it does not
+// decide what leaving one means.
+export const paperUnread = () => applyOp({ op: 'unread' }, { by: 'pointer' })
+
 // ---- the report --------------------------------------------------------------
 
 // `window.__papers()`. The tier breakdown is the point: "there are 400 panes" and
@@ -420,6 +475,7 @@ export const paperReport = () => ({
   sceneObjects: [...papers.values()].reduce((n, p) =>
     n + (p.frame ? 2 : 0) + (p.paintMesh ? 1 : 0) + (p.cardMesh ? 1 : 0), 0),
   paintMax: PAINT_MAX,
+  reading: readingKey(),
   atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
   stream: { resident, ...streamStats, store: store?.kind ?? null },
