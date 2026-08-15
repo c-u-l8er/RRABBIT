@@ -226,7 +226,7 @@ Smallest first, each rung falsifiable on its own.
 | 1b | `paint.js` + `dev.html` — commands → 2-D canvas | **done** — all 20 painted, 479 commands, 0 blank |
 | 2 | `paper.js` — panes on a road slot | **done** — 5 panes on the road in the FreeBSD guest, both tiers visible (§13) |
 | 3 | `.rune` panes via the same seam | **done** — `node test/rune-layout.mjs`, 59 assertions; 4 real floors, 15 rooms, **no fourth command kind** |
-| 4 | the **card** tier + a shared atlas | frame time flat in N (§4) |
+| 4 | the **card** tier + a shared atlas | **done** — 400 panes, best-case frame flat, 56 canvases not 400 (§14) |
 | 5 | IndexedDB store + district-chunk streaming | 10k panes placed, measured |
 | 6 | `CSS3DRenderer` **read** tier | text selectable in the pane you stand in |
 | 7 | WRL wiring (§9) | two roads with the same arrangement seal to the same id |
@@ -346,8 +346,80 @@ quad, post). What is unmeasured is whether that holds at N in the hundreds. **Ru
   ("Leave page" is focused), and a screenshot that still shows the old road may simply be a dialog
   nobody answered.
 
+## 14. Rung 4 — the number, and the estimator that had to be changed to get it
+
+`?papers=bench` sweeps N ∈ {0, 25, 50, 100, 200, 400}, samples 50 rAF intervals per step after a
+12-frame warmup, and **draws its own result on the glass** — the guest has no console, so an overlay
+is what makes a screenshot a valid instrument again: what is photographed is a number the page
+computed rather than a needle being interpreted.
+
+Measured in the FreeBSD guest, two runs:
+
+```
+   N |  med ms |  p95 ms |  min ms | hz | paint/card/hid | cvs | atlas
+   0 |   50.31 |   85.42 |   16.08 |  0 |          0/0/0 |   0 | 0p 0
+  25 |   50.29 |   84.34 |   16.06 |  0 |         0/0/25 |   0 | 0p 0
+  50 |   50.22 |   68.32 |   16.08 |  0 |         0/0/50 |   0 | 0p 0
+ 100 |   51.28 |  152.90 |   17.06 |  0 |        56/44/0 |  56 | 1p 44
+ 200 |  118.50 |  186.84 |   17.08 |  0 |       56/144/0 |  56 | 2p 144
+ 400 |  118.63 |  186.18 |   17.02 |  0 |      56/332/12 |  56 | 4p 332
+```
+
+### 14.1 The median is the wrong estimator, and the bench said so itself
+
+First run's medians: 67.5 / 51.5 / 50.7 / 118.3 / 118.6 / 102.4. **N=25 was faster than N=0**, and the
+sequence is non-monotonic in both runs. A cost curve cannot go down when you add work, so what those
+numbers measure is the scene's noise floor — live clients decoding, software rasterisation in a VM —
+and not panes. The first version of this bench printed `87.15 us/pane` from exactly that data. It was
+noise wearing a decimal point.
+
+**Frame-time noise is one-sided.** Nothing makes a frame finish sooner than the work in it allows;
+stalls only ever make frames longer. So the **minimum** is the robust estimator — the closest thing
+to "what this frame costs when nothing else interferes" — and contamination can only push the other
+samples up and away from it. The bench now reports `min` as the verdict and prints
+`NON-MONOTONIC = noise-dominated, do not quote as per-pane cost` beside the median so the retired
+mistake cannot be made again from the same table.
+
+Its resolution is one vsync. A best case pinned near 16.6 ms cannot resolve a cost below that, so the
+claim is a **bound**, not a zero.
+
+### 14.2 What the numbers say
+
+- **Best case: 16.08 ms at N=0 → 17.02 ms at N=400.** Delta 0.94 ms — under one frame of headroom for
+  four hundred documents.
+- **The cleanest rows are 100 → 400**, where panes were actually being drawn: min 17.06 → 17.08 →
+  17.02. Tripling N moved the best-case frame by **0.06 ms**.
+- `hz = 0` on every row in both runs, so the idle brake was never capping and these numbers are about
+  panes. That is a *recorded* fact, not an assumption — §13.1's failure was assuming it.
+
+### 14.3 The result that matters more than the frame time
+
+**`cvs` is 56 at N=100, at N=200 and at N=400.** Paint canvases are bounded by `READ_Z` — by what is
+close enough to read — and not by N. Before this rung every pane allocated a 640×420 canvas in
+`build()` whether or not it would ever be read: 400 panes was ~428 MB of backing store before the
+first frame, and the *card* tier, whose whole purpose is to be the cheap one, was paying the read
+tier's price.
+
+Now 400 panes hold 56 canvases plus 4 atlas pages (~124 MB against ~428 MB), and the 56 does not move
+when N does. **That is the property rung 5 rests on** — 10,000 panes will hold 56 canvases too,
+because the bound is the road ahead, not the corpus.
+
+### 14.4 Caveats, stated rather than discovered later
+
+- The N=25 and N=50 rows show every pane `hidden` in this run and `paint` in the first. Those steps
+  run while the shell is still in its opening shot, so their tier mix is not representative and they
+  are not evidence about drawing cost. The rows above 100 are.
+- 400 panes were placed **unslotted** at quarter-dash spacing. A real road's spacing rule allows ~23
+  per side, so this sweep is denser than any road will be. That is the right direction for a bound.
+- The bench measures rAF intervals. It is not a profiler and cannot say *where* time went — only
+  whether it grows with N.
+
 ## DOCTRINE
 
+- **measured** — best-case frame time is flat in N to within one vsync across N=0→400, and paint
+  canvases are bounded by view distance (56) rather than by N. Both in the guest, brake verified off.
+- **corrected** — the median is not usable as a per-pane cost in this scene, and the first version of
+  the bench quoted it as one. Frame noise is one-sided, so the minimum is the estimator.
 - **measured** — five panes render on a real road in the guest at two tiers. **Not measured** — what
   a pane costs per frame; §13.1 says why the obvious instrument cannot answer it.
 - **falsifiable, survived** — `{rect, line, text}` is closed. A second format with no prose in it

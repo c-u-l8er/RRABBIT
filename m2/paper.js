@@ -15,8 +15,21 @@
 // THE LAYOUT IS NOT IN THIS FILE, and that is the arrangement that made the work
 // testable. `paper/bend-layout.js` and `paper/rune-layout.js` have no THREE and no
 // DOM, so `node test/*.mjs` runs 204 assertions on a dev host that cannot open a GL
-// context. What is here is the part that genuinely needs the scene, and it is thin
-// on purpose.
+// context. What is here is the part that genuinely needs the scene.
+//
+// NOTHING EXPENSIVE IS ALLOCATED UNTIL A TIER ASKS FOR IT. The first version built
+// a 640x420 canvas in `build()` for every pane -- ~1.07 MB of backing store each,
+// whether or not the pane would ever be close enough to read. A thousand panes was
+// a gigabyte of canvas before the first frame, and the CARD tier, whose whole
+// purpose is to be the cheap one, was paying the read tier's price. Now:
+//
+//   paint tier -- own canvas, own texture, own material. Released on downgrade.
+//   card tier  -- a cell in the shared atlas. One texture and one material per 96.
+//   hidden     -- neither. A pane on another road holds no pixels at all.
+//
+// and the post, the frame and their materials are shared across every pane, because
+// they are identical and N copies of an identical box is N geometries for one
+// shape.
 //
 // A PANE IS A THIRD SLOT OCCUPANT. `world.js` `papers` is the registry and
 // `slotAt`/`slotFree` consult it, so a window cannot be placed on top of a pane.
@@ -29,19 +42,20 @@ import * as ws from './workspaces.js'
 import { layoutBend, cardOf, THEME } from './paper/bend-layout.js'
 import { layoutRune, floorsOf, RUNE_THEME } from './paper/rune-layout.js'
 import { paint, paintCard, measurerFor } from './paper/paint.js'
+import { allocCard, freeCard, drawCard, planeFor, atlasReport, CARD_W, CARD_H } from './paper/atlas.js'
 
 let scene = null
 export function attachPaper(c) {
   scene = c.scene
 }
 
-// Pixels of canvas. The pane is drawn once at this size and mapped onto a quad --
-// the world size below is independent, so a pane can be made physically bigger
-// without re-laying-out its text.
+// Pixels of canvas at the paint tier. The pane is laid out once at this size and
+// mapped onto a quad -- the world size below is independent, so a pane can be made
+// physically bigger without re-laying-out its text.
 const PX_W = 640
 const PX_H = 420
-// World units. Matched to the window signs beside them (rrabbit.js builds those
-// from the surface size) so a road carrying both does not read as two scales.
+// World units. Matched to the window signs beside them so a road carrying both
+// does not read as two scales.
 const W = 300
 const H = 197
 const ROAD_Y = -30
@@ -50,107 +64,153 @@ const STAND_Y = 34
 
 const keyOf = (district, side, dash) => `${district}:${side > 0 ? 'r' : 'l'}:${dash}`
 
+// ---- the shared furniture ---------------------------------------------------
+//
+// Built once, on first use. Every pane's post is the same box and every pane's
+// frame is the same quad, so N panes is one geometry each and not N.
+let postGeo = null, postMat = null, frameGeo = null, frameMat = null, paintGeo = null
+function shared() {
+  if (postGeo) return
+  postGeo = new THREE.BoxGeometry(6, STAND_Y + H / 2, 6)
+  postMat = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 })
+  frameGeo = new THREE.PlaneGeometry(W + 10, H + 10)
+  frameMat = new THREE.MeshBasicMaterial({ color: 0x2de2e6 })
+  // The paint tier's quad is the same size for every pane; only the MATERIAL
+  // differs (each has its own canvas). So the geometry is shared and the material
+  // is not, which is the opposite of the card tier.
+  paintGeo = new THREE.PlaneGeometry(W, H)
+}
+
 // ---- painting ---------------------------------------------------------------
 
-// The full read of a document. Returns what the layout reported so a caller can
-// see overflow and truncation rather than only the pixels.
-function repaint(p) {
-  const ctx = p.canvas.getContext('2d')
-  const measure = measurerFor(ctx)
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.clearRect(0, 0, PX_W, PX_H)
-
-  let r
-  if (p.format === 'rune') {
-    r = layoutRune(p.doc, { width: PX_W, height: PX_H, measure, theme: RUNE_THEME })
-  } else {
-    r = layoutBend(p.doc, { width: PX_W, height: PX_H, measure, theme: THEME, resolve: p.resolve })
-  }
-  paint(ctx, r.commands)
-
-  // OVERFLOW IS DRAWN, not only reported. A pane that runs out of box and stops
-  // looks exactly like a document that was that short, and on a road you cannot
-  // scroll to find out. A rule and a count is the smallest honest mark.
-  if (r.overflow) {
-    ctx.fillStyle = '#e2564d'
-    ctx.fillRect(0, PX_H - 3, PX_W, 3)
-    ctx.font = '11px ui-monospace, monospace'
-    ctx.fillText('more below', 10, PX_H - 8)
-  }
-
-  p.tex.needsUpdate = true
-  p.last = r
-  return r
+function layoutOf(p, width, height, measure) {
+  return p.format === 'rune'
+    ? layoutRune(p.doc, { width, height, measure, theme: RUNE_THEME })
+    : layoutBend(p.doc, { width, height, measure, theme: THEME, resolve: p.resolve })
 }
 
-function paintAsCard(p) {
-  const ctx = p.canvas.getContext('2d')
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  paintCard(ctx, p.card, { width: PX_W, height: PX_H, theme: THEME })
-  p.tex.needsUpdate = true
-}
-
-// ---- placing ----------------------------------------------------------------
-
-function build(p) {
+function ensurePaint(p) {
+  if (p.paintMesh) return
+  shared()
   p.canvas = document.createElement('canvas')
   p.canvas.width = PX_W
   p.canvas.height = PX_H
   // Not a bare CanvasTexture -- 640x420 is not a power of two and the pane
   // repaints when its tier changes. Same reason ramps.js gives.
   p.tex = canvasTexture(THREE, p.canvas)
+  p.mat = new THREE.MeshBasicMaterial({ map: p.tex, toneMapped: false })
 
-  p.mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(W, H),
-    new THREE.MeshBasicMaterial({ map: p.tex, toneMapped: false }),
-  )
-  // Turned in toward the driver, the same way and for the same reason a ramp board
-  // and a window sign are: a pane square to the road is edge-on until you are level
-  // with it, and by then you have driven past what it says.
-  p.mesh.rotation.y = -p.side * 0.42
-  p.mesh.userData.paperKey = p.key
+  const ctx = p.canvas.getContext('2d')
+  const r = layoutOf(p, PX_W, PX_H, measurerFor(ctx))
+  paint(ctx, r.commands)
 
-  p.frame = new THREE.Mesh(
-    new THREE.PlaneGeometry(W + 10, H + 10),
-    new THREE.MeshBasicMaterial({ color: 0x2de2e6 }),
-  )
-  p.frame.rotation.y = p.mesh.rotation.y
+  // OVERFLOW IS DRAWN, not only reported. A pane that runs out of box and stops
+  // looks exactly like a document that was that short, and on a road you cannot
+  // scroll to find out.
+  if (r.overflow) {
+    ctx.fillStyle = '#e2564d'
+    ctx.fillRect(0, PX_H - 3, PX_W, 3)
+    ctx.font = '11px ui-monospace, monospace'
+    ctx.fillText('more below', 10, PX_H - 8)
+  }
+  p.tex.needsUpdate = true
+  p.last = r
 
-  p.post = new THREE.Mesh(
-    new THREE.BoxGeometry(6, STAND_Y + H / 2, 6),
-    new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 }),
-  )
-
-  scene.add(p.frame)
-  scene.add(p.mesh)
-  scene.add(p.post)
-  position(p)
+  p.paintMesh = new THREE.Mesh(paintGeo, p.mat)
+  p.paintMesh.rotation.y = -p.side * 0.42
+  p.paintMesh.userData.paperKey = p.key
+  scene.add(p.paintMesh)
+  placeMesh(p, p.paintMesh)
 }
 
-function position(p) {
+function releasePaint(p) {
+  if (!p.paintMesh) return
+  scene.remove(p.paintMesh)
+  // The GEOMETRY is shared and must not be disposed. The material and texture are
+  // this pane's own and must be -- that asymmetry is the whole reason the two are
+  // separated above.
+  p.mat?.dispose?.()
+  p.tex?.dispose?.()
+  p.paintMesh = null
+  p.mat = null
+  p.tex = null
+  p.canvas = null
+}
+
+function ensureCard(p) {
+  if (p.cardMesh) return
+  shared()
+  p.cell = allocCard()
+  drawCard(p.cell, (ctx, w, h) => paintCard(ctx, p.card, { width: w, height: h, theme: THEME }))
+  p.cardGeo = planeFor(THREE, W, H, p.cell.uv)
+  p.cardMesh = new THREE.Mesh(p.cardGeo, p.cell.material)
+  p.cardMesh.rotation.y = -p.side * 0.42
+  p.cardMesh.userData.paperKey = p.key
+  scene.add(p.cardMesh)
+  placeMesh(p, p.cardMesh)
+}
+
+function releaseCard(p) {
+  if (!p.cardMesh) return
+  scene.remove(p.cardMesh)
+  // The geometry carries this pane's atlas rect so it IS its own; the material
+  // belongs to the atlas page and must be left alone.
+  p.cardGeo?.dispose?.()
+  freeCard(p.cell)
+  p.cardMesh = null
+  p.cardGeo = null
+  p.cell = null
+}
+
+// ---- placing ----------------------------------------------------------------
+
+function placeMesh(p, m) {
   const x = ws.laneX(p.district) + p.side * STAND_X
   const z = dashZ(p.dash)
-  const y = ROAD_Y + STAND_Y + H / 2
-  p.mesh.position.set(x, y, z)
+  m.position.set(x, ROAD_Y + STAND_Y + H / 2, z)
+}
+
+function build(p) {
+  shared()
+  p.frame = new THREE.Mesh(frameGeo, frameMat)
+  p.frame.rotation.y = -p.side * 0.42
+  p.post = new THREE.Mesh(postGeo, postMat)
+  scene.add(p.frame)
+  scene.add(p.post)
+
+  const x = ws.laneX(p.district) + p.side * STAND_X
+  const z = dashZ(p.dash)
   // Half a unit behind the pane along its own normal, so the border does not
   // z-fight with the document it is framing.
-  p.frame.position.set(x + p.side * 0.5, y, z - 0.5)
+  p.frame.position.set(x + p.side * 0.5, ROAD_Y + STAND_Y + H / 2, z - 0.5)
   p.post.position.set(x, ROAD_Y + (STAND_Y + H / 2) / 2, z)
 }
 
-// Put a document on a road. Returns the pane, or null with a reason -- never a
-// silent no-op, because "nothing appeared" is the one outcome that cannot be
-// debugged from the outside.
-export function placePaper(doc, { district = state.district, side = 1, dash = null, format = 'bend', resolve } = {}) {
+// Put a document on a road. Returns the pane, or a reason -- never a silent no-op,
+// because "nothing appeared" is the one outcome that cannot be debugged from the
+// outside.
+export function placePaper(doc, { district = state.district, side = 1, dash = null, format = 'bend', resolve, unslotted = false } = {}) {
   if (!scene) return { ok: false, why: 'PAPER_NO_SCENE' }
   if (!doc || typeof doc !== 'object') return { ok: false, why: 'PAPER_NO_DOC' }
   if (!ws.has(district)) return { ok: false, why: 'PAPER_NO_ROAD' }
 
   const s = side > 0 ? 1 : -1
   let at = dash
-  if (at == null) at = nextFreeSlot(district, s, 0, 'window')
-  else if (!slotFree(district, s, at, 'window')) at = null
-  if (at == null || at >= DASH_MAX) return { ok: false, why: 'PAPER_NO_SLOT' }
+  // `unslotted` is the BENCH's path and nothing else's: a measurement of what N
+  // panes cost to draw must not be capped at the ~23 slots a road's spacing rule
+  // allows. It is named rather than inferred so it can never be reached by
+  // accident, and a pane placed this way is still a real pane in every other way.
+  if (!unslotted) {
+    if (at == null) at = nextFreeSlot(district, s, 0, 'window')
+    else if (!slotFree(district, s, at, 'window')) at = null
+    if (at == null || at >= DASH_MAX) return { ok: false, why: 'PAPER_NO_SLOT' }
+  } else if (!Number.isFinite(at)) {
+    return { ok: false, why: 'PAPER_NO_DASH' }
+  }
+  // FRACTIONAL dashes are legal on the unslotted path and only there. `dashZ` is
+  // arithmetic and takes any number, and `slotFree` already skips occupants whose
+  // dash is not an integer -- so a bench pane at 8.25 cannot block a real window,
+  // which is exactly the property that makes packing 400 of them harmless.
 
   const key = keyOf(district, s, at)
   if (papers.has(key)) return { ok: false, why: 'PAPER_SLOT_TAKEN' }
@@ -160,26 +220,20 @@ export function placePaper(doc, { district = state.district, side = 1, dash = nu
     card: format === 'rune'
       ? { title: doc.label || doc.id || '(floor)', blocks: doc.rooms?.length ?? 0, edges: doc.neighbors?.length ?? 0, vocabulary: 'runefort' }
       : cardOf(doc),
-    tier: null, canvas: null, tex: null, mesh: null, frame: null, post: null, last: null,
+    tier: null, canvas: null, tex: null, mat: null, cell: null,
+    paintMesh: null, cardMesh: null, cardGeo: null, frame: null, post: null, last: null,
   }
   papers.set(key, p)
   build(p)
-  // Painted at its tier by the next sync rather than here, so there is exactly one
-  // place that decides what a pane is showing.
-  syncPaper()
   return { ok: true, paper: p, dash: at, side: s }
 }
 
 export function removePaper(key) {
   const p = papers.get(key)
   if (!p) return false
-  for (const m of [p.mesh, p.frame, p.post]) {
-    if (!m) continue
-    scene.remove(m)
-    m.geometry?.dispose?.()
-    m.material?.dispose?.()
-  }
-  p.tex?.dispose?.()
+  releasePaint(p)
+  releaseCard(p)
+  for (const m of [p.frame, p.post]) if (m) scene.remove(m)
   papers.delete(key)
   return true
 }
@@ -190,36 +244,44 @@ export function clearPapers() {
 
 // ---- the tiers (PAPER_ROADS.md §5) ------------------------------------------
 
-// How far up the road a pane is readable. Measured against the window signs
-// already on the road rather than chosen: past roughly this distance a 15px line
+// How far up the road a pane is readable. Past roughly this distance a 15px line
 // on a 300-unit quad is under a pixel tall on screen and the paint tier is drawing
 // detail nobody can resolve.
 const READ_Z = 1500
+// Past this a pane is not drawn at all. A card is cheap; it is not free, and a
+// road can be longer than anyone can see down.
+const KEEP_Z = 9000
 
-// Reconcile every pane with where the camera is. THIS IS THE CULLING SEED: a pane
-// on another road is hidden outright, and a pane far up this one is downgraded to
-// a card. Both are decisions about what to DRAW, not about what to keep -- the
-// document stays in `papers` either way, which is what makes the cheap tier cheap.
+// Reconcile every pane with where the camera is. THIS IS THE CULLING: a pane on
+// another road holds no pixels, a pane far up this one is a card, and only what is
+// close is laid out. All three are decisions about what to DRAW -- the document
+// stays in `papers` either way, which is what makes the cheap tiers cheap.
 export function syncPaper() {
   const camZ = 260 + (state.roadZ ?? 0)
   for (const p of papers.values()) {
-    const here = p.district === state.district
-    const vis = here && !state.overview
-    for (const m of [p.mesh, p.frame, p.post]) if (m) m.visible = vis
-    if (!vis) continue
-
-    const want = Math.abs(dashZ(p.dash) - camZ) < READ_Z ? 'paint' : 'card'
+    const here = p.district === state.district && !state.overview
+    const d = Math.abs(dashZ(p.dash) - camZ)
+    const want = !here || d > KEEP_Z ? 'hidden' : d < READ_Z ? 'paint' : 'card'
     if (want === p.tier) continue
     p.tier = want
-    if (want === 'paint') repaint(p)
-    else paintAsCard(p)
+
+    if (want === 'paint') { releaseCard(p); ensurePaint(p) }
+    else if (want === 'card') { releasePaint(p); ensureCard(p) }
+    else { releasePaint(p); releaseCard(p) }
+
+    const vis = want !== 'hidden'
+    if (p.frame) p.frame.visible = vis
+    if (p.post) p.post.visible = vis
   }
 }
 
 // Raycast targets, for travel.js's pointer pass. Same shape as `rampMeshes`.
 export function paperMeshes() {
   const out = []
-  for (const p of papers.values()) if (p.mesh?.visible) out.push(p.mesh)
+  for (const p of papers.values()) {
+    const m = p.paintMesh ?? p.cardMesh
+    if (m?.visible) out.push(m)
+  }
   return out
 }
 
@@ -227,30 +289,25 @@ export const paperAt = (hit) => papers.get(hit?.object?.userData?.paperKey) ?? n
 
 // ---- the report --------------------------------------------------------------
 
-// `window.__papers()`. Every number a claim about panes needs, and the tier
-// breakdown in particular -- "there are 40 panes" and "40 panes are being laid out
-// every frame" are different facts and only the second one is a cost.
+// `window.__papers()`. The tier breakdown is the point: "there are 400 panes" and
+// "400 panes are being laid out" are different facts and only the second is a cost.
 export const paperReport = () => ({
   count: papers.size,
   byTier: [...papers.values()].reduce((a, p) => ((a[p.tier ?? 'unbuilt'] = (a[p.tier ?? 'unbuilt'] ?? 0) + 1), a), {}),
   byDistrict: [...papers.values()].reduce((a, p) => ((a[p.district] = (a[p.district] ?? 0) + 1), a), {}),
-  visible: [...papers.values()].filter((p) => p.mesh?.visible).length,
+  // Canvases actually held, which is the number the lazy-allocation change exists
+  // to keep small. It should equal the paint-tier count and nothing more.
+  paintCanvases: [...papers.values()].filter((p) => p.canvas).length,
+  atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
-  truncated: [...papers.values()].filter((p) => p.last?.truncated).length,
-  panes: [...papers.values()].map((p) => ({
-    key: p.key, format: p.format, tier: p.tier, dash: p.dash,
-    title: p.card.title, cmds: p.last?.commands.length ?? 0,
-    overflow: !!p.last?.overflow, stats: p.last?.stats ?? null,
-  })),
+  bench: state.paperBench ?? null,
+  seed: state.paperSeed ?? null,
 })
 
 // ---- the demo seed -----------------------------------------------------------
 
-// Places the bundled samples on the road you are standing on. This is a DEMO, not
-// a store: rung 5 in docs/PAPER_ROADS.md is where documents come from somewhere.
-// Exposed as `window.__seedPapers()` rather than run at startup, because a shell
-// that silently invents road furniture is a shell you cannot get a clean reading
-// from.
+// Places the bundled samples on the road you are standing on. A DEMO, not a store:
+// rung 5 in docs/PAPER_ROADS.md is where documents come from somewhere.
 export async function seedPapers(district = state.district) {
   const { BEND, FORT } = await import('./paper/samples.js')
   const placed = []
@@ -263,5 +320,6 @@ export async function seedPapers(district = state.district) {
     placed.push(placePaper(floor, { district, side, format: 'rune' }))
     side = -side
   }
+  syncPaper()
   return { placed: placed.filter((r) => r.ok).length, refused: placed.filter((r) => !r.ok).map((r) => r.why) }
 }
