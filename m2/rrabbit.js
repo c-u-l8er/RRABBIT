@@ -506,63 +506,88 @@ function adoptSurfaceTexture(rs, crop) {
   //
   // For an unpadded buffer (every shm client) sx = sy = 1 and this reduces
   // exactly to the plain flip.
-  // THE DESTINATION SIZE, FROM THE DECODER WHEN IT IS KNOWN.
+  // THE DESTINATION SIZE, TAKEN FROM THE DESTINATION.
   //
-  // `rs.texture.size` is the SURFACE size even when the texture behind it holds
-  // a padded decoded frame, so trusting it makes sx/sy 1.0 and samples the
-  // padding along with the picture. `__codedSize` is stamped on the renderState
-  // by the h264 pass in shell.js, from the frame that produced it. Absent (every
-  // shm client, and the very first frames of an h264 one) this falls straight
-  // back to the old behaviour.
-  const coded = rs.__codedSize
-  const tw = coded?.w || rs.texture?.size?.width || width
-  const th = coded?.h || rs.texture?.size?.height || height
-  // WHICH CORNER THE PICTURE IS IN. Measured rather than reasoned: a 613-wide
-  // surface in a 640-wide frame put exactly 27 black columns on the LEFT of the
-  // sign, so the picture sits at the FAR corner and the padding at the origin.
-  // That is what the `farcorner` diagnostic always described; it was inert only
-  // because sx and sy computed to 1.
-  // `?uv=full` samples the whole destination texture, padding included -- the
-  // way to SEE the margin rather than argue about it. `?uv=origin` puts the
-  // picture back at the origin corner, which is what this did before the coded
-  // size was known, and is how to re-check the corner if a client ever disagrees.
+  // This used to read `rs.__codedSize` FIRST -- the DECODER's
+  // codedWidth/codedHeight, stamped by the h264 pass in shell.js -- under a
+  // comment claiming `rs.texture.size` is "the SURFACE size even when the
+  // texture behind it holds a padded decoded frame". That claim is false, and it
+  // is half of the black border. Greenfield allocates the destination with
   //
-  // A CLIENT DID DISAGREE, AND IT IS THE DEFAULT THAT IS WRONG HERE. Measured
-  // 2026-08-14, gnome-text-editor through the host proxy in Chrome, one window,
-  // one flag apart:
+  //     renderState.texture.setContentBuffer(null, opaque.codedSize)   YUVA2RGBA.js:66-67
   //
-  //   default (far)     blackTop 0  blackBottom 14  blackLeft 0  blackRight 14
-  //   ?uv=origin        blackTop 0  blackBottom  0  blackLeft 0  blackRight  0
+  // so `rs.texture.size` IS the destination texture's own size, by construction.
+  // Measured on gnome-text-editor through the proxy: surface 1010x627,
+  // `rs.texture.size` 1024x640, `__codedSize` 1024x**642**. Two different
+  // numbers -- and dividing the UVs by the decoder's one is dividing by a
+  // texture that does not exist.
   //
-  // 14 is exactly `tw - width` (1024 - 1010). Resize the same window to 1200 in
-  // a 1280 frame and the band grows to 83 for a pad of 80 -- **the black band IS
-  // padX**, which is why a resize appears to "add black edges" and why a window
-  // whose stamped coded size runs far ahead of its surface goes black outright.
-  // Both of those were photographed on the image and reported as two faults.
+  // `__codedSize` is kept as a DIAGNOSTIC (`__views().coded`) because decoder
+  // coded size vs destination size is a real thing to be able to compare. It is
+  // no longer arithmetic.
+  const tw = rs.texture?.size?.width || rs.__codedSize?.w || width
+  const th = rs.texture?.size?.height || rs.__codedSize?.h || height
+  // WHICH CORNER THE PICTURE IS IN -- DERIVED, and it is the ORIGIN.
   //
-  // The default is NOT flipped here, because the corner is not ours to choose:
-  // it follows where the decoder says the picture is, and the guest runs
-  // FIREFOX's WebCodecs while this was measured in Chrome's. The earlier
-  // far-corner reading (27 black columns on the LEFT of a 613-in-640 frame) was
-  // taken before `patches/greenfield-webcodec-visible-size.patch` changed what
-  // size the destination is allocated at, so the two measurements are not in
-  // contradiction -- they are of different pipelines. Run `?uv=origin` in the
-  // guest and read `__edges()` before changing this line; runbook §8.
+  // This was CHOSEN before, from one photograph ("a 613-wide surface in a
+  // 640-wide frame put exactly 27 black columns on the LEFT"), and choosing was
+  // the mistake: two pipelines disagreed and there was no way to settle it
+  // except taking another photograph. The shader answers it outright.
+  // `YUV2RGBShader.updateShaderData`, which is the ONE thing that ever writes
+  // this texture:
+  //
+  //     const { width, height } = renderState.size          // the surface
+  //     this.gl.viewport(0, 0, width, height)               // <-- the destination rect
+  //
+  // The framebuffer is `renderState.texture.texture`, allocated at
+  // `opaque.codedSize`; the viewport is anchored at the GL ORIGIN. So the
+  // picture is written to destination texels [0, width) x [0, height) and the
+  // padding is the far edges -- ALWAYS, on every decoder, because neither
+  // `renderState.size` nor the viewport call depends on one. The far corner was
+  // never reachable.
+  //
+  // (`textureMinU/V` in the same function is the mirror of this on the SOURCE
+  // planes, and reading it as if it described the destination is how the far
+  // corner got written down. The spec note says as much: "that is where the pass
+  // READS in the padded decode, not where it WRITES".)
+  //
+  // Measured after, gnome-text-editor through the host proxy, one window:
+  //
+  //   was (far corner)   blackTop 0  blackBottom 14  blackLeft 0  blackRight 14
+  //   now (origin)       blackTop 0  blackBottom  0  blackLeft 0  blackRight  0
+  //
+  // 14 was exactly `tw - width` (1024 - 1010): **the black band WAS padX**, which
+  // is why resizing appeared to add black edges (pad 80 -> an 83 px band) and why
+  // a window whose destination ran far enough ahead of its surface went black
+  // outright. Both were reported from the image as separate faults.
+  //
+  // `?uv=far` restores the old arithmetic and `?uv=full` samples the whole
+  // destination texture, padding included -- the way to SEE a margin rather than
+  // argue about it. Runbook §8.
   const DIAG = new URLSearchParams(location.search).get('uv')
 
-  // Where the surface sits inside the destination texture. The encoder pads up
-  // to its alignment and the picture ends up at the FAR corner, so surface pixel
-  // (0,0) is texture pixel (padX, padY). Zero for every unpadded buffer, which
-  // is every shm client, and then all of this reduces to the plain flip.
-  const padX = DIAG === 'origin' ? 0 : tw - width
-  const padY = DIAG === 'origin' ? 0 : th - height
+  // Zero unless someone asks for the old behaviour. For an unpadded buffer
+  // (every shm client) tw === width and this was always zero anyway, which is
+  // why no web client ever showed the band.
+  const padX = DIAG === 'far' ? tw - width : 0
+  const padY = DIAG === 'far' ? th - height : 0
+
+  // THE RECT THAT WAS ACTUALLY WRITTEN, clamped to the allocation. `viewport` is
+  // clipped by GL, so a frameSize larger than the texture it was drawn into
+  // leaves the overhang unwritten -- and sampling it would put the cleared
+  // colour back on the glass by a different route than the one just closed.
+  // Equal to width/height in every ordinary frame; this only bites on the one
+  // frame where a size change is half-applied.
+  const pw = Math.min(width, tw)
+  const ph = Math.min(height, th)
 
   // The window rect inside the surface, in surface pixels. Without a crop this
-  // is the whole surface.
-  const gx = crop ? crop.x : 0
-  const gy = crop ? crop.y : 0
-  const gw = crop ? crop.w : width
-  const gh = crop ? crop.h : height
+  // is the whole written rect. Clamped for the same reason: a crop declared
+  // against a buffer bigger than the allocation would reach past it.
+  const gx = Math.min(crop ? crop.x : 0, pw)
+  const gy = Math.min(crop ? crop.y : 0, ph)
+  const gw = Math.min(crop ? crop.w : pw, pw - gx)
+  const gh = Math.min(crop ? crop.h : ph, ph - gy)
 
   if (DIAG === 'full') {
     tex.repeat.set(1, -1)
@@ -966,10 +991,12 @@ function makeSign(view, milepost, district, side, dash) {
     tex,
     rt,
     size: { width, height },
-    // The destination-texture size this sign's UVs were computed from. A sign
-    // built before the first decode has none, and its UVs are the unpadded
-    // fallback -- so this has to be compared, not assumed settled.
-    coded: rs.__codedSize ? { w: rs.__codedSize.w, h: rs.__codedSize.h } : null,
+    // The destination-texture size this sign's UVs were computed from -- the
+    // TEXTURE's own size, which is what adoptSurfaceTexture divides by, not the
+    // decoder's coded size. A sign built before the first decode has none, and
+    // its UVs are the unpadded fallback -- so this has to be compared, not
+    // assumed settled.
+    coded: rs.texture?.size ? { w: rs.texture.size.width, h: rs.texture.size.height } : null,
     // The window rect this sign was built against, kept so adoptPending can tell
     // that a client has DECLARED one since -- a change that moves the picture
     // without changing the buffer size, and would otherwise never be noticed.
@@ -1669,7 +1696,15 @@ function adoptPending() {
       // not a decoded frame, so a sign is routinely built before anything knows
       // the destination texture is padded. Without this the padding stays on the
       // glass for the life of the window.
-      const nextCoded = rs?.__codedSize ?? null
+      //
+      // KEYED ON THE DESTINATION TEXTURE, not on `__codedSize`, because that is
+      // what `adoptSurfaceTexture` now divides by. Watching the decoder's number
+      // while the UVs depend on the texture's is watching the wrong dial: the two
+      // were measured 1024x642 and 1024x640 on the same frame, so one can move
+      // while the other does not.
+      const nextCoded = rs?.texture?.size
+        ? { w: rs.texture.size.width, h: rs.texture.size.height }
+        : null
       const codedMoved = JSON.stringify(nextCoded) !== JSON.stringify(existing.coded ?? null)
       if (rs && (rs.size.width !== existing.size.width || rs.size.height !== existing.size.height || cropMoved || codedMoved)) {
         // A resized surface is a new texture allocation. Rebuild the sign in
@@ -1906,15 +1941,40 @@ function syncPopups() {
     for (const { view, rs } of live) {
       const pk = keyOf(view)
       let q = sign.popups.get(pk)
-      const size = { w: rs.size.width, h: rs.size.height }
-      if (q && (q.size.w !== size.w || q.size.h !== size.h)) {
+      // A POPUP DRAWS ITS OWN SHADOW TOO, and this was the one surface that never
+      // got told. `windowRectOf` exists because a client paints a shadow into its
+      // buffer and names the real rectangle with `set_window_geometry`; the
+      // unpainted margin arrives as OPAQUE BLACK once the encoder has been
+      // through it. That fix was wired into `makeSign` and not into here, so
+      // every menu carried its own shadow as a black L down the left and along
+      // the top -- photographed on mousepad's Edit menu, and it is the same
+      // 26x23 inset this file already measured on mousepad's toplevel.
+      //
+      // THE CROP IS THREE CHANGES, NOT ONE, because a cropped quad is a different
+      // size AND a different origin: the texture has to be sampled through it,
+      // the quad has to be scaled to it, and the popup's offset from its parent
+      // has to be measured between the two VISIBLE origins rather than between
+      // two buffer origins. Doing only the first would sample the menu correctly
+      // and then hang it in the wrong place, which is harder to see and worse.
+      const crop = windowRectOf(view.surface, rs.size)
+      const size = { w: crop ? crop.w : rs.size.width, h: crop ? crop.h : rs.size.height }
+      // WHAT THE UVs WERE COMPUTED FROM, so a rebuild happens when any of it
+      // moves. The coded size is in here for the same reason `adoptPending`
+      // carries it: the first decode lands AFTER the first quad, so a popup
+      // adopted before it would keep the padding on the glass for its whole life
+      // -- and a menu is short-lived enough that "its whole life" is all of it.
+      const rebuildKey = [
+        crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '-',
+        rs.texture?.size ? `${rs.texture.size.width}x${rs.texture.size.height}` : '-',
+      ].join('|')
+      if (q && (q.size.w !== size.w || q.size.h !== size.h || q.rebuildKey !== rebuildKey)) {
         sign.mesh.remove(q.mesh)
         q.rt.dispose()
         sign.popups.delete(pk)
         q = undefined
       }
       if (!q) {
-        const { rt, tex } = adoptSurfaceTexture(rs)
+        const { rt, tex } = adoptSurfaceTexture(rs, crop)
         const mesh = new THREE.Mesh(
           new THREE.PlaneGeometry(1, 1),
           new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
@@ -1923,20 +1983,33 @@ function syncPopups() {
         // stays glued to the window through the flatten.
         mesh.userData.popupView = view
         sign.mesh.add(mesh)
-        q = { mesh, rt, size }
+        q = { mesh, rt, size, rebuildKey }
         sign.popups.set(pk, q)
         state.popupQuads++
       }
       const g = sign.mesh.geometry.parameters
-      const scale = g.width / sign.size.width
+      // EVERY LENGTH HERE IS IN THE PARENT'S VISIBLE PIXELS, NOT ITS BUFFER'S.
+      // `makeSign` builds the parent's plane from its CROP (`sw = crop.w * ...`)
+      // but records `size` as the buffer, so `g.width / sign.size.width` was the
+      // world scale divided by the wrong number -- off by exactly the ratio the
+      // shadow takes up, which put every menu on a window with decorations
+      // slightly too small and slightly off-centre. Same reason the centring term
+      // below is the parent's crop and not its buffer.
+      const pcrop = sign.crop
+      const parentW = pcrop ? pcrop.w : sign.size.width
+      const parentH = pcrop ? pcrop.h : sign.size.height
+      const scale = g.width / parentW
       const pr = view.regionRect
       const sr = sign.view.regionRect
-      const dx = pr.x0 - sr.x0
-      const dy = pr.y0 - sr.y0
+      // Buffer origin PLUS the crop, on both sides: the offset that matters is
+      // between the two pictures, and each buffer's picture starts at its own
+      // crop. With no crop anywhere this is the old arithmetic exactly.
+      const dx = pr.x0 + (crop ? crop.x : 0) - (sr.x0 + (pcrop ? pcrop.x : 0))
+      const dy = pr.y0 + (crop ? crop.y : 0) - (sr.y0 + (pcrop ? pcrop.y : 0))
       q.mesh.scale.set(size.w * scale, size.h * scale, 1)
       q.mesh.position.set(
-        (dx + size.w / 2 - sign.size.width / 2) * scale,
-        -(dy + size.h / 2 - sign.size.height / 2) * scale,
+        (dx + size.w / 2 - parentW / 2) * scale,
+        -(dy + size.h / 2 - parentH / 2) * scale,
         1.5, // just proud of the sign face, so it never z-fights the window
       )
     }
