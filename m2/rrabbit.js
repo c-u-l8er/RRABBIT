@@ -1691,6 +1691,36 @@ export const layoutReport = () => ({
 // A surface's size is not known when it is created -- the first buffer decides
 // it, and renderStates are only built once the view intersects the scene. So
 // signs are adopted lazily, every frame, until they take.
+// Re-run the surface's own upload for the frame it last sent, into whatever
+// texture it has NOW. Used only after a renderState was destroyed and recreated
+// underneath a standing sign -- see `texSwapped`.
+//
+// Counted, because "the sign was rebuilt" and "the picture came back" are two
+// different claims and only the second one is the point.
+export const repaints = { tried: 0, done: 0, threw: 0, last: null }
+
+function repaintLastFrame(view, rs) {
+  const bc = view?.surface?.state?.bufferContents
+  const scene = rs?.scene
+  if (!bc || !scene) return false
+  const pass = scene[bc.mimeType]
+  if (typeof pass !== 'function') return false
+  repaints.tried++
+  try {
+    pass.call(scene, bc, rs)
+    repaints.done++
+    repaints.last = { mime: bc.mimeType, at: Math.round(performance.now()) }
+    return true
+  } catch (e) {
+    // A decoded frame whose pixel content has already been closed throws here.
+    // Not fatal and not worth a rebuild loop: the sign keeps its live-but-blank
+    // texture and the next real commit fills it.
+    repaints.threw++
+    repaints.last = { mime: bc.mimeType, error: String(e && e.message) }
+    return false
+  }
+}
+
 function adoptPending() {
   const views = session?.renderer?.topLevelViews ?? []
   for (const view of views) {
@@ -1769,6 +1799,26 @@ function adoptPending() {
             ...rebuilt,
           })
           rebuilt.mesh.userData.signKey = k
+          // A LIVE HANDLE ON AN EMPTY TEXTURE IS STILL A BLACK WINDOW.
+          //
+          // `texSwapped` fixes the dead GL name, and on its own that is all it
+          // fixes: the replacement Texture has never been written, and the only
+          // thing that writes one is a pass, and the only thing that runs a pass
+          // is a COMMIT. A client that animates commits within a frame and nobody
+          // sees this. A static one -- a dialog, a "restore session" prompt --
+          // has already painted its only frame, so the rebuild would trade a dead
+          // handle for a live blank and the window stays exactly as black.
+          //
+          // The last decoded frame is still on the surface (`state.bufferContents`;
+          // StreamingBuffer holds `decodedFrame` until a newer one supersedes it),
+          // so the shell can run the pass itself for the frame the client already
+          // sent. This is the same call `Renderer.updateRenderStatesPixelContent`
+          // makes -- and it goes through the FENCED pass, so the GL state
+          // discipline and the coded-size stamp are the ones every other frame
+          // gets. It cannot go via the renderer's own path: that requires
+          // `surface.damaged` and an unreleased buffer, and the buffer was
+          // released the moment its one frame was uploaded.
+          if (texSwapped) repaintLastFrame(view, rs)
         }
       }
       continue

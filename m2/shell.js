@@ -98,6 +98,7 @@ import {
   attachRrabbit,
   adoptPending,
   syncPopups,
+  repaints,
   syncPlacement,
   syncHandles,
   checkPopupsMapped,
@@ -2089,7 +2090,11 @@ window.__orient = () => {
 }
 
 window.__m1 = () => {
-  const out = { ...state, mileposts: [], sweeps: [] }
+  // `repaints` lives in rrabbit.js and is folded in here because this is the
+  // report the image can actually reach (the report endpoint prints it and the
+  // target has no console). `tried` climbing with `done` behind it is a sign
+  // recovering a texture that was swapped out from under it -- runbook section 10.
+  const out = { ...state, repaints: { ...repaints }, mileposts: [], sweeps: [] }
   for (const [k, s] of signs) {
     out.mileposts.push({
       key: k,
@@ -2466,7 +2471,22 @@ function probeSetup(w, h) {
   if (!probeScene) {
     probeScene = new THREE.Scene()
     probeCam = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, 0, 1)
-    probeMat = new THREE.MeshBasicMaterial({ toneMapped: false })
+    // NoBlending, AND IT IS THE DIFFERENCE BETWEEN THIS PROBE WORKING AND NOT.
+    //
+    // `topAlpha`/`midAlpha` below exist for exactly one job: telling a region
+    // that is TRANSPARENT from one that is BLACK, because they look identical on
+    // the glass and are different faults. As first written they could not do it.
+    // three sets a material's `opaque` program parameter from
+    // `material.transparent === false && material.blending === NormalBlending`,
+    // and `opaque_fragment` then runs `#ifdef OPAQUE diffuseColor.a = 1.0`, so a
+    // default MeshBasicMaterial pins the readback alpha at 255 for every sign in
+    // every state -- including a texture that has never been written once.
+    // Two fields that always answered 255 were quoted as evidence.
+    //
+    // NoBlending clears `opaque` so the texture's own alpha survives into the
+    // target, and still writes the fragment straight in rather than compositing
+    // it. The RGB path is unchanged, so `black*` keeps meaning what it meant.
+    probeMat = new THREE.MeshBasicMaterial({ toneMapped: false, blending: THREE.NoBlending })
     probeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), probeMat))
   }
   if (!probeRT || probeRT.width !== w || probeRT.height !== h) {

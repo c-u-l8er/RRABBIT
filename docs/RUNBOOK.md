@@ -697,6 +697,28 @@ and the same allocation, so every size-based rebuild trigger compares equal.
 a mapping or padding question (§8). Black glass with `glErrors` climbing is a dead
 handle, and the sign needs rebuilding, not remapping.
 
+**A live handle on an empty texture is still a black window**, so the rebuild is
+only half of it: the replacement `Texture` has never been written, and the only
+thing that writes one is a pass, and the only thing that runs a pass is a commit.
+A client that animates commits within a frame and nobody sees it; a static one --
+a dialog, a "restore session" prompt -- has already painted its only frame. So
+the rebuild also re-runs the surface's own upload for the frame it last sent
+(`repaintLastFrame`, counted in `__m1().repaints`), which is the same call
+`Renderer.updateRenderStatesPixelContent` makes and goes through the fenced pass.
+It cannot go via the renderer's own path: that wants `surface.damaged` and an
+unreleased buffer, and the buffer was released the moment its one frame landed.
+
+**NOT VERIFIED IN ACTION, and that is worth knowing before trusting it.** The
+destroy half reproduces from the console -- the same two lines Greenfield runs,
+and GL errors follow -- but nothing here could make Greenfield RECREATE the
+renderState on demand, because the recreate needs the view to re-enter the scene
+region and that is driven by commits a static client does not make. So
+`texSwapped` and `repaintLastFrame` are derived from the source and regression-
+tested (fresh proxy and page: native window renders, `glErrors` 0, edges 0 on all
+four, `__lat` p50 34 ms), and have not been watched firing. `__m1().repaints`
+answers it the moment it does: `tried` climbing with `done` behind it is the path
+running.
+
 ### Ask the window how long it took
 
 ```js
