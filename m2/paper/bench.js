@@ -504,8 +504,16 @@ export async function runReadDemo() {
 
   await sampleFrames(20)
   const rep = paperReport()
+  // Rung 7: seal the road we are standing on, and show the id beside the source.
+  let seal = null
+  try {
+    const { sealRoad } = await import('./wiring.js')
+    seal = await sealRoad([...papers.values()], state.district)
+  } catch (e) { seal = { ok: false, why: String(e?.message ?? e) } }
+
   const out = {
     kind: 'read',
+    seal,
     seeded,
     reading: rep.reading,
     target: target ? target.key : null,
@@ -555,6 +563,11 @@ function drawRead(o) {
     `  op log — ${o.counts.length} entries, ${o.counts.applied} applied, ${o.counts.refused} refused`,
     ...o.log.map((e) => `    ${String(e.t).padStart(6)}ms  ${String(e.op).padEnd(7)} by=${e.by}`),
     `  plan (${o.plan.length}): ${o.plan.map((e) => e.op).join(' -> ') || '(empty)'}`,
+    '',
+    'RUNG 7 — this road, sealed',
+    o.seal?.ok
+      ? `  ${o.seal.id}\n  ${o.seal.panes} panes, ${o.seal.citations} citations`
+      : `  REFUSED ${o.seal?.why}`,
   ].join('\n')
 }
 

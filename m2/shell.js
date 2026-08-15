@@ -78,6 +78,7 @@ import {
   setRange,
   goDistrict,
   goWindow,
+  flyToPaper,
   goTrack,
   replayTrack,
   stopReplay,
@@ -859,6 +860,7 @@ function buildWorld(canvas) {
   // raises the intent and paper.js turns it into an op, so there is no path into
   // or out of a pane that the log does not see.
   hooks.paperUnread = paperUnread
+  hooks.flyToPaper = flyToPaper
   attachBack(backTarget)
   syncGantries()
   syncRamps()
@@ -2411,6 +2413,15 @@ window.__ramps = () => rampReport()
 // point: "there are 40 panes" and "40 panes are being laid out" are different
 // facts and only the second one is a cost. See docs/PAPER_ROADS.md.
 window.__papers = () => paperReport()
+
+// RUNG 7. The road you are standing on, as a WRL network, sealed to a `sem-` id.
+// The SOURCE comes back with the id on purpose: an identity whose input you cannot
+// read is a number you have to trust rather than one you can check.
+window.__seal = async (district) => {
+  const { sealRoad } = await import('./paper/wiring.js')
+  const { papers } = await import('./world.js')
+  return sealRoad([...papers.values()], district ?? state.district)
+}
 
 // THE SEAM, from the console. `__op` is the same door a click uses -- which is the
 // point of OP_VOCABULARY_DRAFT.md §9's test and the reason there is no separate

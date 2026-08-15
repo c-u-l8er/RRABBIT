@@ -20,7 +20,7 @@ import { state, signs,
   papers, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
-import { paperMeshes } from './paper.js'
+import { paperMeshes, setPaperHover } from './paper.js'
 import { apply as applyOp } from './ops.js'
 import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
@@ -736,6 +736,33 @@ function flattenTo(milepost, district = state.district) {
   flight = { from: currentPose(), to: poseFor(s), t: 0, target: milepost }
   state.mode = 'flying'
   return milepost
+}
+
+// FLY TO A PANE, the way `flattenTo` flies to a window.
+//
+// Reported: "the spaceship isn't flying into view like it does with the other
+// windows". It was not, because `read` opened the DOM at the pane's road position
+// and left the camera wherever it stood -- so a document you entered appeared
+// somewhere off in the distance instead of being arrived at.
+//
+// `target: null` on the flight, NOT a milepost: landing sets `state.mode` back to
+// `driving` rather than to `flat`. A pane is not a window and does not flatten --
+// the read tier is a DOM object standing at the pane's own position, so the camera
+// coming to it is the whole of "entering" one. The pane stays put and you move,
+// which is also why it reads as flying in.
+export function flyToPaper(pane) {
+  const m = pane?.frame ?? pane?.paintMesh
+  if (!m) return null
+  const t = m.rotation.y
+  const normal = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
+  // Far enough back that the whole pane is in frame with a margin. Derived from
+  // the frustum rather than chosen: at distance d the visible half-height is
+  // d*tan(fov/2), so fitting a pane of height h needs d = (h/2)/tan(fov/2).
+  const h = pane.h ?? 197
+  const d = (h / 2) / Math.tan((camera.fov / 2) * Math.PI / 180) * 1.25
+  flight = { from: currentPose(), to: { pos: m.position.clone().addScaledVector(normal, d), look: m.position.clone() }, t: 0, target: null }
+  state.mode = 'flying'
+  return true
 }
 
 // How much closer or further than pixel-exact you have pulled the flattened
@@ -2335,6 +2362,7 @@ function installInput() {
   const dropHover = () => {
     setHovered(null)
     setRampHover(null)
+    setPaperHover(null)
     canvas.style.cursor = ''
   }
   for (const kind of ['pointerout', 'pointerleave', 'pointercancel']) {
@@ -2364,6 +2392,8 @@ function installInput() {
     const gantryHit = hit ? actionOf(hit.object) : null
     setHovered(gantryHit && gantryHit.kind !== 'ramp' ? hit.object : null)
     setRampHover(hit)
+    // The pane's controls follow the pointer, not the tier -- see setPaperHover.
+    setPaperHover(hit?.object?.userData?.paperKey ?? null)
     canvas.style.cursor = hit && (action || hit.object.userData.signKey) ? 'pointer' : ''
   })
 

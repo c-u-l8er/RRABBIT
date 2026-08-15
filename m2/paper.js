@@ -433,9 +433,8 @@ export function syncPaper() {
     if (p.want === 'paint') { releaseCard(p); materialize(p); ensurePaint(p) }
     else if (p.want === 'card') { releasePaint(p); materialize(p); ensureCard(p) }
     else { releasePaint(p); releaseCard(p); dematerialize(p) }
-    // The visible marks follow the tier; the invisible pads do not need to, because
-    // `paperMeshes` already declines to offer them for aiming off the paint tier.
-    if (p.chrome) for (const m of p.chrome) if (m.material.map) m.visible = p.want === 'paint'
+    // Chrome visibility is NOT a tier question -- see `refreshChrome`. Newly built
+    // chrome starts hidden and the hover rule turns it on.
   }
 }
 
@@ -454,6 +453,31 @@ export function syncPaper() {
 // `syncPaper` consults it every frame and a hook call per pane per frame to ask
 // "are you on television" is a cost with no payer.
 let castKey = null
+// WHICH PANE THE POINTER IS OVER. Fed by travel.js's pointermove, which owns the
+// pointer and already runs one raycast for everything on the road.
+let hoverKey = null
+
+// Reported: "the controls should only be showing up when it is in this detailed
+// view and only on hover mouse". Two conditions, and both are needed for the same
+// reason rrabbit.js gives for a window's chrome: a control on a pane you are
+// driving past is a fleck that does something, and a control drawn permanently on
+// the pane you ARE reading is clutter over a document.
+//
+// So: the pane must be the one being read, AND the pointer must be on it.
+export function setPaperHover(key) {
+  if (key === hoverKey) return
+  hoverKey = key
+  refreshChrome()
+}
+
+function refreshChrome() {
+  const held = readingKey()
+  for (const p of papers.values()) {
+    if (!p.chrome) continue
+    const show = !!held && p.key === held && p.key === hoverKey
+    for (const m of p.chrome) if (m.material.map) m.visible = show
+  }
+}
 
 let store = null
 let resident = null
@@ -511,9 +535,11 @@ export function paperMeshes() {
   for (const p of papers.values()) {
     const m = p.paintMesh ?? p.cardMesh
     if (m) out.push(m)
-    // Chrome only where it can be aimed at -- a control on a card two hundred units
-    // up the road is a fleck that does something, which is worse than no control.
-    if (p.tier === 'paint' && p.chrome) out.push(...p.chrome)
+    // Only the pane being READ offers its controls for aiming. The pads are
+    // invisible, so leaving them aimable on every pane would put a dead hit area
+    // over documents whose controls are not drawn -- a click that lands on nothing
+    // visible and does nothing is worse than no control.
+    if (p.chrome && p.key === readingKey()) out.push(...p.chrome)
   }
   return out
 }
@@ -541,13 +567,16 @@ export function registerPaperOps() {
     perform: (op) => {
       const p = papers.get(keyOf(op.district, op.side, op.dash))
       p.readPose = readPoseOf(p)
+      hooks.flyToPaper?.(p)
       // Force the paint tier under it, so leaving the read tier does not land on
       // an empty frame while the canvas is laid out.
       if (p.tier !== 'paint') { releaseCard(p); materialize(p); ensurePaint(p); p.tier = 'paint' }
-      return openRead(p)
+      const r = openRead(p)
+      refreshChrome()
+      return r
     },
   })
-  registerOp('unread', { pre: () => true, perform: () => { closeRead(); return { ok: true } } })
+  registerOp('unread', { pre: () => true, perform: () => { closeRead(); refreshChrome(); return { ok: true } } })
 
   const paneAt = (op) => papers.get(keyOf(op.district, op.side, op.dash)) ?? null
 

@@ -229,7 +229,7 @@ Smallest first, each rung falsifiable on its own.
 | 4 | the **card** tier + a shared atlas | **done** — 400 panes, best-case frame flat, 56 canvases not 400 (§14) |
 | 5 | IndexedDB store + district-chunk streaming | **done** — 10,000 documents, 500 on the road, 24 canvases (§15) |
 | 6 | `CSS3DRenderer` **read** tier | **done** — real DOM, real focus, §5.4/§5.5 conformance, driven through the seam (§16) |
-| 7 | WRL wiring (§9) | two roads with the same arrangement seal to the same id |
+| 7 | WRL wiring (§9) | **done** — same arrangement → same `sem-` id, 35 assertions (§18) |
 
 Rungs 1–3 do not need the op vocabulary. **Rung 6 does** — the moment a pane accepts a click, that
 click has to pass the same seam a recorded op does, or the recorder acquires a second vocabulary and
@@ -634,8 +634,95 @@ step and the screen stayed on the default panel.
 > shape of failure that takes longest to find, and the only way through it was to
 > stop trusting the return value and go looking for the rect.
 
+## 18. Rung 7 — a road's arrangement, sealed
+
+`?papers=read` now prints, beside the seam log:
+
+```
+RUNG 7 — this road, sealed
+sem-c0e64e4a7f9729d7f64f5f966cc5b50b343df230f736b5e431290f0e5d2f41ee
+5 panes, 0 citations
+```
+
+`m2/paper/wiring.js` emits a WRL Core 0.1.2 program from a road and seals it with
+**WRL's own spine** (vendored as `wrl-core.js`, pinned in `test/wiring.mjs` against
+`DEMO_WORLD_SEMANTIC_ID` so a stale copy fails a test rather than minting ids nobody
+else computes). 35 assertions, run on the dev host.
+
+**The claim from §9 is two assertions, not one.** Same arrangement → same id is
+satisfied by a constant; the other half is that any change to the arrangement
+changes it. Both hold: a road with one more pane, one fewer, or a different citation
+pattern each seal differently, and an empty road has its own id.
+
+### 18.1 The role mapping was forced, not chosen
+
+WRL's `PORTS` table is strict — SignalWire runs `sig_out → sig_in`, SocketControl
+runs `socket → pose`, and only certain roles have each. A road is a chain from a
+start, through documents, to an end, and exactly three roles can make that shape:
+
+| road part | WRL role | why |
+|---|---|---|
+| entrance | `Pulser` | out only — a thing that starts |
+| each pane | `Relay` | in and out — takes and passes |
+| exit gate | `Door` | in only — a thing that ends |
+
+### 18.2 Citations had to fan OUT, because fan-IN is refused
+
+The obvious encoding of "pane A cites pane C" is a second SignalWire into C's relay.
+It is **refused**: `WRL_CONTROLLER_CONFLICT`. Measured rather than guessed — an input
+in this profile has exactly one controller, and the chain already spends every
+relay's `sig_in`. Fan-*out* is legal, so a citation is an extra wire from the citing
+relay into a `Door` of its own, named for the pair. The Door is a sink: it records
+*"r0 cites r2"* without claiming anything drives r2.
+
+**That the encoding was forced by the port table is the useful part.** It is what a
+network of durable identities can actually say about a road, rather than what would
+have been convenient to say.
+
+### 18.3 What the id is over, stated because it is easy to over-read
+
+The seal is over the **wiring**: how many panes, in what order, and which cite which.
+It is **not** a hash of the documents — BendScript already content-addresses those,
+and folding a doc hash in would change a road's identity when a typo is fixed.
+
+The consequence, asserted rather than hidden: **with no citations, reordering the
+same documents is the same road.** Four corpus documents in any order seal alike,
+because their edges point at ids that are not on the road. With citations it *is* a
+different road, because reordering changes which positions cite which. A test
+asserted the stronger claim first and was wrong; the design does not have that
+property and now says so.
+
+### 18.4 An upstream discrepancy, found here
+
+`parseWrlCore → graphToIr → semanticArtifactId` — the three-step form WRL's own
+module header documents — **refuses the `(every 2)` sugar** that WRL's README and its
+`SHUFFLED` conformance fixture both use (`WRL_UNKNOWN_CONFIG_KEY`). `sealWorld` is
+the entry its conformance suite actually calls and the one that agrees with the
+published ids. Worth reporting to `WRL/`; not fixed here.
+
+## 19. Two things reported from the road
+
+**The ship flies to a pane now.** `read` opened the DOM at the pane's road position
+and left the camera where it stood, so a document you entered appeared off in the
+distance instead of being arrived at. `flyToPaper` builds the same kind of flight
+`flattenTo` does — with `target: null`, so landing returns to `driving` rather than
+`flat`: a pane is not a window and does not flatten. The pane stays put and you
+move, which is also why it reads as flying in.
+
+**Controls only in the detailed view, and only on hover.** They were drawn on every
+pane at the paint tier. Now: the pane must be the one being *read* **and** the
+pointer must be on it. Same two-condition rule `rrabbit.js` gives for a window's
+chrome, for the same reason — a control on a pane you are driving past is a fleck
+that does something, and one drawn permanently over a document you are reading
+covers a word. Only the read pane offers its (invisible) pads for aiming, so there
+is no dead hit area over panes whose controls are not drawn.
+
 ## DOCTRINE
 
+- **measured** — a road's arrangement seals to a `sem-` id via WRL's own spine, and
+  both halves of §9's claim hold: same arrangement alike, any change different.
+- **found** — WRL refuses fan-in (`WRL_CONTROLLER_CONFLICT`); citations must fan out
+  to a sink. The encoding was forced by the port table.
 - **found** — a control that reports success is not evidence the thing it controls
   happened. §17.1 had three layers agreeing and one screen disagreeing.
 - **falsifiable, survived** — the seam serves three consumers with no per-consumer branch, asserted
