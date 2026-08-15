@@ -20,7 +20,7 @@ import { state, signs,
   papers, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
-import { paperMeshes, setPaperHover } from './paper.js'
+import { paperMeshes, setPaperHover, isReadingPaper, readingPane } from './paper.js'
 import { apply as applyOp } from './ops.js'
 import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
@@ -2122,6 +2122,36 @@ function installInput() {
       // is simply not to take the event.
       if (state.mode !== 'driving' || mapIsOpen()) return
       ev.preventDefault()
+
+      // READING A PANE? THE WHEEL IS A ZOOM, NOT A DRIVE.
+      //
+      // Reported: "when in the detail view scroll takes me back to the road when
+      // it should really zoom in and out from that window paper pane". It did,
+      // because landing from `flyToPaper` returns the shell to `driving` -- so the
+      // driving wheel had the event and drove. Standing in a pane is a place, and
+      // the wheel belongs to the thing you are standing in, which is the same rule
+      // `overFlatSurface` applies for a window.
+      //
+      // Moves the CAMERA along the pane's normal rather than scaling anything: the
+      // pane is an object in the world and zooming it by scale would make it a
+      // different size than the frame it sits in.
+      const rp = readingPane()
+      if (rp) {
+        state.paperWheel = (state.paperWheel ?? 0) + 1
+        const m = rp.frame ?? rp.paintMesh
+        if (m) {
+          const t = m.rotation.y
+          const n = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
+          const to = m.position
+          const d = camera.position.distanceTo(to) + ev.deltaY * 0.5
+          // Clamped either side: closer than this and the near plane eats the
+          // document, further and you are reading it from the road.
+          const clamped = Math.max(60, Math.min(2400, d))
+          camera.position.copy(to).addScaledVector(n, clamped)
+          camera.lookAt(to)
+        }
+        return
+      }
       // A GATE WITH MORE LANES THAN IT CAN SHOW TAKES THE WHEEL, and only then.
       // Same rule the flatten uses -- the wheel belongs to whatever the pointer
       // is over -- and scrollGateOf refuses when a gate has nothing off-screen,
@@ -2431,6 +2461,11 @@ function installInput() {
     'keydown',
     (ev) => {
       if (ev.ctrlKey || ev.altKey || ev.metaKey) return
+      // COUNTED BEFORE ANY BRANCH DECIDES ANYTHING. "Esc does not work" has three
+      // different causes -- the key never arrived, the listener never ran, or a
+      // branch above ate it -- and they are indistinguishable without a number
+      // that increments on arrival.
+      if (ev.key === 'Escape') state.escSeen = (state.escSeen ?? 0) + 1
       const flat = state.mode === 'flat'
 
       // ESCAPE SHUTS THE MAP FIRST. Plain Esc belongs to the application
@@ -2463,6 +2498,21 @@ function installInput() {
       // The reel gets Esc on the same terms and for the same reason -- it is a
       // menu of ours over whatever is behind it, and Esc belongs to the topmost
       // menu everywhere else in computing too.
+      // ESC LEAVES A PANE, and it lives HERE rather than on the CSS3D layer.
+      //
+      // Reported: "the esc key doesn't take me back to the road". It was bound on
+      // the read layer, and three capture-phase branches in this very listener can
+      // stop propagation before a layer listener is ever reached -- which is the
+      // exact fault TRACKS_HANDOFF.md §3 records for the replay's Escape, written
+      // down and then repeated. A key that belongs to the topmost thing on screen
+      // belongs in the chain that decides what the topmost thing is.
+      if (ev.key === 'Escape' && isReadingPaper()) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        applyOp({ op: 'unread' }, { by: 'pointer' })
+        return
+      }
+
       if (ev.key === 'Escape' && reelIsOpen()) {
         ev.preventDefault()
         ev.stopImmediatePropagation()

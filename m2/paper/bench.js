@@ -481,6 +481,7 @@ export async function runReadDemo() {
   }
 
   const attempts = []
+  let readResult = null
   if (target) {
     const { dashZ } = await import('../world.js')
     // PARK IN FRONT OF IT, THEN READ IT -- two of the draft's own sixteen verbs and
@@ -494,7 +495,11 @@ export async function runReadDemo() {
     // Precheck the whole plan first -- the draft's §2 split, roads before anything
     // moves. A route whose second step names a dead pane never takes the first.
     attempts.push(['precheck plan', JSON.stringify(precheck(steps))])
-    for (const st of steps) attempts.push([`apply ${st.op}`, JSON.stringify(apply(st, { by: 'program' }))])
+    for (const st of steps) {
+      const r = apply(st, { by: 'program' })
+      if (st.op === 'read') readResult = r
+      attempts.push([`apply ${st.op}`, JSON.stringify(r)])
+    }
     // And a refusal, so the panel shows the seam saying no as well as yes.
     attempts.push(['apply bad dash', JSON.stringify(apply({ op: 'read', district: target.district, side: 1, dash: 999 }, { by: 'program' }))])
     await sampleFrames(20)
@@ -516,6 +521,7 @@ export async function runReadDemo() {
     seal,
     seeded,
     reading: rep.reading,
+    rendered: readResult?.result ?? null,
     target: target ? target.key : null,
     format: target?.format ?? null,
     attempts,
@@ -528,6 +534,19 @@ export async function runReadDemo() {
   }
   state.paperBench = out
   drawRead(out)
+
+  // A LIVE LINE, because a panel drawn once is a stopped clock -- the lesson this
+  // work has now paid for twice (PAPER_ROADS.md §13.1, §15.4). Escapes are counted
+  // where they ARRIVE, so "the key never came" and "a branch ate it" stop looking
+  // the same.
+  const { isReadingPaper } = await import('../paper.js')
+  setInterval(() => {
+    const el = document.getElementById('paper-seam-live')
+    if (!el) return
+    el.textContent = `LIVE  mode=${state.mode}  reading=${isReadingPaper()}  ` +
+      `escSeen=${state.escSeen ?? 0}  asking=${state.paperAsking ?? '-'}  ` +
+      `wheelToPane=${state.paperWheel ?? 0}`
+  }, 500)
   return out
 }
 
@@ -546,6 +565,18 @@ function drawRead(o) {
     ].join(';')
     document.body.appendChild(el)
   }
+  let live = document.getElementById('paper-seam-live')
+  if (!live) {
+    live = document.createElement('div')
+    live.id = 'paper-seam-live'
+    live.style.cssText = [
+      'position:fixed', 'left:16px', 'bottom:120px', 'z-index:61',
+      'background:rgba(3,4,10,.96)', 'border:1px solid #2de2e6', 'border-radius:5px',
+      'padding:8px 12px', 'color:#2de2e6',
+      'font:14px ui-monospace,"DejaVu Sans Mono",monospace', 'pointer-events:none',
+    ].join(';')
+    document.body.appendChild(live)
+  }
   el.textContent = [
     'THE SEAM — rung 6',
     `  ran at ${o.at}  (+${o.uptimeMs} ms)`,
@@ -553,6 +584,10 @@ function drawRead(o) {
     `  seeded         ${o.seeded.placed} panes across ${o.seeded.roads.length} roads` +
       (o.seeded.refused.length ? `  refused ${o.seeded.refused.join(',')}` : ''),
     `  target         ${o.target}  [${o.format}]`,
+    // The format and title RENDERED, straight from openRead. The panel used to
+    // print only what the caller believed it had asked for, so a `[rune]` label
+    // beside a BendScript document on screen was unresolvable from the outside.
+    `  rendered       ${o.rendered ? `${o.rendered.format}  "${o.rendered.title}"` : '(nothing)'}`,
     `  reading        ${o.reading ?? '(none)'}`,
     `  seen           size=${o.seen.papersSize} reachable=${o.seen.reachable} matched=${o.seen.matched}`,
     `  pane roads     ${o.seen.districts.join(', ') || '(none)'}`,

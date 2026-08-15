@@ -717,8 +717,69 @@ that does something, and one drawn permanently over a document you are reading
 covers a word. Only the read pane offers its (invisible) pads for aiming, so there
 is no dead hit area over panes whose controls are not drawn.
 
+## 20. Feature parity with a window — five of seven
+
+Reported, in one list: clicking a pane re-renders it and the font changes; scroll in
+the detail view drives away instead of zooming; Esc does not leave; `X--` has no
+confirm; the ST&RT menu offers no panes; and the entrance signs should spawn them.
+
+### 20.1 The mismatch was mine, and it was a misreading
+
+Last turn's report flagged the panel saying `[rune]` beside what looked like a
+BendScript document, and called it possibly serious. It was not a bug. The panel now
+prints the format and title **openRead itself returned**:
+
+```
+target    build:r:16  [rune]
+rendered  rune  "Why a protocol"
+```
+
+They agree. The large BendScript document in that screenshot was a paint-tier canvas
+pane, not the read pane. **The fix was to make the instrument answer the question**
+rather than to change any behaviour — a screenshot could not distinguish "the wrong
+document rendered" from "I am looking at a different pane", and now it does not have
+to.
+
+### 20.2 The four that were real
+
+- **Re-render and font change on click.** Two causes. `read` forced the paint tier
+  unconditionally, re-laying the document out on every click; and the DOM tier laid
+  out at a fixed 640×420 while the canvas lays out at `w × PX_PER_UNIT`, so a
+  resized pane changed width on entry. The DOM tier now uses the pane's own pixel
+  size, and its heading sizes are matched to `bend-layout.js`'s `HEADING_SIZE`
+  table. Two renderers will never be glyph-identical; they can agree about size.
+- **Esc.** It was bound on the CSS3D layer, and three capture-phase branches in
+  travel.js can stop propagation before a layer listener is reached — **the exact
+  fault `TRACKS_HANDOFF.md` §3 records for the replay's Escape, written down and
+  then repeated.** It lives in the capture chain now. Verified: `reading=true →
+  Esc → reading=false, escSeen=1`.
+- **The wheel drove away.** Landing from `flyToPaper` returns the shell to
+  `driving`, so the driving wheel handler had the event. Standing in a pane is a
+  place, and the wheel belongs to the thing you are standing in. It moves the camera
+  along the pane's normal, clamped either side — not a scale, because the pane is an
+  object in the world and scaling it would make it a different size than its frame.
+- **`X--` asks first.** `state.paperAsking` mirrors `state.closeAsking`, the frame
+  turns red while the question is open, and the close mark stays up so the
+  confirming press has something to aim at. Pointing elsewhere withdraws it.
+
+### 20.3 Still owed
+
+**The ST&RT menu offers no paper panes, and the entrance signs still spawn windows
+only.** Both are creation paths and neither is built. They are the difference
+between a pane being something the shell can show and something a user can make.
+
+Also unverified: the **wheel zoom**, because `virsh send-key` sends keys and not
+pointer events. `wheelToPane` counts events that reach the pane branch and reads 0
+because no wheel has ever been sent. The counter is there so the first real scroll
+answers it.
+
 ## DOCTRINE
 
+- **corrected** — the `[rune]`/BendScript "mismatch" reported last turn was a
+  misread screenshot, not a defect. Raised as possibly serious, and it was not.
+- **found, again** — a key that belongs to the topmost thing on screen belongs in
+  the capture chain that decides what the topmost thing is. Recorded in
+  `TRACKS_HANDOFF.md` §3 and repeated anyway.
 - **measured** — a road's arrangement seals to a `sem-` id via WRL's own spine, and
   both halves of §9's claim hold: same arrangement alike, any change different.
 - **found** — WRL refuses fan-in (`WRL_CONTROLLER_CONFLICT`); citations must fan out

@@ -444,6 +444,11 @@ export const state = {
   // of the answer in each module, which is the arrangement where a window closes
   // because the two disagreed about whether the question had been asked.
   closeAsking: null,
+  // The same question, asked about a PANE. Separate from `closeAsking` because the
+  // two are addressed differently -- a window by `district:milepost`, a pane by its
+  // slot key -- and one field holding either would need every reader to ask which
+  // kind it is holding.
+  paperAsking: null,
   // Non-zero exactly when the flattened window is NOT pixel-exact, which is the
   // only honest way to read a zoom that is now remembered per window.
   flatZoom: 0,

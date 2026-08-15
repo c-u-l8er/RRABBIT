@@ -43,7 +43,7 @@ import { layoutBend, cardOf, THEME } from './paper/bend-layout.js'
 import { layoutRune, floorsOf, RUNE_THEME } from './paper/rune-layout.js'
 import { paint, paintCard, measurerFor } from './paper/paint.js'
 import { allocCard, freeCard, drawCard, planeFor, atlasReport, CARD_W, CARD_H } from './paper/atlas.js'
-import { openRead, closeRead, readingKey, isReading } from './paper/read.js'
+import { openRead, closeRead, readingKey, isReading, readingPane } from './paper/read.js'
 import { grabTexture, castTexture, closeTexture, GRIP_W, GRIP_H, GRIP_REACH, PAD } from './rrabbit.js'
 import { register as registerOp, apply as applyOp } from './ops.js'
 
@@ -80,7 +80,7 @@ const keyOf = (district, side, dash) => `${district}:${side > 0 ? 'r' : 'l'}:${d
 //
 // Built once, on first use. Every pane's post is the same box and every pane's
 // frame is the same quad, so N panes is one geometry each and not N.
-let postGeo = null, postMat = null, frameMat = null
+let postGeo = null, postMat = null, frameMat = null, askMat = null
 // Keyed by `${w}x${h}`: panes of the same size still share one geometry, which is
 // the property rung 4 measured, and a resized pane costs one more entry rather
 // than forcing every pane to own its own.
@@ -100,6 +100,9 @@ function shared() {
   postGeo = new THREE.BoxGeometry(6, STAND_Y, 6)
   postMat = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 })
   frameMat = new THREE.MeshBasicMaterial({ color: 0x2de2e6 })
+  // The frame while a close is being asked about. A question nobody can see is a
+  // control that did nothing the first time you pressed it.
+  askMat = new THREE.MeshBasicMaterial({ color: 0xe2564d })
 }
 
 // ---- painting ---------------------------------------------------------------
@@ -465,6 +468,9 @@ let hoverKey = null
 //
 // So: the pane must be the one being read, AND the pointer must be on it.
 export function setPaperHover(key) {
+  // Pointing somewhere else withdraws the question. A close ask that outlived the
+  // pointer would make the NEXT press on `X--` the confirming one.
+  if (key !== state.paperAsking) { state.paperAsking = null; hoverKey = key; refreshChrome(); return }
   if (key === hoverKey) return
   hoverKey = key
   refreshChrome()
@@ -474,8 +480,12 @@ function refreshChrome() {
   const held = readingKey()
   for (const p of papers.values()) {
     if (!p.chrome) continue
-    const show = !!held && p.key === held && p.key === hoverKey
+    const asking = state.paperAsking === p.key
+    // The close mark stays up while the question is open, so the confirming press
+    // has something to aim at even after the pointer has wandered.
+    const show = !!held && p.key === held && (p.key === hoverKey || asking)
     for (const m of p.chrome) if (m.material.map) m.visible = show
+    if (p.frame) p.frame.material = asking ? askMat : frameMat
   }
 }
 
@@ -544,6 +554,12 @@ export function paperMeshes() {
   return out
 }
 
+// Re-exported so travel.js can ask without importing read.js -- travel already
+// imports paper.js, and a second edge into the read tier would be a second thing
+// to keep pointing at the right module.
+export const isReadingPaper = () => isReading()
+export { readingPane }
+
 export const paperAt = (hit) => papers.get(hit?.object?.userData?.paperKey) ?? null
 
 // ---- the ops (rung 6) --------------------------------------------------------
@@ -568,9 +584,12 @@ export function registerPaperOps() {
       const p = papers.get(keyOf(op.district, op.side, op.dash))
       p.readPose = readPoseOf(p)
       hooks.flyToPaper?.(p)
-      // Force the paint tier under it, so leaving the read tier does not land on
-      // an empty frame while the canvas is laid out.
+      // The paint tier is ensured UNDER it only when it is not already there.
+      // Forcing it unconditionally re-laid the document out on every click, which
+      // is half of the reported "they rerender when I click on them" -- the other
+      // half was the DOM tier laying out at a different width (see read.js).
       if (p.tier !== 'paint') { releaseCard(p); materialize(p); ensurePaint(p); p.tier = 'paint' }
+      else materialize(p)
       const r = openRead(p)
       refreshChrome()
       return r
@@ -584,6 +603,20 @@ export function registerPaperOps() {
     pre: (op) => (paneAt(op) ? true : 'OP_NO_PANE'),
     perform: (op) => {
       const p = paneAt(op)
+      // ASKS BEFORE IT DOES IT, the way `X--` does on a window. Closing is the
+      // only act on a pane that cannot be undone -- the document survives in the
+      // store, but its place on the road does not -- and a control that destroys
+      // on the first press is the one control a shell must not have.
+      //
+      // The ask is state, not a modal: `state.paperAsking` holds the key and the
+      // chrome draws differently while it is set, exactly as `state.closeAsking`
+      // does for a window.
+      if (state.paperAsking !== p.key) {
+        state.paperAsking = p.key
+        refreshChrome()
+        return { ok: true, asked: true, key: p.key }
+      }
+      state.paperAsking = null
       // Closing the pane you are reading closes the read tier with it. Leaving a
       // DOM object mounted over a document that no longer exists is the one way
       // this could strand a reader.
@@ -671,6 +704,7 @@ export const paperReport = () => ({
   paintMax: PAINT_MAX,
   reading: readingKey(),
   casting: castKey,
+  asking: state.paperAsking,
   atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
   stream: { resident, ...streamStats, store: store?.kind ?? null },

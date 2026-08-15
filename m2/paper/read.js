@@ -92,7 +92,13 @@ export function openRead(pane, { resolve } = {}) {
 
   const root = document.createElement('div')
   root.className = 'paper-read-root'
-  root.style.cssText = `width:${PX_W}px;height:${PX_H}px`
+  // THE PANE'S OWN PIXEL SIZE, not a constant. A resized pane's canvas is
+  // `w * PX_PER_UNIT` px, and a DOM tier fixed at 640x420 would lay the same
+  // document out at a different width and then be scaled to fit -- which is
+  // exactly the "font size changes when I click on them" that was reported.
+  const px = Math.round((pane.w ?? W) * (PX_W / W))
+  const py = Math.round((pane.h ?? 197) * (PX_W / W))
+  root.style.cssText = `width:${px}px;height:${py}px`
 
   const spec = pane.format === 'rune'
     ? runeToSpec(pane.doc, { classFor })
@@ -102,7 +108,7 @@ export function openRead(pane, { resolve } = {}) {
   const object = new CSS3DObject(root)
   object.position.copy(pane.readPose.position)
   object.rotation.copy(pane.readPose.rotation)
-  object.scale.setScalar(SCALE)
+  object.scale.setScalar((pane.w ?? W) / px)
   scene3d.add(object)
 
   // The PANE takes the pointer. The layer never does.
@@ -120,7 +126,12 @@ export function openRead(pane, { resolve } = {}) {
   const first = root.querySelector('[tabindex="0"], a[href], h1')
   first?.focus?.({ preventScroll: true })
 
-  return { ok: true, pane: pane.key }
+  // WHAT WAS ACTUALLY RENDERED, not what the caller believed it asked for. The
+  // seam panel reported `[rune]` beside a BendScript document on screen, and there
+  // was no way to tell from the outside which of the two was wrong. Reporting the
+  // rendered format and title from the place that renders them makes the pair
+  // checkable instead of a matter of opinion.
+  return { ok: true, pane: pane.key, format: pane.format, title: pane.card?.title ?? null }
 }
 
 export function closeRead() {
@@ -133,6 +144,7 @@ export function closeRead() {
 }
 
 export const readingKey = () => current?.pane?.key ?? null
+export const readingPane = () => current?.pane ?? null
 export const isReading = () => !!current
 
 // ---- mounting ---------------------------------------------------------------
@@ -217,7 +229,13 @@ function injectStyle() {
   font:15px/1.5 ui-sans-serif,"DejaVu Sans",system-ui,sans-serif;
 }
 #paper-read-layer h1,#paper-read-layer h2,#paper-read-layer h3 { color:#f2c14e; margin:.5em 0 .35em; line-height:1.25 }
-#paper-read-layer h1 { font-size:24px } #paper-read-layer h2 { font-size:19px } #paper-read-layer h3 { font-size:16px }
+/* MATCHED TO bend-layout.js's HEADING_SIZE table. The canvas tier draws h1 at
+   30px and the DOM tier drew it at 24, so entering a pane visibly re-flowed the
+   document -- reported as the font size changing on click. Two renderers will
+   never be glyph-identical, but they can agree about size. */
+#paper-read-layer h1 { font-size:30px } #paper-read-layer h2 { font-size:25px } #paper-read-layer h3 { font-size:21px }
+#paper-read-layer h4 { font-size:18px } #paper-read-layer h5 { font-size:16px } #paper-read-layer h6 { font-size:15px }
+#paper-read-layer .paper-read-root { font-size:15px }
 #paper-read-layer p { margin:.5em 0 }
 #paper-read-layer pre { background:#0b0e1a; color:#2de2e6; padding:10px; overflow:auto; border-radius:3px }
 #paper-read-layer blockquote { border-left:3px solid #2de2e6; margin:.6em 0; padding-left:12px; color:#a9b2c6 }
