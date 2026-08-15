@@ -92,6 +92,7 @@ import {
   stepFlight,
   installInput,
   dropAt,
+  inputGate,
 } from './travel.js'
 import {
   attachRrabbit,
@@ -2295,6 +2296,18 @@ window.__fed = () => {
     }),
   }
 }
+
+// DID A POINTER EVENT REACH AN APPLICATION WITHOUT GOING THROUGH THE SHELL?
+//
+// `dropped` counts events Greenfield's own canvas listeners tried to queue --
+// out on the road that was every move, every click and the pointer capture that
+// came with it, aimed at whichever client lay under a flat-desktop coordinate
+// that means nothing in a perspective scene. Non-zero while driving is the
+// passthrough; `passed` is the shell's own properly-mapped sends.
+//
+// Both counts together, because "the click did nothing" and "the click went
+// somewhere else" look identical from outside and only one of them is this.
+window.__inputGate = () => ({ ...inputGate, byKind: { ...inputGate.byKind }, mode: state.mode })
 
 window.__dash = () => (dash ? dash.report() : null)
 

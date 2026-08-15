@@ -1428,6 +1428,72 @@ function overFlatSurface(ev) {
   return keyOf(p.sign.view) === keyOf(flat.view) ? p : null
 }
 
+// THE SHELL IS THE ONLY THING ALLOWED TO PUT AN EVENT IN THE QUEUE.
+//
+// Greenfield binds its own pointermove/pointerdown/pointerup/wheel/keydown/keyup
+// to the scene canvas (browser/input.js) and maps clientX/clientY STRAIGHT to
+// scene coordinates -- correct for a flat desktop, meaningless for a quad in
+// perspective. The header of shell.js says those listeners are silenced with a
+// capture-phase stopPropagation on window; `swallow` below does that, but only
+// `if (state.mode === 'flat')`. So OUT ON THE ROAD THEY ALL STILL RAN:
+//
+//   * every pointer move sent motion to whichever client happened to lie under
+//     that flat-desktop coordinate;
+//   * every click sent it a button press -- and took a `setPointerCapture`;
+//   * EVERY KEYSTROKE went to the focused client, preventDefault and all.
+//
+// Reported as "in driver mode a click on the app screen is not supposed to
+// passthrough to the app, it is only supposed to enter the detail window view",
+// which is exactly right and is the rule this restores.
+//
+// The gate is at the QUEUE rather than at the listener, because widening
+// `swallow` to every mode cannot work: a capture-phase stopPropagation on
+// `window` also stops the SHELL's own driving-mode listeners, which are bound to
+// the canvas (the flatten click, the road hover, the ramps). One owner, checked
+// where the two paths finally meet.
+//
+// Greenfield's `focus`/`blur`/`pointerleave` handlers are untouched on purpose:
+// they carry keyboard focus in and out and queue nothing.
+//
+// AND `queueKey` IS DELIBERATELY NOT GATED. The keyboard is the one input the
+// shell does NOT remap: Greenfield's keydown/keyup are bound to the canvas and
+// its focus/blur handlers are what tell the client it has the keyboard, so DOM
+// focus IS the routing (`hooks.shellKeyboard`, and the note above it). Gating
+// the key queue would not fix a route, it would silently stop every keystroke
+// reaching every application -- there is no shell-side sender to let through.
+// Only the POINTER is remapped, so only the pointer is gated.
+let shellIsSending = 0
+export const inputGate = { dropped: 0, passed: 0, byKind: {}, lastDropAt: null }
+
+function fromShell(fn) {
+  shellIsSending++
+  try {
+    return fn()
+  } finally {
+    shellIsSending--
+  }
+}
+
+function gateInputQueue() {
+  const q = session?.inputQueue
+  if (!q || q.__gated) return
+  q.__gated = true
+  for (const name of ['queueMotion', 'queueButton', 'queueAxis']) {
+    const real = q[name]?.bind(q)
+    if (!real) continue
+    q[name] = (...args) => {
+      if (!shellIsSending) {
+        inputGate.dropped++
+        inputGate.byKind[name] = (inputGate.byKind[name] ?? 0) + 1
+        inputGate.lastDropAt = state.mode
+        return
+      }
+      inputGate.passed++
+      return real(...args)
+    }
+  }
+}
+
 function sendMotion(ev) {
   const p = scenePointFromEvent(ev)
   if (!p) return
@@ -1438,30 +1504,34 @@ function sendMotion(ev) {
   // otherwise only show up as an application behaving strangely.
   const picked = session.renderer.pickView({ x: p.x, y: p.y })
   state.lastPickMatched = picked ? keyOf(picked) === keyOf(p.sign.view) : false
-  session.inputQueue.queueMotion({
-    x: p.x,
-    y: p.y,
-    timestamp: ev.timeStamp,
-    buttonCode: 0,
-    released: false,
-    buttons: ev.buttons ?? 0,
-    sceneId: SCENE_ID,
-  })
+  fromShell(() =>
+    session.inputQueue.queueMotion({
+      x: p.x,
+      y: p.y,
+      timestamp: ev.timeStamp,
+      buttonCode: 0,
+      released: false,
+      buttons: ev.buttons ?? 0,
+      sceneId: SCENE_ID,
+    }),
+  )
   state.pointerSent++
 }
 
 function sendButton(ev, released) {
   const p = scenePointFromEvent(ev)
   if (!p) return
-  session.inputQueue.queueButton({
-    x: p.x,
-    y: p.y,
-    timestamp: ev.timeStamp,
-    buttonCode: ev.button ?? 0,
-    released,
-    buttons: ev.buttons ?? 0,
-    sceneId: SCENE_ID,
-  })
+  fromShell(() =>
+    session.inputQueue.queueButton({
+      x: p.x,
+      y: p.y,
+      timestamp: ev.timeStamp,
+      buttonCode: ev.button ?? 0,
+      released,
+      buttons: ev.buttons ?? 0,
+      sceneId: SCENE_ID,
+    }),
+  )
   state.buttonSent++
 }
 
@@ -1485,6 +1555,11 @@ export function dropAt(clientX, clientY) {
 
 function installInput() {
   const canvas = renderer.domElement
+
+  // Installed FIRST, before any listener below can fire: a click that arrives
+  // between the canvas being live and the gate being on is a click that reaches
+  // an application from the road, which is the thing this exists to stop.
+  gateInputQueue()
 
   // WHO HAS THE KEYBOARD, published for map.js to call.
   //
@@ -1725,7 +1800,7 @@ function installInput() {
         wheelOwner = 'app'
       }
       if (wheelOwner === 'app') {
-        session.inputQueue.queueAxis(createAxisEventFromWheelEvent(ev, SCENE_ID))
+        fromShell(() => session.inputQueue.queueAxis(createAxisEventFromWheelEvent(ev, SCENE_ID)))
         state.lastAxisToApp = true
         return
       }

@@ -76,6 +76,28 @@ like a crash and it is a feature. Any single-instance GTK app needs the same
 entry. `WAYLAND_DISPLAY` is *not* the problem — `launchApplication` sets it to
 the proxy's own socket, last, over `process.env`.
 
+### Firefox connects and never maps — OPEN, reproduced 2026-08-14
+
+Reported from the image as "firefox won't start unless the notepad app has been
+started". Reproduced on the host, and the ordering is not the whole of it:
+
+| step | result |
+|---|---|
+| fresh proxy, fresh page, `__launch('/firefox')` **first** | process alive, `Wayland client connection to browser is open`, protocol channel `id=1` opened — and **no surface, `h264: 0`, ever** |
+| then `__launch('/text-editor')` in the same session | editor maps in ~10 s, Firefox **still absent** |
+| `MOZ_DISABLE_WAYLAND_PROXY=1` | no change |
+
+Firefox prints **nothing** on stdout or stderr the whole time — the proxy logs
+child output, and there is one line in it (`Child process started.`). So this is
+not a crash, not the DBus handoff of §2 above, and not Firefox's own
+`wayland-proxy` between its processes.
+
+`appStates: open` with `views: []` is §3's signature: the signalling socket
+connected and no surface was ever created. The next thing to look at is which
+globals Firefox binds and what it is waiting on before it will map a toplevel —
+`wl_output`'s `done`, `wl_shm` formats, or a `zwp_linux_dmabuf` roundtrip that
+never answers. Not yet done.
+
 ---
 
 ## 3. Measurements that settle arguments
@@ -523,3 +545,49 @@ By the time `adoptPending` sees the new size the old picture is already gone and
 the new one is already there — there is nothing to carry, and the "old target"
 and the new one are the same texture. A snapshot would have to be taken *before*
 the pass, and `fenceScenePasses` is the only place that sees it coming.
+
+---
+
+## 9. A click on the road went to the application
+
+`swallow` in `travel.js` stops Greenfield's own canvas listeners with a
+capture-phase `stopPropagation` on `window` — but only
+`if (state.mode === 'flat')`. **Out on the road every one of them still ran**
+(`browser/input.js` binds pointermove/pointerdown/pointerup/wheel to the canvas
+and maps `clientX/clientY` straight to scene coordinates):
+
+- every pointer move sent motion to whichever client lay under that
+  flat-desktop coordinate;
+- every click sent it a button press, and took a `setPointerCapture` with it;
+- pointer focus moved, and the keyboard follows pointer focus.
+
+Reported as "in driver mode a click on the app screen is not supposed to
+passthrough to the app, it is only supposed to enter the detail window view".
+
+The gate is at the **queue**, not the listener: widening `swallow` to every mode
+cannot work, because a capture-phase `stopPropagation` on `window` also kills the
+shell's *own* driving-mode listeners, which are bound to the canvas (the flatten
+click, the road hover, the ramps). So `session.inputQueue`'s
+`queueMotion`/`queueButton`/`queueAxis` are wrapped, and anything that did not
+come through the shell's own remap is dropped and counted.
+
+```js
+__inputGate()   // { dropped, passed, byKind, lastDropAt, mode }
+```
+
+Measured, one real click:
+
+| | dropped | passed |
+|---|---|---|
+| driving, click on a window | **2** (`queueButton` ×2) | 0 |
+| flat, click on the window | 2 (unchanged) | **3** (1 motion + 2 button), `lastPickMatched: true` |
+
+`dropped` climbing while `mode` is `driving` **is** the passthrough. Both counts
+together, because "the click did nothing" and "the click went somewhere else"
+look identical from outside and only one of them is this.
+
+**`queueKey` is deliberately not gated.** The keyboard is the one input the shell
+does not remap — Greenfield's keydown/keyup are bound to the canvas and its
+`focus`/`blur` handlers are the routing (`hooks.shellKeyboard`). Gating it would
+not fix a route, it would stop every keystroke reaching every application, since
+there is no shell-side sender to let through.
