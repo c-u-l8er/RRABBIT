@@ -1066,7 +1066,12 @@ function sig() {
     // can see them change -- and they change from the KEYBOARD, which the map
     // never hears about.
     `${track}#${tracks.activeIndex()}#` +
-      tracks.list().map((t) => `${t.name}@${t.at}:${t.history.length}`).join(','),
+      // THE ID IS IN THE KEY NOW. With ten fixed slots the position said which
+      // track this was; with a sparse set two blank tracks on the same road are
+      // the same string, and the bar would not redraw when one was made or
+      // deleted. Cheap insurance against a stale bar that only shows up once
+      // somebody has tracks 1 and 7 and nothing else.
+      tracks.list().map((t) => `${t.id}${t.name}@${t.at}:${t.history.length}`).join(','),
   ].join('#')
 }
 

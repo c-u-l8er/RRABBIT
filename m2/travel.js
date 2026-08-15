@@ -23,6 +23,7 @@ import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
 import { rampMeshes, dashActionOf, setRampHover } from './ramps.js'
 import { toggleMap, closeMap, openMap, openMapAt, openMapAtDash, isOpen as mapIsOpen } from './map.js'
+import { toggleReel, closeReel, isOpen as reelIsOpen } from './reel.js'
 
 let renderer, gl, scene, camera, session
 export function attachTravel(c) {
@@ -110,10 +111,14 @@ function commitDigits() {
   digitTimer = 0
   const n = Number(digits)
   digits = ''
-  if (n < 1 || n > tracks.COUNT) {
+  if (n < 1 || n > tracks.MAX) {
     state.lastTrackKey = { typed: n, track: null, went: null }
     return null
   }
+  // A NUMBER PRESSED OVER THE REEL DRIVES AND THE SCREEN GETS OUT OF THE WAY.
+  // The reel is a list of places to go; leaving it up over the road you just
+  // asked for would make the number look like it had not worked.
+  if (reelIsOpen()) closeReel()
   leaveTrack()
   const to = tracks.select(n)
   state.lastTrackKey = { typed: n, track: n, went: to ?? null }
@@ -1875,7 +1880,10 @@ function installInput() {
     roadZ,
     ...roadBounds(),
     cameraZ: camera.position.z,
-    parked: tracks.report().tracks[tracks.activeIndex() - 1]?.roads ?? {},
+    // BY ID, NOT BY POSITION. `tracks[activeIndex() - 1]` was the same thing
+    // while there were ten tracks in ten slots; with a sparse set the third
+    // entry is not track 3 and this reported another track's roads.
+    parked: tracks.report().tracks.find((t) => t.id === tracks.activeIndex())?.roads ?? {},
   })
 
   // What the GPU is actually holding. A shell that gets slower with every
@@ -2114,14 +2122,37 @@ function installInput() {
         return
       }
 
+      // The reel gets Esc on the same terms and for the same reason -- it is a
+      // menu of ours over whatever is behind it, and Esc belongs to the topmost
+      // menu everywhere else in computing too.
+      if (ev.key === 'Escape' && reelIsOpen()) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        closeReel()
+        return
+      }
+
       // A FIELD YOU ARE TYPING IN OWNS ITS KEYSTROKES. The map has name boxes and
       // a lane box, and without this naming a workspace "build 2" switches you to
       // track 2 while you type it and a zero shuts the map you are editing in.
       // Above the flat branch as well as below it, because the map can be open
       // over a flattened window now.
       if (ev.target?.closest?.('#map input, #map select')) return
+      // The reel's name boxes are text fields over the same shell, so a `t`
+      // typed into one must stay in it rather than shutting the screen it is on.
+      if (ev.target?.closest?.('#reel input')) return
 
       if (!flat && (ev.key === 'o' || ev.key === 'O')) return void toggleMap()
+
+      // T FOR TRACKS, and it is not `r` for reel because `r` is already "R for
+      // road" in the release chord below. Two meanings for one letter separated
+      // only by whether three modifiers were held is the kind of binding that
+      // reads fine here and is impossible to remember at the keyboard.
+      //
+      // `0` opens the map, which is the graph of ROADS. `t` opens the reel,
+      // which is the list of WORK. They are deliberately different screens
+      // because two tracks parked on one road are one node and two rows.
+      if (!flat && (ev.key === 't' || ev.key === 'T')) return void toggleReel()
       if (!/^[0-9]$/.test(ev.key)) return
       // THE DIGITS BELONG TO THE APPLICATION ONLY IN FULL SCREEN. The line this
       // replaces was `if (flat) return`, which gave them up the moment you stood
@@ -2186,7 +2217,14 @@ function installInput() {
       // spot and the following `0` was a fresh leading zero -- which is the map.
       // Measured exactly that: `1` `0` selected track 1 and opened the map, and
       // track 10 could not be reached at all.
-      if (Number(digits) * 10 > tracks.COUNT) commitDigits()
+      //
+      // NOW IT IS THE POPULATION AND NOT THE CEILING (tracks.js). Reading MAX
+      // here would be that same bug with the sign flipped: `7 * 10 > 999` is
+      // false, so every single-digit press would sit out the gap waiting for a
+      // second digit that in most shells cannot come. `canGrow` answers the
+      // question the old arithmetic was approximating -- is there a LONGER track
+      // that starts with this -- so nine tracks or fewer never start the timer.
+      if (!tracks.canGrow(digits)) commitDigits()
       else digitTimer = setTimeout(commitDigits, DIGIT_GAP)
       return void 0
     },

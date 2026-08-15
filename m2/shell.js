@@ -116,6 +116,7 @@ import {
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
+import { attachReel, openReel, closeReel, reelReport } from './reel.js'
 
 // THE DECODER'S OWN GEOMETRY -- the runbook's probe for a picture that does not
 // line up, and the one that found section 23. A padded decode and a shifted
@@ -847,6 +848,9 @@ function buildWorld(canvas) {
     // function the keyboard does rather than a second path that could disagree.
     track: goTrack,
   })
+  // The reel needs exactly one verb and it is the same one: which track, never
+  // how to get there. Driving stays in travel.js.
+  attachReel({ track: goTrack })
   hooks.closeWindow = requestCloseWindow
 
   // FLY TO A WINDOW THAT HAS JUST APPEARED.
@@ -2515,6 +2519,28 @@ window.__views = () =>
       knownAsSign: signs.has(keyOf(v)),
       size,
       texSize,
+      // THE DECODER'S CODED SIZE, BESIDE THE ALLOCATION IT IS NOT.
+      //
+      // `texSize` is the destination texture Greenfield allocated
+      // (`setContentBuffer(null, opaque.codedSize)`); `decoderCoded` is what the
+      // VideoDecoder called the frame. The UVs are computed from `texSize` and
+      // ONLY from it. These are reported side by side because they DISAGREE and
+      // the disagreement was the bug: measured on one gnome-text-editor frame,
+      // texSize 1024x640 against decoderCoded 1024x**642**, and the old
+      // arithmetic divided by the second.
+      //
+      // `codedFromThisSurface` is the sharper half. `decodeGeom` is ONE
+      // module-global -- the last decode from ANY surface -- and the stamp's only
+      // guard is that the coded size contains this surface and is under twice it.
+      // A small dialog beside a big window passes that test easily and gets the
+      // big window's number, which under the old `padX = tw - width` slid the
+      // sampled rect clean off the picture. **That is a window that is simply
+      // black**, and it is what "Restore Session, black glass" has been every
+      // time it has been photographed. False here means the stamp is not this
+      // surface's; it no longer changes what is drawn, only what this says.
+      decoderCoded: rs?.__codedSize ? { w: rs.__codedSize.w, h: rs.__codedSize.h } : null,
+      codedFromThisSurface: !!(rs?.__codedSize && texSize &&
+        rs.__codedSize.w === texSize.w && rs.__codedSize.h === texSize.h),
       // THE WINDOW RECT THE CLIENT DECLARED, which is not the buffer it painted.
       // A client drawing its own decorations paints a shadow into the buffer and
       // then calls `xdg_surface.set_window_geometry` to say which part of it is
@@ -2711,6 +2737,15 @@ window.__tracks = (n) => {
   }
 }
 window.__tracksReset = () => tracks.reset()
+// The reel, and the recording a row is claiming. `__rec` prints the STEPS --
+// `__tracks` deliberately prints only their count, because a few thousand of
+// them in a console buries everything else in the report.
+window.__reel = (openIt) => {
+  if (openIt === false) closeReel()
+  else if (openIt === true) openReel()
+  return reelReport()
+}
+window.__rec = (id) => tracks.recordingOf(id ?? tracks.activeIndex())
 window.__map = (openIt) => {
   if (openIt === false) closeMap()
   else if (openIt === true) openMap()
