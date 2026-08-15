@@ -2301,7 +2301,16 @@ function installInput() {
     const paperKey = hit.object.userData.paperKey
     if (paperKey) {
       const p = papers.get(paperKey)
-      if (p) applyOp({ op: 'read', district: p.district, side: p.side, dash: p.dash }, { by: 'pointer' })
+      if (!p) return
+      const at = { district: p.district, side: p.side, dash: p.dash }
+      const u = hit.object.userData
+      // WHICH CONTROL, or the document itself. Every branch emits an op; none of
+      // them touches a pane directly, so a click and a program and a replay are
+      // still one code path.
+      if (u.paperClose) applyOp({ op: 'close', ...at }, { by: 'pointer' })
+      else if (u.paperCast) applyOp({ op: 'cast', ...at }, { by: 'pointer' })
+      else if (u.paperResize) applyOp({ op: 'resize', ...at, w: (p.w ?? 300) + 150 }, { by: 'pointer' })
+      else applyOp({ op: 'read', ...at }, { by: 'pointer' })
       return
     }
 

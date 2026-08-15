@@ -37,13 +37,14 @@
 // would read as a document that vanished.
 
 import * as THREE from 'three'
-import { canvasTexture, papers, dashZ, slotFree, nextFreeSlot, state, DASH_MAX } from './world.js'
+import { canvasTexture, papers, dashZ, slotFree, nextFreeSlot, state, DASH_MAX, hooks } from './world.js'
 import * as ws from './workspaces.js'
 import { layoutBend, cardOf, THEME } from './paper/bend-layout.js'
 import { layoutRune, floorsOf, RUNE_THEME } from './paper/rune-layout.js'
 import { paint, paintCard, measurerFor } from './paper/paint.js'
 import { allocCard, freeCard, drawCard, planeFor, atlasReport, CARD_W, CARD_H } from './paper/atlas.js'
 import { openRead, closeRead, readingKey, isReading } from './paper/read.js'
+import { grabTexture, castTexture, closeTexture, GRIP_W, GRIP_H, GRIP_REACH, PAD } from './rrabbit.js'
 import { register as registerOp, apply as applyOp } from './ops.js'
 
 let scene = null
@@ -56,10 +57,19 @@ export function attachPaper(c) {
 // physically bigger without re-laying-out its text.
 const PX_W = 640
 const PX_H = 420
-// World units. Matched to the window signs beside them so a road carrying both
-// does not read as two scales.
+// World units, and now a DEFAULT rather than a constant -- a pane can be resized.
+// See `sizeOf`: the geometry is still shared, but keyed by size instead of being
+// one object, so the sharing survives a road whose panes are not all the same.
 const W = 300
 const H = 197
+const MIN_W = 150
+const MAX_W = 900
+// The canvas is sized FROM the world size, so a bigger pane lays the document out
+// wider rather than magnifying the same layout. That is the difference between
+// resizing a document and zooming a picture of one, and it is the whole reason
+// resize is worth having on a pane at all.
+const PX_PER_UNIT = PX_W / W
+const sizeOf = (p) => ({ w: p.w ?? W, h: p.h ?? H })
 const ROAD_Y = -30
 const STAND_X = 190
 const STAND_Y = 34
@@ -70,7 +80,17 @@ const keyOf = (district, side, dash) => `${district}:${side > 0 ? 'r' : 'l'}:${d
 //
 // Built once, on first use. Every pane's post is the same box and every pane's
 // frame is the same quad, so N panes is one geometry each and not N.
-let postGeo = null, postMat = null, frameGeo = null, frameMat = null, paintGeo = null
+let postGeo = null, postMat = null, frameMat = null
+// Keyed by `${w}x${h}`: panes of the same size still share one geometry, which is
+// the property rung 4 measured, and a resized pane costs one more entry rather
+// than forcing every pane to own its own.
+const planeCache = new Map()
+function planeGeo(w, h) {
+  const k = `${w}x${h}`
+  let g = planeCache.get(k)
+  if (!g) planeCache.set(k, (g = new THREE.PlaneGeometry(w, h)))
+  return g
+}
 function shared() {
   if (postGeo) return
   // STAND_Y, NOT STAND_Y + H/2. The post runs from the road to the pane's BOTTOM
@@ -79,12 +99,7 @@ function shared() {
   // sticking through the screen", which is exactly what it was.
   postGeo = new THREE.BoxGeometry(6, STAND_Y, 6)
   postMat = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.8 })
-  frameGeo = new THREE.PlaneGeometry(W + 10, H + 10)
   frameMat = new THREE.MeshBasicMaterial({ color: 0x2de2e6 })
-  // The paint tier's quad is the same size for every pane; only the MATERIAL
-  // differs (each has its own canvas). So the geometry is shared and the material
-  // is not, which is the opposite of the card tier.
-  paintGeo = new THREE.PlaneGeometry(W, H)
 }
 
 // ---- painting ---------------------------------------------------------------
@@ -98,16 +113,22 @@ function layoutOf(p, width, height, measure) {
 function ensurePaint(p) {
   if (p.paintMesh) return
   shared()
+  const { w, h } = sizeOf(p)
+  const px = Math.round(w * PX_PER_UNIT)
+  const py = Math.round(h * PX_PER_UNIT)
   p.canvas = document.createElement('canvas')
-  p.canvas.width = PX_W
-  p.canvas.height = PX_H
+  p.canvas.width = px
+  p.canvas.height = py
   // Not a bare CanvasTexture -- 640x420 is not a power of two and the pane
   // repaints when its tier changes. Same reason ramps.js gives.
   p.tex = canvasTexture(THREE, p.canvas)
   p.mat = new THREE.MeshBasicMaterial({ map: p.tex, toneMapped: false })
 
   const ctx = p.canvas.getContext('2d')
-  const r = layoutOf(p, PX_W, PX_H, measurerFor(ctx))
+  // Laid out AT THE PANE'S SIZE. A bigger pane fits more of the document rather
+  // than magnifying the same page, which is what makes resize mean something for a
+  // document instead of being a zoom with extra steps.
+  const r = layoutOf(p, px, py, measurerFor(ctx))
   paint(ctx, r.commands)
 
   // OVERFLOW IS DRAWN, not only reported. A pane that runs out of box and stops
@@ -115,14 +136,18 @@ function ensurePaint(p) {
   // scroll to find out.
   if (r.overflow) {
     ctx.fillStyle = '#e2564d'
-    ctx.fillRect(0, PX_H - 3, PX_W, 3)
+    ctx.fillRect(0, py - 3, px, 3)
     ctx.font = '11px ui-monospace, monospace'
-    ctx.fillText('more below', 10, PX_H - 8)
+    ctx.fillText('more below', 10, py - 8)
   }
   p.tex.needsUpdate = true
   p.last = r
+  // The TV letterboxes on `size`, so a pane on air has to answer the same question
+  // a window does. Duck-typed rather than wrapped: broadcast.js reads `tex` and
+  // `size` and nothing else, and a wrapper would be a second thing to keep true.
+  p.size = { width: px, height: py }
 
-  p.paintMesh = new THREE.Mesh(paintGeo, p.mat)
+  p.paintMesh = new THREE.Mesh(planeGeo(w, h), p.mat)
   p.paintMesh.rotation.y = -p.side * 0.42
   p.paintMesh.userData.paperKey = p.key
   scene.add(p.paintMesh)
@@ -148,7 +173,7 @@ function ensureCard(p) {
   shared()
   p.cell = allocCard()
   drawCard(p.cell, (ctx, w, h) => paintCard(ctx, p.card, { width: w, height: h, theme: THEME }))
-  p.cardGeo = planeFor(THREE, W, H, p.cell.uv)
+  { const { w, h } = sizeOf(p); p.cardGeo = planeFor(THREE, w, h, p.cell.uv) }
   p.cardMesh = new THREE.Mesh(p.cardGeo, p.cell.material)
   p.cardMesh.rotation.y = -p.side * 0.42
   p.cardMesh.userData.paperKey = p.key
@@ -203,8 +228,10 @@ function readPoseOf(p) {
 function materialize(p) {
   if (p.frame) return
   shared()
-  p.frame = new THREE.Mesh(frameGeo, frameMat)
+  const { w, h } = sizeOf(p)
+  p.frame = new THREE.Mesh(planeGeo(w + 10, h + 10), frameMat)
   p.frame.rotation.y = -p.side * 0.42
+  addChrome(p, w, h)
   p.post = new THREE.Mesh(postGeo, postMat)
 
   const x = ws.laneX(p.district) + p.side * STAND_X
@@ -217,8 +244,54 @@ function materialize(p) {
   scene.add(p.post)
 }
 
+// THE SAME CONTROLS A WINDOW HAS, in the same corners, at the same size and the
+// same distance out -- `X--` top-left, `--&` bottom-left, the resize grab
+// top-right. The glyph textures and the geometry constants are imported from
+// rrabbit.js rather than redrawn, because a pane whose close button is a different
+// mark from a window's close button is a second thing to learn for no reason.
+//
+// PARENTED TO THE FRAME, not to the tier mesh: the tier mesh is destroyed and
+// rebuilt every time a pane crosses a tier boundary, and chrome that had to be
+// re-added on each crossing would be chrome that is missing for one frame every
+// time you drive past.
+//
+// WHOLLY OUTSIDE THE PANE, which is the rule rrabbit.js established for a client's
+// surface and which holds here for a different reason: a control drawn over a
+// document covers a word.
+function addChrome(p, w, h) {
+  const put = (tex, rot, x, y, data) => {
+    const btn = new THREE.Mesh(
+      planeGeo(GRIP_W, GRIP_H),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false }),
+    )
+    btn.rotation.z = rot
+    btn.position.set(x, y, 3)
+    Object.assign(btn.userData, data, { chrome: true, paperKey: p.key })
+    // HIDDEN UNTIL THE PANE IS CLOSE ENOUGH TO AIM AT, the rule rrabbit.js set for
+    // a window's controls. A control on a card two hundred units up the road is a
+    // fleck that does something, and every pointer path here has to be able to say
+    // what it hit.
+    btn.visible = false
+    p.frame.add(btn)
+    // The hit area is bigger than the mark and reaches FURTHER OUT, never further
+    // in -- an invisible target over the document eats a click meant for a link.
+    const pad = new THREE.Mesh(planeGeo(PAD, PAD), new THREE.MeshBasicMaterial({ visible: false }))
+    pad.position.set(x < 0 ? -(w / 2 + PAD / 2) : w / 2 + PAD / 2, y < 0 ? -(h / 2 + PAD / 2) : h / 2 + PAD / 2, 3)
+    Object.assign(pad.userData, data, { chrome: true, paperKey: p.key })
+    p.frame.add(pad)
+    return [btn, pad]
+  }
+
+  p.chrome = [
+    ...put(closeTexture(), -Math.PI / 4, -(w / 2 + GRIP_REACH), h / 2 + GRIP_REACH, { paperClose: true }),
+    ...put(castTexture(), Math.PI / 4, -(w / 2 + GRIP_REACH), -(h / 2 + GRIP_REACH), { paperCast: true }),
+    ...put(grabTexture(), Math.PI / 4, w / 2 + GRIP_REACH, h / 2 + GRIP_REACH, { paperResize: true }),
+  ]
+}
+
 function dematerialize(p) {
   if (!p.frame) return
+  p.chrome = null
   scene.remove(p.frame)
   scene.remove(p.post)
   // Geometry and material are SHARED across every pane and must not be disposed
@@ -345,12 +418,24 @@ export function syncPaper() {
   // would be left holding a document whose backing had been collected.
   const held = readingKey()
   for (const p of papers.values()) {
-    if (held && p.key === held) continue
+    // A PANE BEING READ OR BROADCAST IS NEVER RETIERED.
+    //
+    // The read case is obvious -- releasing the canvas under a mounted DOM object
+    // strands the reader. The BROADCAST case was measured and is the opposite of
+    // obvious: an on-air pane whose tier was allowed to fall released its texture,
+    // the shell correctly took it off air, and the TV went back to the default
+    // panel. Correct by the rule and useless in practice, because watching a pane
+    // WHILE DRIVING AWAY FROM IT is the entire reason to cast one. Casting pins the
+    // paint tier for exactly as long as the pane is on air.
+    if ((held && p.key === held) || p.key === castKey) continue
     if (p.want === p.tier) continue
     p.tier = p.want
     if (p.want === 'paint') { releaseCard(p); materialize(p); ensurePaint(p) }
     else if (p.want === 'card') { releasePaint(p); materialize(p); ensureCard(p) }
     else { releasePaint(p); releaseCard(p); dematerialize(p) }
+    // The visible marks follow the tier; the invisible pads do not need to, because
+    // `paperMeshes` already declines to offer them for aiming off the paint tier.
+    if (p.chrome) for (const m of p.chrome) if (m.material.map) m.visible = p.want === 'paint'
   }
 }
 
@@ -364,6 +449,11 @@ export function syncPaper() {
 // Entering a district loads its records and leaves every other district's panes
 // unbuilt. That is what keeps `papers` -- and therefore the per-frame loop in
 // `syncPaper` -- proportional to the road you are on rather than to the corpus.
+
+// The pane on air, by key. Held here rather than read back from the shell because
+// `syncPaper` consults it every frame and a hook call per pane per frame to ask
+// "are you on television" is a cost with no payer.
+let castKey = null
 
 let store = null
 let resident = null
@@ -420,7 +510,10 @@ export function paperMeshes() {
   const out = []
   for (const p of papers.values()) {
     const m = p.paintMesh ?? p.cardMesh
-    if (m?.visible) out.push(m)
+    if (m) out.push(m)
+    // Chrome only where it can be aimed at -- a control on a card two hundred units
+    // up the road is a fleck that does something, which is worse than no control.
+    if (p.tier === 'paint' && p.chrome) out.push(...p.chrome)
   }
   return out
 }
@@ -455,6 +548,74 @@ export function registerPaperOps() {
     },
   })
   registerOp('unread', { pre: () => true, perform: () => { closeRead(); return { ok: true } } })
+
+  const paneAt = (op) => papers.get(keyOf(op.district, op.side, op.dash)) ?? null
+
+  registerOp('close', {
+    pre: (op) => (paneAt(op) ? true : 'OP_NO_PANE'),
+    perform: (op) => {
+      const p = paneAt(op)
+      // Closing the pane you are reading closes the read tier with it. Leaving a
+      // DOM object mounted over a document that no longer exists is the one way
+      // this could strand a reader.
+      if (readingKey() === p.key) closeRead()
+      // A closed pane cannot stay on air either, and it is unpinned here rather
+      // than left for the shell to notice, so the pin cannot outlive the pane.
+      if (castKey === p.key) { castKey = null; hooks.castPaper?.(p) }
+      removePaper(p.key)
+      return { ok: true }
+    },
+  })
+
+  registerOp('resize', {
+    pre: (op) => {
+      if (!paneAt(op)) return 'OP_NO_PANE'
+      return Number.isFinite(op.w) ? true : 'OP_BAD_SIZE'
+    },
+    perform: (op) => {
+      const p = paneAt(op)
+      // CLAMPED HERE, not by the caller. A precondition that only accepts already
+      // legal values makes every caller responsible for the bounds, and one of them
+      // will not be.
+      const w = Math.max(MIN_W, Math.min(MAX_W, Math.round(op.w)))
+      const h = Math.round(w * (H / W))
+      if (w === (p.w ?? W)) return { ok: true, unchanged: true }
+      p.w = w
+      p.h = h
+      // Everything sized is dropped and rebuilt by the next sync: the canvas is a
+      // different number of pixels, the quad is a different geometry, and the
+      // document is laid out again at the new width rather than stretched.
+      const wasReading = readingKey() === p.key
+      releasePaint(p)
+      releaseCard(p)
+      dematerialize(p)
+      p.tier = null
+      syncPaper()
+      if (wasReading) { p.readPose = readPoseOf(p); openRead(p) }
+      return { ok: true, w, h }
+    },
+  })
+
+  registerOp('cast', {
+    pre: (op) => {
+      const p = paneAt(op)
+      if (!p) return 'OP_NO_PANE'
+      // A pane can only go on air if it HAS a picture, and only the paint tier has
+      // one. Refusing by name beats casting a blank screen, which reads as the TV
+      // being broken rather than as the pane being too far away.
+      if (!p.tex) return 'OP_PANE_NOT_PAINTED'
+      return true
+    },
+    perform: (op) => {
+      const p = paneAt(op)
+      const r = hooks.castPaper?.(p)
+      if (!r) return { ok: false, why: 'OP_NO_BROADCAST' }
+      // Toggled, like a window's `--&`. The key is what pins the tier, so it has to
+      // come back off when the broadcast does.
+      castKey = r.on ? p.key : null
+      return { ok: true, ...r }
+    },
+  })
 }
 
 // What Escape inside a read pane calls. A hook rather than a direct import because
@@ -480,6 +641,7 @@ export const paperReport = () => ({
     n + (p.frame ? 2 : 0) + (p.paintMesh ? 1 : 0) + (p.cardMesh ? 1 : 0), 0),
   paintMax: PAINT_MAX,
   reading: readingKey(),
+  casting: castKey,
   atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
   stream: { resident, ...streamStats, store: store?.kind ?? null },

@@ -576,8 +576,68 @@ non-plannable op is only safe to drop when the op that follows it implies it.**
 - CSS3D does not composite with WebGL depth, so the read pane is always in front. Correct for one
   pane and wrong for two, which is why only one may be at this tier.
 
+## 17. Pane chrome — the controls a window has, as ops
+
+Reported: panes cannot be zoomed, pinned with `--&`, resized or closed. They now
+can, and every one of them is an op through the seam rather than a handler that
+touches a pane directly — so the click path and the program path stay one path.
+`close`, `resize` and `cast` join `read`/`unread`, and the table went 4 → 7.
+
+The glyphs and the corner geometry are **imported from `rrabbit.js`**, not redrawn:
+`X--` top-left, `--&` bottom-left, the resize grab top-right, same size and same
+distance out. A pane whose close button is a different mark from a window's close
+button is a second thing to learn for no reason.
+
+Measured in the guest, all three driven through `apply`:
+
+```
+before         20 panes, 5 canvases
+resize +150    {"ok":true,"result":{"ok":true,"w":450,"h":296}}
+  size now     450 x 296, canvas 960x631
+cast           {"ok":true,"result":{"ok":true,"on":true,"key":"build:r:12"}}
+close          {"ok":true,"result":{"ok":true}}
+after          19 panes, 3 canvases
+close again    {"ok":false,"why":"OP_NO_PANE"}
+resize NaN     {"ok":false,"why":"OP_BAD_SIZE"}
+```
+
+**Resize re-lays the document out; it does not magnify it.** The canvas is sized
+from the world size, so a wider pane fits more of the document. That is the
+difference between resizing a document and zooming a picture of one, and it is the
+only reason resize is worth having on a pane.
+
+**Zoom is the read tier.** Clicking a pane's body emits `read`, which is a pane's
+analogue of standing in a window — and unlike a canvas zoom it can be read to the
+end, because it scrolls.
+
+### 17.1 Cast took three fixes, and each reported success while showing nothing
+
+Casting a pane was the worst-shaped bug of the rung: the op returned `ok` at every
+step and the screen stayed on the default panel.
+
+1. **`tv.sync`'s liveness check is a *window* check.** It drops the picture unless
+   `keyOf(showing)` is in the sign ledger, and `keyOf` reads
+   `view.surface.resource…` — a pane has no surface. Passing `null` for `aliveKeys`
+   when a pane is on air skips it, which is right: a pane's liveness is the shell's
+   to know, not broadcast's.
+2. **An on-air pane must pin its paint tier.** Driving away released its texture,
+   the shell correctly took it off air, and the TV reverted. Correct by the rule and
+   useless in practice — watching a pane *while driving away from it* is the entire
+   reason to cast one. `castKey` is now exempt from retiering, exactly as the read
+   pane is.
+3. **The dashboard reserves the TV's rect from its own `onAir` flag**, and that flag
+   only knew about windows. So the picture was set and there was no rect to draw it
+   in.
+
+> Three separate layers each answered "yes" about a thing none of them could show.
+> An op that reports success at every step and produces nothing on screen is the
+> shape of failure that takes longest to find, and the only way through it was to
+> stop trusting the return value and go looking for the rect.
+
 ## DOCTRINE
 
+- **found** — a control that reports success is not evidence the thing it controls
+  happened. §17.1 had three layers agreeing and one screen disagreeing.
 - **falsifiable, survived** — the seam serves three consumers with no per-consumer branch, asserted
   mechanically rather than by inspection (`test/ops.mjs` §3 and §6). This is the draft's §9 test and
   it passed.

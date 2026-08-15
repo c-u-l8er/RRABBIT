@@ -193,6 +193,9 @@ const FULL_LAYER = 1
 // is the whole point of the list existing.
 const castList = new Set()
 let onAirKey = null
+// The pane on air, if it is a pane. Mutually exclusive with `onAirKey` -- one
+// screen, one picture.
+let onAirPaper = null
 
 // What a chip says. The window's own name plus its ADDRESS, because a client
 // names its own window and two of them often pick the same string -- `home:2` is
@@ -787,9 +790,14 @@ function buildWorld(canvas) {
     // rather than kept in a second array -- one source, so a chip cannot label
     // itself after a window that has closed.
     cast: () => ({
-      onAir: !!onAirKey && signs.has(onAirKey),
-      onAirKey: onAirKey && signs.has(onAirKey) ? onAirKey : null,
-      title: onAirKey ? labelOfKey(onAirKey) : null,
+      // A PANE COUNTS AS ON AIR. The dashboard reserves the TV's rect from this
+      // flag, so a report that only knew about windows meant `cast` on a pane
+      // returned ok, pinned the pane's tier, set the picture -- and the screen was
+      // never given a rect to appear in. The op reported success at every step and
+      // nothing showed, which is the shape of failure that takes longest to find.
+      onAir: (!!onAirKey && signs.has(onAirKey)) || !!onAirPaper,
+      onAirKey: onAirKey && signs.has(onAirKey) ? onAirKey : (onAirPaper?.key ?? null),
+      title: onAirPaper ? (onAirPaper.card?.title ?? 'document') : (onAirKey ? labelOfKey(onAirKey) : null),
       list: [...castList].filter((k) => signs.has(k)).map((k) => ({
         key: k,
         label: labelOfKey(k),
@@ -865,6 +873,11 @@ function buildWorld(canvas) {
   const paperArg = new URLSearchParams(location.search).get('papers')
   if (paperArg === 'seed') {
     seedPapers().then((r) => { state.paperSeed = r }, (e) => { state.paperSeed = { error: String(e?.message ?? e) } })
+  } else if (paperArg === 'chrome') {
+    setTimeout(() => {
+      import('./paper/bench.js').then((m) => m.runChromeDemo())
+        .catch((e) => { state.paperBench = { error: String(e?.message ?? e) } })
+    }, 2500)
   } else if (paperArg === 'read') {
     setTimeout(() => {
       import('./paper/bench.js')
@@ -1134,6 +1147,17 @@ function buildWorld(canvas) {
   // `--&` on a flattened window. Adds it to the list AND puts it on air, because
   // pressing a control on a window and having it appear nowhere is a press you
   // cannot tell from a miss.
+  // A PANE ON AIR. Tracked beside `onAirKey` rather than folded into it: the
+  // window path keys on a `signs` key and checks liveness against `signs`, and a
+  // pane is not in that map. One extra binding beats making every line that says
+  // `signs.get(onAirKey)` ask which kind of thing it is holding.
+  hooks.castPaper = (pane) => {
+    if (!pane?.tex) return null
+    onAirPaper = onAirPaper === pane ? null : pane
+    if (onAirPaper) onAirKey = null
+    return { on: !!onAirPaper, key: pane.key }
+  }
+
   hooks.castWindow = (district, milepost) => {
     const k = [...signs.keys()].find((key) => {
       const s = signs.get(key)
@@ -2011,12 +2035,24 @@ function frame(now = 0) {
     if (tv && dash) {
       for (const k of [...castList]) if (!signs.has(k)) castList.delete(k)
       if (onAirKey && !signs.has(onAirKey)) onAirKey = null
+      // A PANE THAT WENT AWAY CANNOT STAY ON AIR, and neither can one that dropped
+      // out of the paint tier -- its texture is released on downgrade, and three
+      // would happily keep drawing a disposed one.
+      if (onAirPaper && !onAirPaper.tex) onAirPaper = null
       const rect = dash.tvRect()
       // No rect means the cockpit is out of the way (flat, or the map is up), and
       // a TV with nowhere to be does not draw. It keeps its place on the list.
-      tv.set(rect && onAirKey ? signs.get(onAirKey) : null)
+      tv.set(rect ? (onAirKey ? signs.get(onAirKey) : onAirPaper) : null)
       if (rect) {
-        tv.sync(rect, window.innerWidth || 1280, window.innerHeight || 720, new Set(signs.keys()))
+        // ALIVE-KEYS ONLY WHEN A WINDOW IS ON AIR. broadcast.js's liveness check is
+        // `keyOf(showing)` against the sign ledger, and `keyOf` reads
+        // `view.surface.resource...` -- a pane has no surface, so handing it that
+        // check is a throw inside the frame loop rather than a picture that
+        // disappears. Passing null skips it, which is correct because a PANE's
+        // liveness is the shell's to know: `onAirPaper` is cleared above the moment
+        // its texture is released.
+        tv.sync(rect, window.innerWidth || 1280, window.innerHeight || 720,
+          onAirPaper ? null : new Set(signs.keys()))
       }
     }
 

@@ -240,10 +240,21 @@ function wire(w) {
   // to it should break a test and be argued for -- not slip in because a feature
   // needed a verb. That is the discipline OP_VOCABULARY_DRAFT.md §8.1 is asking to
   // be ruled on, enforced here in the meantime.
-  ok('the table is exactly the four ops built so far',
-    Object.keys(TABLE).sort().join(',') === 'drive,park,read,unread', Object.keys(TABLE).join(','))
+  // WENT 4 -> 7 when panes got the chrome a window has (close, resize, cast). The
+  // pin fired, which is the point of pinning it: three verbs arrived because a
+  // feature needed them, and that is exactly the accretion §8.1 is asking whether
+  // to forbid. They are here because the alternative was a pane whose close button
+  // reached past the vocabulary and mutated the world directly -- which would have
+  // made the log wrong rather than the table long.
+  ok('the table is exactly the seven ops built so far',
+    Object.keys(TABLE).sort().join(',') === 'cast,close,drive,park,read,resize,unread',
+    Object.keys(TABLE).join(','))
   ok('two are the draft\'s own nav verbs', ['drive', 'park'].every((k) => k in TABLE))
-  ok('two are rung 6\'s proposed pane verbs', ['read', 'unread'].every((k) => k in TABLE))
+  ok('five are pane verbs, none of them in the draft\'s sixteen',
+    ['read', 'unread', 'close', 'resize', 'cast'].every((k) => k in TABLE))
+  // `unread` is the only one that is not plannable, and §4 above is why.
+  ok('exactly one op is unplannable',
+    Object.values(TABLE).filter((t) => !t.plan).length === 1)
   ok('every op declares its args', Object.values(TABLE).every((t) => Array.isArray(t.args)))
   ok('every op declares whether it is plannable', Object.values(TABLE).every((t) => typeof t.plan === 'boolean'))
 }

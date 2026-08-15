@@ -557,3 +557,89 @@ function drawRead(o) {
     `  plan (${o.plan.length}): ${o.plan.map((e) => e.op).join(' -> ') || '(empty)'}`,
   ].join('\n')
 }
+
+// ---- pane chrome, exercised through the seam --------------------------------
+//
+// `close`, `resize` and `cast` cannot be verified from a screenshot of a pointer
+// that nobody can move: `virsh send-key` sends keys and not clicks, so the guest
+// has no way to press a control. So the demo presses them the only other way there
+// is -- by emitting the same ops the click handler emits. If these work and the
+// click handler routes to them, the click works; the untested step is three lines
+// of dispatch in travel.js and it is named here rather than implied.
+export async function runChromeDemo() {
+  const { seedPapers, paperReport: report } = await import('../paper.js')
+  const { apply, log, opCounts } = await import('../ops.js')
+  const { papers } = await import('../world.js')
+
+  await settleDistrict()
+  const roads = ws.list().map((n) => n.id).filter(Boolean)
+  for (const road of roads) await seedPapers(road)
+  await sampleFrames(20)
+
+  const here = [...papers.values()].filter((p) => p.district === state.district)
+  here.sort((a, b) => (a.dist ?? 1e9) - (b.dist ?? 1e9))
+  const at = (p) => ({ district: p.district, side: p.side, dash: p.dash })
+  const steps = []
+  const snap = () => {
+    const r = report()
+    return `${r.count} panes, ${r.paintCanvases} canvases`
+  }
+
+  if (here.length >= 3) {
+    steps.push(['before', snap()])
+    // RESIZE relays the document out at the new width -- not a zoom.
+    const big = here[0]
+    steps.push(['resize +150', JSON.stringify(apply({ op: 'resize', ...at(big), w: (big.w ?? 300) + 150 }, { by: 'pointer' }))])
+    await sampleFrames(15)
+    steps.push(['  size now', `${big.w ?? 300} x ${big.h ?? 197}, canvas ${big.canvas?.width ?? '-'}x${big.canvas?.height ?? '-'}`])
+
+    // CAST puts it on the dashboard TV.
+    steps.push(['cast', JSON.stringify(apply({ op: 'cast', ...at(here[1]) }, { by: 'pointer' }))])
+    await sampleFrames(10)
+
+    // CLOSE removes it. The count is the proof.
+    steps.push(['close', JSON.stringify(apply({ op: 'close', ...at(here[2]) }, { by: 'pointer' }))])
+    await sampleFrames(10)
+    steps.push(['after', snap()])
+
+    // And the refusals, so the panel shows the seam saying no.
+    steps.push(['close again', JSON.stringify(apply({ op: 'close', ...at(here[2]) }, { by: 'pointer' }))])
+    steps.push(['resize NaN', JSON.stringify(apply({ op: 'resize', ...at(here[0]), w: NaN }, { by: 'pointer' }))])
+  } else {
+    steps.push(['too few panes', String(here.length)])
+  }
+
+  const out = {
+    kind: 'chrome', steps, log: log(), counts: opCounts(),
+    at: new Date().toISOString(), uptimeMs: Math.round(performance.now()),
+  }
+  state.paperBench = out
+  drawChrome(out)
+  return out
+}
+
+function drawChrome(o) {
+  if (typeof document === 'undefined') return
+  let el = document.getElementById('paper-seam')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'paper-seam'
+    el.style.cssText = [
+      'position:fixed', 'right:16px', 'top:16px', 'z-index:60',
+      'background:rgba(3,4,10,.94)', 'border:1px solid #f2c14e', 'border-radius:6px',
+      'padding:12px 14px', 'color:#d7dbe8',
+      'font:12px ui-monospace,"DejaVu Sans Mono",monospace', 'white-space:pre',
+      'pointer-events:none', 'max-width:52vw',
+    ].join(';')
+    document.body.appendChild(el)
+  }
+  el.textContent = [
+    'PANE CHROME — close / resize / cast, through the seam',
+    `  ran at ${o.at}  (+${o.uptimeMs} ms)`,
+    '',
+    ...o.steps.map(([k, v]) => `  ${k.padEnd(14)} ${v}`),
+    '',
+    `  op log — ${o.counts.length} entries, ${o.counts.applied} applied, ${o.counts.refused} refused`,
+    ...o.log.map((e) => `    ${String(e.t).padStart(6)}ms  ${String(e.op).padEnd(7)} by=${e.by}`),
+  ].join('\n')
+}

@@ -45,6 +45,9 @@ export const TABLE = {
   // --- panes (rung 6; PROPOSED, not in the draft's sixteen) ---
   read: { args: ['district', 'side', 'dash'], plan: true },
   unread: { args: [], plan: false },
+  close: { args: ['district', 'side', 'dash'], plan: true },
+  resize: { args: ['district', 'side', 'dash', 'w'], plan: true },
+  cast: { args: ['district', 'side', 'dash'], plan: true },
 }
 
 const performers = new Map()

@@ -91,14 +91,14 @@ const SIGN_INNER = SIGN_OFFSET - SIGN_W / 2
 // The `-->` is wider than it is tall, so the grab is not square. HANDLE is the
 // hit-area unit; the visible text gets its own proportions.
 const HANDLE = 34
-const GRIP_W = 40
-const GRIP_H = 20
+export const GRIP_W = 40
+export const GRIP_H = 20
 // Turned 45 degrees, so `-->` points the way dragging it actually takes the
 // corner: up and out. How far out it has to sit is then not a taste -- a
 // rectangle rotated 45 degrees has an axis-aligned half-extent of
 // (w + h) / 2 / sqrt(2), and anything less than that overlaps the surface again.
-const GRIP_REACH = (GRIP_W / 2 + GRIP_H / 2) / Math.SQRT2 + 1
-const PAD = 66
+export const GRIP_REACH = (GRIP_W / 2 + GRIP_H / 2) / Math.SQRT2 + 1
+export const PAD = 66
 // `(prev)--` is eight characters, so the quad is wide and short. Its hit pad is
 // taller and wider, the same allowance the resize grab's pad makes.
 //
@@ -130,7 +130,7 @@ const STEP_GAP = 8
 // The only decoration is a shadow, because the glyphs have to survive being over
 // the road, a neighbouring sign, or nothing at all.
 let grabTex = null
-function grabTexture() {
+export function grabTexture() {
   if (grabTex) return grabTex
   const c = document.createElement('canvas')
   c.width = 128
@@ -284,7 +284,7 @@ function answerTexture(which) {
 // links). A control that shares a colour with a control that means something
 // else is a control you have to remember rather than read.
 let castTex = null
-function castTexture() {
+export function castTexture() {
   if (castTex) return castTex
   const c = document.createElement('canvas')
   c.width = 128
@@ -343,7 +343,7 @@ function fullTexture() {
 }
 
 let closeTex = null
-function closeTexture() {
+export function closeTexture() {
   if (closeTex) return closeTex
   const c = document.createElement('canvas')
   c.width = 128
