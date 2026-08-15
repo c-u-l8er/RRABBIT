@@ -124,6 +124,7 @@ import {
 } from './rrabbit.js'
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
+import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPapers, clearPapers } from './paper.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 import {
   attachReel, openReel, closeReel, reelReport,
@@ -821,9 +822,21 @@ function buildWorld(canvas) {
   attachRrabbit(ctx)
   attachGantry(ctx)
   attachRamps(ctx)
+  attachPaper(ctx)
   attachBack(backTarget)
   syncGantries()
   syncRamps()
+  syncPaper()
+  // `?papers=seed` puts the bundled sample documents on the road you start on.
+  // A URL PARAM AND NOT A STARTUP DEFAULT, the same shape `?layout=reset` and
+  // `?tracks=` already use: a shell that invents road furniture on every boot is a
+  // shell you cannot take a clean reading from, and the guest has no console to
+  // undo it from. Reported to `state.paperSeed` so the report can say whether the
+  // seed ran at all -- "no panes" and "the seed never fired" look identical
+  // otherwise, which is exactly the confusion that costs a deploy cycle.
+  if (new URLSearchParams(location.search).get('papers') === 'seed') {
+    seedPapers().then((r) => { state.paperSeed = r }, (e) => { state.paperSeed = { error: String(e?.message ?? e) } })
+  }
   // The map navigates through Travel rather than doing it itself, the same
   // division the gates keep.
   // IF YOU MOVE THE WINDOW YOU ARE STANDING IN, YOU GO WITH IT.
@@ -1890,6 +1903,10 @@ function frame(now = 0) {
     // road and a ramp is now one of those things -- so the gate has to have moved
     // before the dashes are counted out to reach it.
     syncRamps()
+    // Panes retier off the camera's z, so this has to run after the roads have
+    // settled and before the frame is drawn -- a pane that retiers after the draw
+    // shows the previous tier for one frame, which reads as a flicker on entry.
+    syncPaper()
     // After the roads, because this puts the windows back over them.
     syncPlacement()
     syncTitles()
@@ -2296,6 +2313,14 @@ window.__tenants = () => {
 // colours rather than recomputed from dashZ -- a report that recomputed them
 // would agree with itself whatever the scene contained.
 window.__ramps = () => rampReport()
+
+// WHAT DOCUMENTS ARE ON THE ROAD, and at which tier. The tier breakdown is the
+// point: "there are 40 panes" and "40 panes are being laid out" are different
+// facts and only the second one is a cost. See docs/PAPER_ROADS.md.
+window.__papers = () => paperReport()
+window.__seedPapers = (d) => seedPapers(d)
+window.__clearPapers = () => clearPapers()
+window.__placePaper = (doc, opts) => placePaper(doc, opts)
 
 // WHAT SURVIVES A RELOAD ABOUT A WINDOW. Three separate answers on purpose: what
 // is stored, what is being asked for right now, and what the surfaces actually

@@ -224,7 +224,7 @@ Smallest first, each rung falsifiable on its own.
 |---|---|---|
 | 1 | `bend-layout.js` — `.bend` → draw commands, pure | **done** — `node test/paper-layout.mjs`, 145 assertions over the real 20-doc corpus |
 | 1b | `paint.js` + `dev.html` — commands → 2-D canvas | **done** — all 20 painted, 479 commands, 0 blank |
-| 2 | `paper.js` — one pane on one road slot | a screenshot from the guest |
+| 2 | `paper.js` — panes on a road slot | **done** — 5 panes on the road in the FreeBSD guest, both tiers visible (§13) |
 | 3 | `.rune` panes via the same seam | **done** — `node test/rune-layout.mjs`, 59 assertions; 4 real floors, 15 rooms, **no fourth command kind** |
 | 4 | the **card** tier + a shared atlas | frame time flat in N (§4) |
 | 5 | IndexedDB store + district-chunk streaming | 10k panes placed, measured |
@@ -302,8 +302,54 @@ This is the strongest argument yet for rung 6: the **read** tier uses `CSS3DRend
 Conformance is not a nice-to-have that arrives with polish — it arrives with the DOM or it does not
 arrive.
 
+## 13. Rung 2 in the guest, and what it did NOT establish
+
+Five panes stand on the first road in the FreeBSD guest: three `.bend` documents and two Runefort
+floors, at alternating sides, placed through the same slot algebra windows use. Corpus doc 19 renders
+at the **paint** tier with its heading, its typed link and its five-phase list legible from the
+driver's seat; doc 12's **edge rail** is readable on the opposite side; and doc 06 mid-road has
+already dropped to the **card** tier (`4 blocks · 0 edges · core`). So both tiers are real, and the
+tier boundary is visible in one frame.
+
+`slotFree` learned about panes (`world.js` `papers`), because the algebra knew two occupants —
+windows and ramps — and a third it had never heard of is a pane a window gets placed on top of. That
+failure would not read as an incomplete slot table; it would read as a document that vanished.
+
+**Clicks are deliberately not wired.** A pane is inert. Wiring a click now would create the second
+interaction vocabulary that `OP_VOCABULARY_DRAFT.md` §0 exists to prevent — the moment a pane accepts
+input, that input has to pass the same seam a recorded op does. Rung 6 is gated on the ruling, not on
+effort.
+
+### 13.1 The frame cost is NOT measured, and the gauge cannot measure it
+
+The dash read 17.1 ms/frame with no panes and 51.2 with five, which looks like a finding and is not
+one. Sampling three more times while feeding input gave **67.7 / 34.3 / 67.4** — the spread is the
+**idle brake** engaging and disengaging between samples, not pane cost. See
+`project_rrabbit_idle_brake`: the brake keys on input, so a gauge read from a screenshot is sampling
+the brake as much as the scene.
+
+What the design does guarantee, from the code rather than from a measurement: `syncPaper` repaints
+**only on tier change**, so a settled pane costs no layout per frame and is three draw calls (frame,
+quad, post). What is unmeasured is whether that holds at N in the hundreds. **Rung 4's proof —
+"frame time flat in N" — is still owed, and needs an in-page harness, not a photograph of a dial.**
+
+### 13.2 Two guest traps, each of which cost a cycle
+
+- **Do not `pkill firefox` to change the shell's URL.** Firefox *is* the kiosk session leader; killing
+  it drops the whole X session to the SDDM greeter. Recovery is `virsh send-key` one keycode at a
+  time (a multi-keycode `send-key` is one *chord*, not typing) to log back in.
+- **`rrabbit-session` already has the escape hatch:** `RRABBIT_URL_EXTRA` is appended to the shell
+  URL, exactly as `RRABBIT_DIR` overrides the install path. Set it in `~/.xprofile` and log in. The
+  guest currently carries `export RRABBIT_URL_EXTRA=papers=seed`; **delete that line to get a clean
+  road back.**
+- A reload via Ctrl+R raises a `beforeunload` confirm dialog. It is dismissed with `KEY_ENTER`
+  ("Leave page" is focused), and a screenshot that still shows the old road may simply be a dialog
+  nobody answered.
+
 ## DOCTRINE
 
+- **measured** — five panes render on a real road in the guest at two tiers. **Not measured** — what
+  a pane costs per frame; §13.1 says why the obvious instrument cannot answer it.
 - **falsifiable, survived** — `{rect, line, text}` is closed. A second format with no prose in it
   fit without widening the set. Had RuneFort needed an arc or a gradient the honest move would have
   been to widen the set on the record, not to special-case one renderer.

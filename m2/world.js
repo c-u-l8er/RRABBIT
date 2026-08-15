@@ -219,7 +219,11 @@ export function slotAt(district, side, dash) {
     if (sign.dash === dash) return { kind: 'window', milepost: sign.milepost, sign }
   }
   const r = rampsOf(district).find((x) => x.at === dash && sideOf(x.side) === s)
-  return r ? { kind: 'ramp', to: r.to, at: r.at } : null
+  if (r) return { kind: 'ramp', to: r.to, at: r.at }
+  for (const p of papers.values()) {
+    if (p.district === district && sideOf(p.side) === s && p.dash === dash) return { kind: 'paper', paper: p }
+  }
+  return null
 }
 
 // Could something of `kind` stand here without crowding anything already standing on
@@ -237,6 +241,14 @@ export function slotFree(district, side, dash, kind = 'window', ignore = null) {
   for (const r of rampsOf(district)) {
     if (sideOf(r.side) !== s) continue
     if (kind === 'ramp' ? r.at === dash : inRampSweep(dash, r.at)) return false
+  }
+  // A pane crowds like a window rather than like a ramp: it is a structure standing
+  // beside the road, not a marking on it. `ignore` is honoured here too, so moving a
+  // pane does not find itself in the way.
+  for (const p of papers.values()) {
+    if (p === ignore || p.district !== district || sideOf(p.side) !== s) continue
+    if (!Number.isInteger(p.dash)) continue
+    if (kind === 'ramp' ? inRampSweep(p.dash, dash) : Math.abs(p.dash - dash) < SLOT_GAP) return false
   }
   return true
 }
@@ -462,6 +474,20 @@ export const state = {
 // RRABBIT writes it, Travel reads it. It is the one thing both of them need,
 // which is why it lives out here rather than with either.
 export const signs = new Map()
+
+// `district:side:dash` -> { district, side, dash, format, doc, mesh, ... }
+//
+// A THIRD KIND OF THING THAT STANDS ON A DASH, and the slot algebra has to know it
+// exists. `slotAt`/`slotFree` knew about two occupants -- windows (`signs`) and
+// ramps -- so a pane they had never heard of would be a pane a window gets placed
+// on top of. That failure would not read as "the slot table is incomplete"; it
+// would read as a document that vanished.
+//
+// paper.js writes it, world.js's slot algebra reads it: the same arrangement
+// `signs` already has with RRABBIT, and here for the same reason -- the module
+// that owns the object and the module that owns the addressing cannot import each
+// other.
+export const papers = new Map()
 
 // surface key -> the title the client last set for itself.
 //
