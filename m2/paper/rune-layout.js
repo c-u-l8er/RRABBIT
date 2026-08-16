@@ -116,6 +116,63 @@ export function classFor(room, floor, signals = {}) {
   return null
 }
 
+// ONE SOURCE FOR THE GEOMETRY, because there are TWO renderers of a floor and
+// they were computing it separately.
+//
+// The canvas tier (below) and the DOM read tier (`dom-spec.js` + `read.js` CSS)
+// both draw a Runefort floor, and they disagreed about nearly every number: the
+// room label was 12px bold on canvas and a 13px `h3` in CSS; the canvas drew a
+// floor heading with a rule under it and the DOM emitted no heading at all; and
+// worst, the canvas COMPRESSES row height to `min(cell_height, fit)` so the grid
+// fills the pane, while a CSS grid with no `grid-template-rows` sizes rows to
+// their content. So clicking a runefort pane re-flowed it -- reported as "the text
+// and box sizes janks to a different size".
+//
+// The fix is the one this tree already applied to the v0.6 state layout: make one
+// function THE walk and have everything else project it. A renderer that computes
+// its own numbers is a renderer that will disagree again.
+//
+// `bend-layout.js`'s heading sizes were matched by hand once (read.js says so in a
+// comment). Matched by hand means matched until someone edits one of them, which
+// is why this is a function and not a second table.
+export function runeMetrics(floor, { width = 512, height = 340, pad = 14 } = {}) {
+  const cols = Number.isInteger(floor?.columns) && floor.columns > 0 ? floor.columns : 6
+  const gap = px(floor?.gap, 10)
+  const heading = floor?.label || floor?.id
+  const headBlock = heading ? HEAD_ADVANCE + RULE_GAP : 0
+  const top = pad + headBlock
+  const cellW = (width - pad * 2 - gap * (cols - 1)) / cols
+  const rowsUsed = Math.max(1, ...((floor?.rooms ?? []).map((r) => (r?.position?.[1] ?? 0) + (r?.size?.[1] ?? 1))), 1)
+  const declared = px(floor?.cell_height, 96)
+  const avail = height - top - pad
+  const fit = (avail - gap * (rowsUsed - 1)) / rowsUsed
+  const cellH = Math.min(declared, fit)
+  return {
+    pad, cols, gap, top, cellW, cellH, rowsUsed, declared,
+    compressed: cellH < declared - 0.5,
+    heading: heading ? `${floor._building ? `${floor._building} · ` : ''}${heading}` : null,
+    headSize: HEAD_SIZE,
+    headAdvance: HEAD_ADVANCE,
+    ruleGap: RULE_GAP,
+    labelSize: LABEL_SIZE,
+    bodySize: BODY_SIZE,
+    lineH: LINE_H,
+    roomPadX: ROOM_PAD_X,
+    labelBaseline: LABEL_BASELINE,
+  }
+}
+
+// The numbers themselves, in one place so the metrics and the drawing below
+// cannot drift from each other either.
+const HEAD_SIZE = 14
+const HEAD_ADVANCE = 22
+const RULE_GAP = 10
+const LABEL_SIZE = 12
+const BODY_SIZE = 11
+const LINE_H = 14
+const ROOM_PAD_X = 8
+const LABEL_BASELINE = 17
+
 export function layoutRune(floor, opts = {}) {
   const {
     width = 512,
@@ -137,31 +194,22 @@ export function layoutRune(floor, opts = {}) {
 
   push({ op: 'rect', x: 0, y: 0, w: width, h: height, color: theme.bg })
 
-  let top = pad
-  const heading = floor?.label || floor?.id
-  if (heading) {
-    const b = floor._building ? `${floor._building} · ` : ''
-    push({ op: 'text', x: pad, y: top + 13, text: b + heading, font: font(14, { weight: 700 }), color: theme.title })
-    top += 22
-    push({ op: 'line', x: pad, y: top, x2: width - pad, y2: top, color: theme.rule, w: 1 })
-    top += 10
-  }
-
-  const cols = Number.isInteger(floor?.columns) && floor.columns > 0 ? floor.columns : 6
-  const gap = px(floor?.gap, 10)
-  const cellW = (width - pad * 2 - gap * (cols - 1)) / cols
-
+  // PROJECTED, not recomputed. See `runeMetrics` -- the DOM tier reads the same
+  // numbers, which is the whole reason they moved out of this function.
+  //
   // The floor states a cell height in CSS pixels for a page that scrolls. A pane
   // does not scroll, so the declared height is used only when the grid fits;
   // otherwise rows are compressed to fill the pane and `compressed` says so. The
   // alternative -- honouring the declared height and clipping -- renders the top
   // third of a floor and looks like a floor with three rooms.
-  const rowsUsed = Math.max(1, ...((floor?.rooms ?? []).map((r) => (r?.position?.[1] ?? 0) + (r?.size?.[1] ?? 1))), 1)
-  const declared = px(floor?.cell_height, 96)
-  const avail = height - top - pad
-  const fit = (avail - gap * (rowsUsed - 1)) / rowsUsed
-  const cellH = Math.min(declared, fit)
-  const compressed = cellH < declared - 0.5
+  const M = runeMetrics(floor, { width, height, pad })
+  const { cols, gap, top, cellW, cellH, compressed } = M
+
+  if (M.heading) {
+    push({ op: 'text', x: pad, y: pad + 13, text: M.heading, font: font(M.headSize, { weight: 700 }), color: theme.title })
+    const ruleY = pad + M.headAdvance
+    push({ op: 'line', x: pad, y: ruleY, x2: width - pad, y2: ruleY, color: theme.rule, w: 1 })
+  }
 
   const cellX = (c) => pad + c * (cellW + gap)
   const cellY = (r) => top + r * (cellH + gap)
@@ -197,24 +245,24 @@ export function layoutRune(floor, opts = {}) {
     push({ op: 'rect', x, y, w: 1, h: rh, color: st.edge })
     push({ op: 'rect', x: x + rw - 1, y, w: 1, h: rh, color: st.edge })
 
-    const inner = rw - 16
-    let ty = y + 17
-    const lf = font(12, { weight: 700 })
+    const inner = rw - M.roomPadX * 2
+    let ty = y + M.labelBaseline
+    const lf = font(M.labelSize, { weight: 700 })
     const lab = ellipsize(room.label ?? room.id ?? '', lf, inner, measure)
     if (lab.clipped) stats.clipped++
-    push({ op: 'text', x: x + 8, y: ty, text: lab.text, font: lf, color: st.text })
+    push({ op: 'text', x: x + M.roomPadX, y: ty, text: lab.text, font: lf, color: st.text })
     ty += 15
 
     if (room.body) {
-      const bf = font(11)
+      const bf = font(M.bodySize)
       // How many body lines actually fit, computed rather than assumed -- a fixed
       // line count overflows a 1-row room and wastes a 3-row one.
-      const room_lines = Math.max(0, Math.floor((y + rh - 6 - ty) / 14))
+      const room_lines = Math.max(0, Math.floor((y + rh - 6 - ty) / M.lineH))
       const { lines, clipped } = wrapPlain(room.body, bf, inner, measure, { maxLines: room_lines })
       if (clipped) stats.clipped++
       for (const ln of lines) {
-        push({ op: 'text', x: x + 8, y: ty, text: ln, font: bf, color: theme.dim })
-        ty += 14
+        push({ op: 'text', x: x + M.roomPadX, y: ty, text: ln, font: bf, color: theme.dim })
+        ty += M.lineH
       }
     }
   }
@@ -232,5 +280,5 @@ export function layoutRune(floor, opts = {}) {
     }
   }
 
-  return { commands: cmds, stats, compressed, rows: rowsUsed, cols }
+  return { commands: cmds, stats, compressed, rows: M.rowsUsed, cols }
 }

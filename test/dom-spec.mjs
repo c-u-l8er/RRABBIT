@@ -44,8 +44,12 @@ const floors = floorsOf(JSON.parse(readFileSync(WELCOME, 'utf8')))
       `${rooms.filter((r) => r.attrs.tabindex !== '0').length} not focusable`)
     ok(`${f.id}: every room has an accessible name`,
       rooms.every((r) => typeof r.attrs['aria-label'] === 'string' && r.attrs['aria-label'].length > 0))
-    ok(`${f.id}: the grid itself is labelled`, !!spec.attrs['aria-label'])
-    ok(`${f.id}: the grid has a grid role`, spec.attrs.role === 'grid')
+    // Found by SEARCHING for the grid rather than assuming it is the root -- see
+    // the note in §5.1 below. The two assertions are unchanged in substance; what
+    // changed is that the root may now carry a floor heading beside the grid.
+    const g = find(spec, (n) => n.attrs?.role === 'grid')[0]
+    ok(`${f.id}: the grid itself is labelled`, !!g?.attrs['aria-label'])
+    ok(`${f.id}: the grid has a grid role`, g?.attrs.role === 'grid')
   }
 
   // An unnamed, unlabelled room still gets a name -- an unnamed focusable is a
@@ -77,8 +81,16 @@ const floors = floorsOf(JSON.parse(readFileSync(WELCOME, 'utf8')))
   ok('[3,1] size [1,1] becomes column 4 row 2',
     rooms[2].attrs.style.includes('grid-column:4/span 1') && rooms[2].attrs.style.includes('grid-row:2/span 1'),
     rooms[2].attrs.style)
-  ok('the grid declares its column count', spec.attrs['data-columns'] === '6')
-  ok('the template matches', spec.attrs.style.includes('repeat(6,1fr)'))
+  // THE GRID IS NO LONGER THE ROOT, and that is a correctness change rather than
+  // a rearrangement. The floor heading the canvas tier draws is a sibling of the
+  // grid, not a cell in it -- a heading with `role=gridcell` would be a lie to a
+  // screen reader, and one inside `role=grid` with no role at all is worse.
+  // So the root wraps [heading?, grid] and the grid keeps role=grid.
+  const grid = find(spec, (n) => n.attrs?.role === 'grid')[0]
+  ok('there is exactly one grid', find(spec, (n) => n.attrs?.role === 'grid').length === 1)
+  ok('the grid declares its column count', grid.attrs['data-columns'] === '6')
+  ok('the template matches', grid.attrs.style.includes('repeat(6,1fr)'))
+  ok('every gridcell is a child of the grid', grid.children.every((c) => c.attrs?.role === 'gridcell'))
 
   // §5.1 requires the DOM order to be STABLE given the same JSON.
   const again = runeToSpec(f)

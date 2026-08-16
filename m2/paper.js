@@ -44,7 +44,7 @@ import { layoutRune, floorsOf, RUNE_THEME } from './paper/rune-layout.js'
 import { paint, paintCard, measurerFor } from './paper/paint.js'
 import { allocCard, freeCard, drawCard, planeFor, atlasReport, CARD_W, CARD_H } from './paper/atlas.js'
 import { openRead, closeRead, readingKey, isReading, readingPane } from './paper/read.js'
-import { grabTexture, castTexture, closeTexture, GRIP_W, GRIP_H, GRIP_REACH, PAD } from './rrabbit.js'
+import { grabTexture, castTexture, closeTexture, answerTexture, GRIP_W, GRIP_H, GRIP_REACH, PAD, STEP_H } from './rrabbit.js'
 import { register as registerOp, apply as applyOp } from './ops.js'
 
 let scene = null
@@ -127,34 +127,86 @@ function ensurePaint(p) {
   p.tex = canvasTexture(THREE, p.canvas)
   p.mat = new THREE.MeshBasicMaterial({ map: p.tex, toneMapped: false })
 
-  const ctx = p.canvas.getContext('2d')
-  // Laid out AT THE PANE'S SIZE. A bigger pane fits more of the document rather
-  // than magnifying the same page, which is what makes resize mean something for a
-  // document instead of being a zoom with extra steps.
-  const r = layoutOf(p, px, py, measurerFor(ctx))
-  paint(ctx, r.commands)
-
-  // OVERFLOW IS DRAWN, not only reported. A pane that runs out of box and stops
-  // looks exactly like a document that was that short, and on a road you cannot
-  // scroll to find out.
-  if (r.overflow) {
-    ctx.fillStyle = '#e2564d'
-    ctx.fillRect(0, py - 3, px, 3)
-    ctx.font = '11px ui-monospace, monospace'
-    ctx.fillText('more below', 10, py - 8)
-  }
-  p.tex.needsUpdate = true
-  p.last = r
   // The TV letterboxes on `size`, so a pane on air has to answer the same question
   // a window does. Duck-typed rather than wrapped: broadcast.js reads `tex` and
   // `size` and nothing else, and a wrapper would be a second thing to keep true.
   p.size = { width: px, height: py }
+  repaintPaint(p)
 
   p.paintMesh = new THREE.Mesh(planeGeo(w, h), p.mat)
   p.paintMesh.rotation.y = -p.side * 0.42
   p.paintMesh.userData.paperKey = p.key
   scene.add(p.paintMesh)
   placeMesh(p, p.paintMesh)
+}
+
+// DRAW THE DOCUMENT INTO THE PANE'S CANVAS, at the pane's current scroll offset.
+//
+// Split out of `ensurePaint` because it now has a SECOND caller: scrolling. Before
+// this, a paint-tier pane was drawn exactly once when its canvas was made, so the
+// only way to see past the bottom of an overflowing document was to make the pane
+// bigger. That is fine on the road, where a pane is a thing you drive past, and it
+// is not fine on the TELEVISION -- a broadcast document is the one you are sitting
+// and reading, and the whole complaint was "the scroll doesn't work in the tv
+// screen when it's moused over".
+//
+// THE LAYOUT IS NOT REDONE. `layoutOf` is the expensive half and the offset does
+// not change it; only the commands are re-emitted through a translated context.
+// That is what makes a wheel notch cost a canvas clear and a repaint of one
+// screenful rather than a reflow of the document.
+function repaintPaint(p) {
+  if (!p.canvas) return
+  const { width: px, height: py } = p.size
+  const ctx = p.canvas.getContext('2d')
+  // Re-laid out only when there is no result to reuse -- the tier was just built,
+  // or the pane's size changed and `ensurePaint` made a new canvas.
+  if (!p.last) p.last = layoutOf(p, px, py, measurerFor(ctx))
+  const r = p.last
+
+  // The scroll ceiling, in canvas pixels. `height` is the CONTENT's height, which
+  // `bend-layout` returns unclamped for exactly this reason. A rune floor returns
+  // no height because it is grid-fitted to the box and cannot overflow, so it
+  // clamps to zero and the wheel correctly does nothing.
+  const max = Math.max(0, (r.height ?? 0) - py)
+  p.scrollY = Math.max(0, Math.min(max, p.scrollY ?? 0))
+  p.scrollMax = max
+
+  // THE BACKGROUND IS PAINTED UNSCROLLED, then the commands are drawn through the
+  // offset. The layout's own first command is a bg rect the size of the BOX, so at
+  // a non-zero offset it would slide up and leave the bottom strip showing whatever
+  // the canvas had before -- the previous frame's text, smeared.
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.fillStyle = (p.format === 'rune' ? RUNE_THEME : THEME).bg
+  ctx.fillRect(0, 0, px, py)
+  ctx.save()
+  ctx.translate(0, -p.scrollY)
+  paint(ctx, r.commands)
+  ctx.restore()
+
+  // OVERFLOW IS DRAWN, not only reported. A pane that runs out of box and stops
+  // looks exactly like a document that was that short.
+  //
+  // It now says which WAY, because with a scroll there are two edges to run out
+  // of and one mark for both would be a lie half the time.
+  const more = p.scrollY < max
+  if (more || p.scrollY > 0) {
+    ctx.fillStyle = '#e2564d'
+    ctx.font = '11px ui-monospace, monospace'
+    if (more) { ctx.fillRect(0, py - 3, px, 3); ctx.fillText('more below', 10, py - 8) }
+    if (p.scrollY > 0) { ctx.fillRect(0, 0, px, 3); ctx.fillText('more above', 10, 16) }
+  }
+  p.tex.needsUpdate = true
+}
+
+// Move a pane's document by `dy` canvas pixels. Returns whether anything moved, so
+// a caller can tell "scrolled to the end" from "this pane does not scroll" -- the
+// wheel needs that to decide whether the gesture was spent here.
+export function scrollPaper(p, dy) {
+  if (!p?.canvas) return false
+  const was = p.scrollY ?? 0
+  p.scrollY = was + dy
+  repaintPaint(p)
+  return p.scrollY !== was
 }
 
 function releasePaint(p) {
@@ -169,6 +221,12 @@ function releasePaint(p) {
   p.mat = null
   p.tex = null
   p.canvas = null
+  // AND THE LAYOUT, because `repaintPaint` reuses `p.last` when it is there and the
+  // next canvas may be a different width. A stale result is not a stale picture --
+  // it is a document laid out for a box it is no longer in, with every line break
+  // in the wrong place. `scrollY` deliberately SURVIVES: where you were reading is
+  // a property of the document, not of the canvas it was last drawn on.
+  p.last = null
 }
 
 function ensureCard(p) {
@@ -198,10 +256,23 @@ function releaseCard(p) {
 
 // ---- placing ----------------------------------------------------------------
 
+// A PANE STANDS ON ITS POST. Its BOTTOM EDGE is at the top of the post, always,
+// whatever size it is -- so the centre is half its OWN height above that.
+//
+// Every one of these four call sites used the constant `H` instead, which was
+// invisible for as long as every pane was 197 units tall and became a defect the
+// moment resize shipped. A shrunk pane hovered above its post with a gap under it;
+// a grown one swallowed the post entirely. Reported: "the posts are not going all
+// the way up to the bottom of the window so it doesn't look connected".
+//
+// `sizeOf(p).h`, not `p.h`: an unresized pane has no `h` and must fall back to the
+// default, which is the one thing `sizeOf` exists to do.
+const standTop = (p) => ROAD_Y + STAND_Y + sizeOf(p).h / 2
+
 function placeMesh(p, m) {
   const x = ws.laneX(p.district) + p.side * STAND_X
   const z = dashZ(p.dash)
-  m.position.set(x, ROAD_Y + STAND_Y + H / 2, z)
+  m.position.set(x, standTop(p), z)
 }
 
 // Where the read tier's DOM object stands: exactly where the quad it replaces
@@ -212,7 +283,7 @@ function placeMesh(p, m) {
 function readPoseOf(p) {
   const x = ws.laneX(p.district) + p.side * STAND_X
   return {
-    position: new THREE.Vector3(x, ROAD_Y + STAND_Y + H / 2, dashZ(p.dash)),
+    position: new THREE.Vector3(x, standTop(p), dashZ(p.dash)),
     rotation: new THREE.Euler(0, -p.side * 0.42, 0),
   }
 }
@@ -241,7 +312,7 @@ function materialize(p) {
   const z = dashZ(p.dash)
   // Half a unit behind the pane along its own normal, so the border does not
   // z-fight with the document it is framing.
-  p.frame.position.set(x + p.side * 0.5, ROAD_Y + STAND_Y + H / 2, z - 0.5)
+  p.frame.position.set(x + p.side * 0.5, standTop(p), z - 0.5)
   p.post.position.set(x, ROAD_Y + STAND_Y / 2, z)
   scene.add(p.frame)
   scene.add(p.post)
@@ -285,10 +356,37 @@ function addChrome(p, w, h) {
     return [btn, pad]
   }
 
+  // THE ANSWER ROW, above the top edge and centred, exactly as a window carries it.
+  //
+  // Sized from its own text like the window's, because a fixed quad either crops
+  // `close--X` or leaves `<--keep` swimming in it. The pad is deliberately WIDER
+  // and TALLER than the mark for the same reason every other pad here is: what you
+  // aim at is not what you see.
+  const answer = (which, dir) => {
+    const face = answerTexture(which)
+    const aw = STEP_H * face.aspect
+    const y = h / 2 + GRIP_REACH * 1.6
+    const btn = new THREE.Mesh(
+      planeGeo(aw, STEP_H),
+      new THREE.MeshBasicMaterial({ map: face.tex, transparent: true, toneMapped: false }),
+    )
+    btn.position.set(dir * (aw / 2 + 8), y, 3)
+    Object.assign(btn.userData, { paperAnswer: which, chrome: true, paperKey: p.key })
+    btn.visible = false
+    p.frame.add(btn)
+    const pad = new THREE.Mesh(planeGeo(aw + 24, STEP_H * 1.6), new THREE.MeshBasicMaterial({ visible: false }))
+    pad.position.copy(btn.position)
+    Object.assign(pad.userData, { paperAnswer: which, chrome: true, paperKey: p.key })
+    p.frame.add(pad)
+    return [btn, pad]
+  }
+
   p.chrome = [
-    ...put(closeTexture(), -Math.PI / 4, -(w / 2 + GRIP_REACH), h / 2 + GRIP_REACH, { paperClose: true }),
-    ...put(castTexture(), Math.PI / 4, -(w / 2 + GRIP_REACH), -(h / 2 + GRIP_REACH), { paperCast: true }),
-    ...put(grabTexture(), Math.PI / 4, w / 2 + GRIP_REACH, h / 2 + GRIP_REACH, { paperResize: true }),
+    ...put(closeTexture(), -Math.PI / 4, -(w / 2 + GRIP_REACH), h / 2 + GRIP_REACH, { paperClose: true, paperCtl: 'close' }),
+    ...put(castTexture(), Math.PI / 4, -(w / 2 + GRIP_REACH), -(h / 2 + GRIP_REACH), { paperCast: true, paperCtl: 'cast' }),
+    ...put(grabTexture(), Math.PI / 4, w / 2 + GRIP_REACH, h / 2 + GRIP_REACH, { paperResize: true, paperCtl: 'resize' }),
+    ...answer('keep', -1),
+    ...answer('close', 1),
   ]
 }
 
@@ -430,7 +528,28 @@ export function syncPaper() {
     // panel. Correct by the rule and useless in practice, because watching a pane
     // WHILE DRIVING AWAY FROM IT is the entire reason to cast one. Casting pins the
     // paint tier for exactly as long as the pane is on air.
-    if ((held && p.key === held) || p.key === castKey) continue
+    if (held && p.key === held) continue
+    // THE BROADCAST PIN RAISES, IT DOES NOT FREEZE, and that distinction is the
+    // whole of a bug this loop had the moment the tuner could select a channel.
+    //
+    // `continue` was right while the only way onto the TV was pressing `&--` from
+    // inside the pane -- you were standing in it, so it was already at the paint
+    // tier and freezing it there was the same thing as pinning it. The dropdown
+    // broke that: it can tune to a document a road away, which is at the card tier
+    // or unbuilt, and `continue` then froze it in the tier it was found in. No
+    // texture, forever, and a channel that selects to a blank screen reads as the
+    // menu row being dead.
+    //
+    // So a pinned pane is FORCED UP instead of skipped. Downgrade is what the pin
+    // exists to prevent; promotion is what it now has to cause.
+    if (p.key === castKey) {
+      if (p.tier === 'paint') continue
+      p.tier = 'paint'
+      releaseCard(p)
+      materialize(p)
+      ensurePaint(p)
+      continue
+    }
     if (p.want === p.tier) continue
     p.tier = p.want
     if (p.want === 'paint') { releaseCard(p); materialize(p); ensurePaint(p) }
@@ -456,9 +575,27 @@ export function syncPaper() {
 // `syncPaper` consults it every frame and a hook call per pane per frame to ask
 // "are you on television" is a cost with no payer.
 let castKey = null
+
+// WHICH PANE THE TIER LOOP MUST NOT LET FALL. The shell owns "what is on air" --
+// the tuner can change it without any op running -- so the pin has to be settable
+// from there, or the two disagree.
+//
+// The disagreement is not cosmetic: the pin is what keeps a broadcasting pane at
+// the paint tier while you drive away from it, and a pane at the card tier has no
+// texture, so a channel the tuner selected but paper.js was never told about comes
+// back with no picture and reads as a dead row in the menu.
+export function pinPaper(key) {
+  castKey = key ?? null
+  return castKey
+}
 // WHICH PANE THE POINTER IS OVER. Fed by travel.js's pointermove, which owns the
 // pointer and already runs one raycast for everything on the road.
 let hoverKey = null
+
+// WHICH CORNER CONTROL THE POINTER IS AT. A name, or null. Fed by travel.js in both
+// modes -- see `setPaperChromeHot`.
+let hotCtl = null
+let nearCtl = null
 
 // Reported: "the controls should only be showing up when it is in this detailed
 // view and only on hover mouse". Two conditions, and both are needed for the same
@@ -476,15 +613,82 @@ export function setPaperHover(key) {
   refreshChrome()
 }
 
+// THE HOVER INPUT THE READ TIER CAN ACTUALLY REACH, and the correction to the
+// paragraph this used to carry.
+//
+// The previous cut dropped the hover test entirely and drew every control for as
+// long as you stood in the pane. The reasoning was that the hover input was
+// unreachable -- true, and it was the wrong thing to fix. `setPaperHover` is fed
+// from a `pointermove` branch that returns early for every non-`driving` mode, so
+// in `read` no key ever arrived; the answer is to feed the branch, not to delete
+// the condition. Reported straight back: "the window controls should only show up
+// when the mouse is hovering over them".
+//
+// `hot` and `near` are the window's own split (travel.js `setGrabHot`): `hot` is
+// over the pad and decides the cursor and the click, `near` is reaching for it and
+// decides only whether the mark is PAINTED. What differs from a window, on purpose:
+// a window's `near` is a band around the WHOLE window, because a flat window is the
+// screen and one band for all five marks makes them read as one fitting. A pane at
+// the read tier is also most of the screen, so that same band would be true almost
+// everywhere the pointer can be -- which is the always-on chrome that was just
+// rejected. So a pane's band is per CORNER. You still do not have to hit the mark
+// to see it, and you do have to be at its corner.
+export function setPaperChromeHot(hot, near) {
+  if (hot === hotCtl && near === nearCtl) return
+  hotCtl = hot
+  nearCtl = near
+  refreshChrome()
+}
+
+export const paperChromeHot = () => hotCtl
+
+// ANYTHING ELSE IS A NO. Not a list of controls that cancel: any other press does,
+// including one into the document itself, because a question left standing over a
+// pane you have gone back to reading is a question whose yes is one stray click
+// away. travel.js calls this before it decides what a press meant.
+export function clearPaperAsk() {
+  if (!state.paperAsking) return false
+  state.paperAsking = null
+  refreshChrome()
+  return true
+}
+
 function refreshChrome() {
   const held = readingKey()
+  // A QUESTION ABOUT A PANE THAT IS GONE, OR ABOUT ONE YOU HAVE LEFT FOR ANOTHER,
+  // IS NOT A QUESTION -- the same rule rrabbit.js `syncHandles` states for a window,
+  // and for the same reason: a state that outlives the thing it was about comes back
+  // later attached to whatever is there now, which here would be a live confirm
+  // standing over a DIFFERENT pane, one press from destroying it.
+  //
+  // NOT "is not the pane being read". A close asked through `window.__op` or by a
+  // replay is asked with nothing at the read tier at all, and clearing on that test
+  // would unask it in the same breath -- leaving a pane that no sequence of ops
+  // could ever close. Leaving a pane by hand cancels through `unread` and through
+  // travel's own press rule, which are the two ways a hand can leave one.
+  if (state.paperAsking && (!papers.has(state.paperAsking) || (held && state.paperAsking !== held))) {
+    state.paperAsking = null
+  }
   for (const p of papers.values()) {
     if (!p.chrome) continue
     const asking = state.paperAsking === p.key
-    // The close mark stays up while the question is open, so the confirming press
-    // has something to aim at even after the pointer has wandered.
-    const show = !!held && p.key === held && (p.key === hoverKey || asking)
-    for (const m of p.chrome) if (m.material.map) m.visible = show
+    // ARMED is standing in the pane; DRAWN is reaching for the control. Same two
+    // tests, same order, as rrabbit.js `syncHandles` plus travel.js's hot/near.
+    const armed = !!held && p.key === held
+    for (const m of p.chrome) {
+      const u = m.userData
+      // THE ANSWERS ARE DRAWN AND ARMED TOGETHER, which is the opposite of the
+      // three corner controls and is the point of them: they answer a question the
+      // shell asked, so being aimable while invisible would mean a click in empty
+      // space could destroy a pane. Copied from the window deliberately.
+      if (u.paperAnswer) {
+        u.armed = armed && asking
+        if (m.material.map) m.visible = armed && asking
+        continue
+      }
+      u.armed = armed
+      if (m.material.map) m.visible = armed && (hotCtl === u.paperCtl || nearCtl === u.paperCtl)
+    }
     if (p.frame) p.frame.material = asking ? askMat : frameMat
   }
 }
@@ -549,7 +753,12 @@ export function paperMeshes() {
     // invisible, so leaving them aimable on every pane would put a dead hit area
     // over documents whose controls are not drawn -- a click that lands on nothing
     // visible and does nothing is worse than no control.
-    if (p.chrome && p.key === readingKey()) out.push(...p.chrome)
+    //
+    // ARMED, NOT JUST READ. It tests the same flag the pad carries rather than
+    // re-deriving the condition, because the answer row is armed only while a close
+    // is being asked about -- and an answer pad left aimable the rest of the time is
+    // a click in empty space above the pane that destroys it.
+    if (p.chrome && p.key === readingKey()) for (const m of p.chrome) if (m.userData.armed) out.push(m)
   }
   return out
 }
@@ -561,6 +770,50 @@ export const isReadingPaper = () => isReading()
 export { readingPane }
 
 export const paperAt = (hit) => papers.get(hit?.object?.userData?.paperKey) ?? null
+
+// The bounds a drag has to respect, and the size it starts from. Exported rather
+// than repeated in travel.js: the `resize` op clamps to these, and a drag that
+// previewed a width the op would then refuse would be a rubber band that lies.
+export const PAPER_MIN_W = MIN_W
+export const PAPER_MAX_W = MAX_W
+export const paperSize = (p) => sizeOf(p)
+
+// HOW TALL A PANE IS INCLUDING THE FURNITURE THAT STANDS OFF IT -- the pane's
+// `chromeTop`, and the thing the arrival has to fit rather than the document.
+//
+// MEASURED, and it is why two of the four reported faults could not be reproduced
+// from the code alone. At 1600x1000 with the pane fitted to its DOCUMENT height,
+// `__paperPoint` put `X--` at y=-41 and `&--` at y=1041: both controls were
+// entirely OFF SCREEN, top and bottom. They were armed, they were correctly
+// hidden-until-hovered, the ops behind them worked -- and there was no pixel you
+// could put the pointer on to reach any of it. "The `--&` does not work at all" is
+// exactly what that looks like from the driver's seat.
+//
+// This is rrabbit.js's own `chromeTop` finding, arrived at again by the same route:
+// "the flatten's fit used to be the surface's own height, which was the whole
+// window until there was a name board and a close control standing above the top
+// edge -- and then arriving put both of them off the top of the screen".
+//
+// `PAD`, not `GRIP_REACH`: the pad is what the pointer has to be able to reach, it
+// is centred `PAD/2` beyond the corner and is `PAD` tall, so its outer edge is a
+// full `PAD` past the document. Fitting to the visible mark instead would put the
+// mark on screen and its hit area half off it, which is worse than either.
+//
+// THE COST, STATED: a pane arrives further back than it used to, so the document
+// lands smaller. The window made the same trade for the same reason and the wheel
+// undoes it in one notch.
+export const paperFitHeight = (p) => sizeOf(p).h + 2 * PAD
+
+// THE RUBBER BAND IS GONE, and this note is why it is not coming back.
+//
+// The drag used to draw an amber outline at the target size and commit one
+// `resize` op on release, because the op re-lays the document out and remounts the
+// read tier's DOM and that looked too expensive to do per pointermove. Travis
+// asked for the opposite -- a live render while dragging -- and that is the right
+// call for a DOCUMENT: resizing one is a question about the layout, and an outline
+// is the one thing that cannot answer it. travel.js `stepPaperResize` now commits
+// at most once per animation frame, past a dead band, and read.js remembers
+// `scrollTop` per pane so the rebuild does not throw the reader's place away.
 
 // ---- the ops (rung 6) --------------------------------------------------------
 //
@@ -595,37 +848,81 @@ export function registerPaperOps() {
       return r
     },
   })
-  registerOp('unread', { pre: () => true, perform: () => { closeRead(); refreshChrome(); return { ok: true } } })
+  // LEAVING A PANE FLIES YOU OUT, the way leaving a window does. It used to only
+  // unmount the DOM, which left the camera parked at the pane's face staring at a
+  // document that had just vanished -- reported as panes not having "the same exit
+  // animation" as a window. `releaseInside` is travel's `release`, so the flight
+  // home is literally the same one.
+  registerOp('unread', {
+    pre: () => true,
+    perform: () => {
+      // `closeRead` writes where you got to back onto the pane, so the canvas the
+      // road draws has to be brought up to it -- otherwise you leave a document
+      // three screens in and drive past a picture of its title.
+      const was = readingPane()
+      closeRead()
+      if (was) repaintPaint(was)
+      // Leaving is an answer of "no". A confirm left standing on a pane you have
+      // driven away from is the exact state the window forbids.
+      state.paperAsking = null
+      refreshChrome()
+      const flew = hooks.releaseInside?.() ?? false
+      return { ok: true, flew }
+    },
+  })
 
   const paneAt = (op) => papers.get(keyOf(op.district, op.side, op.dash)) ?? null
 
   registerOp('close', {
     pre: (op) => (paneAt(op) ? true : 'OP_NO_PANE'),
+    // ASKS BEFORE IT DOES IT, the way `X--` does on a window -- and the ANSWER IS
+    // ITS OWN TARGET, which is the half this was missing and which was reported as
+    // "the close does not work like the other window close".
+    //
+    // It used to take the second press on `X--` as the yes. travel.js's own
+    // `closeClick` records at length why a window may not do that and this copied
+    // the shape without the guard: `X--` is a small quad at a corner you also reach
+    // for to grab, it is the only act on a pane that cannot be undone, and a
+    // double-click is ONE gesture that went through a two-press guard as if it were
+    // two decisions.
+    //
+    // So the vocabulary grew an `answer` and the rule is the window's, exactly:
+    //
+    //   no answer   `X--`        ask, or -- if already asking THIS pane -- unask.
+    //   'close'     `close--X`   the only yes, and only for the pane being asked
+    //                            about. The pointer has to travel to it, and the
+    //                            travel is the second decision.
+    //   'keep'      `<--keep`    no.
+    //
+    // A REPLAY THEREFORE CANNOT DESTROY A PANE WITH A BARE `close`, and that is the
+    // guard working rather than a regression: a plan that closes a pane has to
+    // carry the answer, which is what a plan that meant to close it recorded.
     perform: (op) => {
       const p = paneAt(op)
-      // ASKS BEFORE IT DOES IT, the way `X--` does on a window. Closing is the
-      // only act on a pane that cannot be undone -- the document survives in the
-      // store, but its place on the road does not -- and a control that destroys
-      // on the first press is the one control a shell must not have.
-      //
-      // The ask is state, not a modal: `state.paperAsking` holds the key and the
-      // chrome draws differently while it is set, exactly as `state.closeAsking`
-      // does for a window.
-      if (state.paperAsking !== p.key) {
-        state.paperAsking = p.key
+      const answer = op.answer ?? null
+      const asked = state.paperAsking === p.key
+      if (answer !== 'close') {
+        // `keep` clears; a bare press toggles. Both end with no question standing.
+        state.paperAsking = answer === 'keep' || asked ? null : p.key
         refreshChrome()
-        return { ok: true, asked: true, key: p.key }
+        return { ok: true, asked: state.paperAsking === p.key, key: p.key, answer }
       }
+      // Nothing below this line can destroy a pane unless THIS pane is the one
+      // already being asked about.
+      if (!asked) return { ok: false, why: 'OP_NOT_ASKED' }
       state.paperAsking = null
       // Closing the pane you are reading closes the read tier with it. Leaving a
       // DOM object mounted over a document that no longer exists is the one way
       // this could strand a reader.
       if (readingKey() === p.key) closeRead()
-      // A closed pane cannot stay on air either, and it is unpinned here rather
-      // than left for the shell to notice, so the pin cannot outlive the pane.
-      if (castKey === p.key) { castKey = null; hooks.castPaper?.(p) }
+      // A closed pane cannot stay on air either. Only the PIN is dropped here --
+      // it used to call `hooks.castPaper` to toggle the shell off, which now also
+      // adds the key to the channel list, so destroying a pane would have listed
+      // it as a channel on its way out. The shell reconciles what is on air
+      // against `papers` every frame and does not need telling.
+      if (castKey === p.key) castKey = null
       removePaper(p.key)
-      return { ok: true }
+      return { ok: true, closed: p.key }
     },
   })
 
@@ -652,8 +949,26 @@ export function registerPaperOps() {
       releaseCard(p)
       dematerialize(p)
       p.tier = null
+      // REBUILT HERE WHEN IT IS THE PANE BEING READ, and not left to `syncPaper`.
+      //
+      // Measured, and it is why a resize that emitted a perfectly good op still left
+      // nothing on screen: `syncPaper`'s tier loop SKIPS the pane at the read tier by
+      // design ("a pane being read is never retiered", so that driving away cannot
+      // release the canvas under a mounted document). Handing it a pane whose tier
+      // has just been set to null therefore skipped the one pane that needed
+      // rebuilding -- no frame, no chrome, no canvas, and `paperReport().chrome` came
+      // back null with the reader still standing in it.
+      //
+      // The guard is right and the caller was wrong to route around it: the read
+      // tier's rebuild is this op's job, because this op is what tore it down.
+      if (wasReading) { materialize(p); ensurePaint(p); p.tier = 'paint' }
       syncPaper()
       if (wasReading) { p.readPose = readPoseOf(p); openRead(p) }
+      // The chrome was destroyed with the frame and rebuilt by `materialize`, and
+      // it comes back unarmed and hidden. Without this the controls vanish for good
+      // the moment you use one of them -- which is the same "flash and then gone"
+      // shape as the hover bug, from a different cause.
+      refreshChrome()
       return { ok: true, w, h }
     },
   })
@@ -672,10 +987,36 @@ export function registerPaperOps() {
       const p = paneAt(op)
       const r = hooks.castPaper?.(p)
       if (!r) return { ok: false, why: 'OP_NO_BROADCAST' }
-      // Toggled, like a window's `--&`. The key is what pins the tier, so it has to
-      // come back off when the broadcast does.
+      // Toggled, like a window's `--&`. Set here so the pane is pinned in the same
+      // breath as the press rather than one frame later; the shell re-asserts it
+      // every frame from what is actually on air, which is the authority, because
+      // the tuner can change that with no op at all.
       castKey = r.on ? p.key : null
-      return { ok: true, ...r }
+      // AND IT LETS GO OF THE PANE, which is why `&--` was reported as doing
+      // nothing at all.
+      //
+      // This is the identical fault shell.js's `castWindow` records having had and
+      // fixed, committed again here by writing the pane's cast without the second
+      // half. The corner controls are only offered for aiming on the pane at the
+      // READ tier (`paperMeshes`), so `&--` is reachable from exactly one place --
+      // inside the pane -- and the cockpit slides out of the way while you are in
+      // one. The op ran, the pane really did go on air, and it went on air on a
+      // television that was not on screen. From the only place the control exists,
+      // pressing it was indistinguishable from missing it.
+      //
+      // Broadcasting is a thing you do TO a pane in order to watch it from
+      // somewhere else, so the press ends where the result is visible: back on the
+      // road, dashboard up, this document on the glass. Only when it goes ON --
+      // taking a pane off air from inside it is a press whose result is that you
+      // are still reading, and flying out of a document to prove it is a punishment
+      // for changing your mind.
+      let released = false
+      if (r.on && readingKey() === p.key) {
+        closeRead()
+        released = !!(hooks.releaseInside?.() ?? false)
+      }
+      refreshChrome()
+      return { ok: true, ...r, released }
     },
   })
 }
@@ -685,12 +1026,76 @@ export function registerPaperOps() {
 // decide what leaving one means.
 export const paperUnread = () => applyOp({ op: 'unread' }, { by: 'pointer' })
 
+// FOLLOWING A LINK IS TRAVEL, so it goes through the seam like every other move.
+//
+// `bend:<id>` names a DOCUMENT, and a document that is on this road is standing at
+// a dash -- so following the link is entering that pane, which is the `read` op,
+// which flies. That gives the reported behaviour ("fly back to the road and then
+// to the proper window that it was referencing") without a second movement path:
+// `read` supersedes, so the pane you were in closes as the new one opens.
+//
+// The id match is the same one `paper/wiring.js citations()` uses to decide the
+// road's edges, deliberately -- if these two disagreed, a link would lead somewhere
+// the sealed arrangement says is not connected.
+export function paperFollow(href, from = null) {
+  const raw = String(href ?? '')
+  state.lastPaperFollow = { href: raw, from: from?.key ?? null, went: null, why: null }
+  const m = /^bend:([^#]+)/.exec(raw)
+  if (!m) {
+    // NOT NAVIGATED, and not silently either. An external or malformed href is
+    // recorded and dropped: this shell has nowhere to open one, and the kiosk
+    // browser's answer to an unknown scheme is a redirect prompt over the road.
+    state.lastPaperFollow.why = 'PAPER_LINK_NOT_INTERNAL'
+    return { ok: false, why: 'PAPER_LINK_NOT_INTERNAL' }
+  }
+  const id = m[1]
+  const target = [...papers.values()].find((p) => p.district === state.district && p.doc?.id === id)
+  if (!target) {
+    // A link OFF this road is a real thing for a document to have -- `citations()`
+    // drops exactly these when sealing, on the grounds that a reference out is not
+    // an edge in this network. Same reading here: it is not a failure, it is a
+    // destination that is not on the road you are on.
+    state.lastPaperFollow.why = 'PAPER_LINK_NOT_ON_THIS_ROAD'
+    return { ok: false, why: 'PAPER_LINK_NOT_ON_THIS_ROAD', id }
+  }
+  state.lastPaperFollow.went = target.key
+  return applyOp(
+    { op: 'read', district: target.district, side: target.side, dash: target.dash },
+    { by: 'pointer' },
+  )
+}
+
 // ---- the report --------------------------------------------------------------
 
 // `window.__papers()`. The tier breakdown is the point: "there are 400 panes" and
 // "400 panes are being laid out" are different facts and only the second is a cost.
 export const paperReport = () => ({
   count: papers.size,
+  // THE ADDRESSES, so a caller can act on a pane without hunting for one. Their
+  // absence is why every check of this feature began with a screen-wide `__aim`
+  // sweep -- which takes seconds, during which panes retier underneath it, so the
+  // point it found was not always the point that got clicked. A report that lists
+  // what exists removes the need to search for it.
+  keys: [...papers.keys()],
+  onThisRoad: [...papers.values()].filter((p) => p.district === state.district)
+    // `scroll` per pane, because "the wheel did not reach this document" and "this
+    // document has nothing below the fold" are the same picture and different bugs.
+    .map((p) => ({
+      key: p.key, side: p.side, dash: p.dash, format: p.format, tier: p.tier ?? null,
+      w: p.w ?? null,
+      scroll: p.canvas ? [Math.round(p.scrollY ?? 0), Math.round(p.scrollMax ?? 0)] : null,
+      // The canvas layout's own numbers, so a disagreement with the DOM tier can be
+      // read off rather than inferred from a scroll maximum.
+      box: p.size ? [p.size.width, p.size.height] : null,
+      contentH: p.last ? Math.round(p.last.height) : null,
+      // THE GAP BETWEEN THE TOP OF THE POST AND THE BOTTOM OF THE PANE, which must
+      // be 0 at every size. Reported as the post not reaching the pane; it is one
+      // number and it was never being looked at, so a resize could open it silently.
+      // Positive means the pane floats; negative means the post is buried in it.
+      standGap: p.frame
+        ? +(p.frame.position.y - sizeOf(p).h / 2 - (ROAD_Y + STAND_Y)).toFixed(2)
+        : null,
+    })),
   byTier: [...papers.values()].reduce((a, p) => ((a[p.tier ?? 'unbuilt'] = (a[p.tier ?? 'unbuilt'] ?? 0) + 1), a), {}),
   byDistrict: [...papers.values()].reduce((a, p) => ((a[p.district] = (a[p.district] ?? 0) + 1), a), {}),
   // Canvases actually held, which is the number the lazy-allocation change exists
@@ -705,6 +1110,28 @@ export const paperReport = () => ({
   reading: readingKey(),
   casting: castKey,
   asking: state.paperAsking,
+  // THE CHROME, PER CONTROL, because "the controls do not work" has at least four
+  // distinct causes and they are indistinguishable from a screenshot: the mark is
+  // not drawn, the pad is not armed so the raycast never offers it, the pointer is
+  // being reported at the wrong control, or the op is refusing. Three of those four
+  // are answered here; the fourth is in the op log. Every round of this feature so
+  // far has been spent guessing between them.
+  chrome: (() => {
+    const held = readingKey()
+    const p = held ? papers.get(held) : null
+    if (!p?.chrome) return null
+    const out = { hot: hotCtl, near: nearCtl, marks: {}, pads: {} }
+    for (const m of p.chrome) {
+      // The corner control is `close` and one of the answers is ALSO `close`, so the
+      // answers are named apart. Two different controls under one key would have
+      // reported whichever came last in the list and read as the other one working.
+      const which = m.userData.paperCtl ?? (m.userData.paperAnswer ? `answer:${m.userData.paperAnswer}` : null)
+      if (!which) continue
+      const bin = m.material.map ? out.marks : out.pads
+      bin[which] = m.material.map ? m.visible : !!m.userData.armed
+    }
+    return out
+  })(),
   atlas: atlasReport(),
   overflowing: [...papers.values()].filter((p) => p.last?.overflow).length,
   stream: { resident, ...streamStats, store: store?.kind ?? null },

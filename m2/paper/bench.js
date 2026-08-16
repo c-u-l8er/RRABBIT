@@ -645,12 +645,17 @@ export async function runChromeDemo() {
     steps.push(['cast', JSON.stringify(apply({ op: 'cast', ...at(here[1]) }, { by: 'pointer' }))])
     await sampleFrames(10)
 
-    // CLOSE removes it. The count is the proof.
-    steps.push(['close', JSON.stringify(apply({ op: 'close', ...at(here[2]) }, { by: 'pointer' }))])
+    // CLOSE ASKS, AND THE ANSWER IS ITS OWN OP. The count is the proof, and the
+    // two-step is the point: a bare `close` may not destroy anything.
+    steps.push(['close (ask)', JSON.stringify(apply({ op: 'close', ...at(here[2]) }, { by: 'pointer' }))])
+    steps.push(['  still there', String(papers.has(here[2].key))])
+    steps.push(['close--X', JSON.stringify(apply({ op: 'close', ...at(here[2]), answer: 'close' }, { by: 'pointer' }))])
     await sampleFrames(10)
     steps.push(['after', snap()])
 
-    // And the refusals, so the panel shows the seam saying no.
+    // And the refusals, so the panel shows the seam saying no. An answer with no
+    // question standing is the guard's own refusal, by name.
+    steps.push(['answer unasked', JSON.stringify(apply({ op: 'close', ...at(here[0]), answer: 'close' }, { by: 'pointer' }))])
     steps.push(['close again', JSON.stringify(apply({ op: 'close', ...at(here[2]) }, { by: 'pointer' }))])
     steps.push(['resize NaN', JSON.stringify(apply({ op: 'resize', ...at(here[0]), w: NaN }, { by: 'pointer' }))])
   } else {

@@ -56,6 +56,7 @@ import { createTv } from './broadcast.js'
 import {
   state,
   signs,
+  papers,
   titles,
   ctx,
   hooks,
@@ -79,6 +80,7 @@ import {
   goDistrict,
   goWindow,
   flyToPaper,
+  flyToMail,
   goTrack,
   replayTrack,
   stopReplay,
@@ -125,8 +127,9 @@ import {
 } from './rrabbit.js'
 import { attachGantry, attachBack, syncGantries, gantryReport } from './gantry.js'
 import { attachRamps, syncRamps, rampReport, rampMeshes } from './ramps.js'
-import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPapers, clearPapers, registerPaperOps, paperUnread } from './paper.js'
-import { attachRead, renderRead } from './paper/read.js'
+import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPapers, clearPapers, registerPaperOps, paperUnread, paperFollow, readingPane, pinPaper, scrollPaper } from './paper.js'
+import { attachMail, syncMail, mailReport, mailMeshes, mailAt, placeBox, postTo, registerMailOps, mailUnread, closeMail } from './mail.js'
+import { attachRead, renderRead, closeRead } from './paper/read.js'
 import { apply as applyOp, log as opLog, plan as opPlan, opCounts, replay as replayOps, precheck as precheckOps, register as registerOp } from './ops.js'
 import { attachMap, openMap, closeMap, mapReport } from './map.js'
 import {
@@ -192,18 +195,46 @@ const FULL_LAYER = 1
 // being on the screen are two different states: `--&` puts a window on both, and
 // pressing its chip takes it off the screen while leaving it on the list, which
 // is the whole point of the list existing.
-const castList = new Set()
+// A MAP NOW, KEY -> KIND, AND THAT IS THE WHOLE OF FOUR REPORTED FAULTS.
+//
+// It was a `Set` of SIGN keys and `cast()` filtered it through `signs.has`, so a
+// pane could go on air and could never be a CHANNEL. Everything downstream follows
+// from that one exclusion, and it presented as four separate bugs:
+//
+//   "the dropdown selection doesn't work at all"  -- panes were filtered out of the
+//     list, so the menu a pane had just opened was empty or held only windows.
+//   "only one thing loads in it at a time"        -- `onAirPaper` is a single slot
+//     with no list behind it, so casting a second pane could only replace the first.
+//     Nothing was broken; there was nowhere for the first one to go.
+//   "the delete button doesn't work"              -- delete does `castList.delete(key)`
+//     and the pane's key was never in it. It removed nothing, correctly.
+//   and the scroll, which is its own fix below.
+//
+// Insertion order still matters and a Map preserves it exactly as the Set did.
+const castList = new Map()
 let onAirKey = null
 // The pane on air, if it is a pane. Mutually exclusive with `onAirKey` -- one
 // screen, one picture.
 let onAirPaper = null
+
+// Is this channel still real? A window key lives in `signs`, a pane key in
+// `papers`, and asking the wrong map is how a live channel gets swept off the list.
+const channelAlive = (key, kind) => (kind === 'paper' ? papers.has(key) : signs.has(key))
 
 // What a chip says. The window's own name plus its ADDRESS, because a client
 // names its own window and two of them often pick the same string -- `home:2` is
 // the shell's name for it and the one thing the map, the keyboard and every
 // report in here agree on. On a chip 104px wide the address is what makes two
 // `xterm`s tell apart, so it goes first and the title fills what is left.
-function labelOfKey(k) {
+//
+// A PANE'S ADDRESS IS ALREADY ITS KEY (`district:side:dash`), so it needs no
+// prefix -- what it needs is its title, for the same reason a window does: a road
+// of documents all labelled `home:r:12` is a list you cannot choose from.
+function labelOfKey(k, kind) {
+  if (kind === 'paper') {
+    const p = papers.get(k)
+    return p ? `${k} ${p.card?.title ?? 'document'}` : k
+  }
   const s = signs.get(k)
   if (!s) return k
   return `${s.district}:${s.milepost} ${nameOf(s)}`
@@ -798,11 +829,17 @@ function buildWorld(canvas) {
       // nothing showed, which is the shape of failure that takes longest to find.
       onAir: (!!onAirKey && signs.has(onAirKey)) || !!onAirPaper,
       onAirKey: onAirKey && signs.has(onAirKey) ? onAirKey : (onAirPaper?.key ?? null),
-      title: onAirPaper ? (onAirPaper.card?.title ?? 'document') : (onAirKey ? labelOfKey(onAirKey) : null),
-      list: [...castList].filter((k) => signs.has(k)).map((k) => ({
+      title: onAirPaper ? (onAirPaper.card?.title ?? 'document') : (onAirKey ? labelOfKey(onAirKey, 'window') : null),
+      // ONE LIST, BOTH KINDS. `kind` travels with every row because the pick, the
+      // delete and the click-the-screen all have to know which map to look the key
+      // up in -- and a key alone cannot say. Filtered on liveness through
+      // `channelAlive`, which asks the right map per kind rather than assuming
+      // `signs` for everything, which is what excluded panes in the first place.
+      list: [...castList].filter(([k, kind]) => channelAlive(k, kind)).map(([k, kind]) => ({
         key: k,
-        label: labelOfKey(k),
-        live: k === onAirKey,
+        kind,
+        label: labelOfKey(k, kind),
+        live: kind === 'paper' ? onAirPaper?.key === k : k === onAirKey,
       })),
     }),
     // What the ST&RT menu offers. Same shape and same reason as `cast`: read at
@@ -835,7 +872,9 @@ function buildWorld(canvas) {
   attachRamps(ctx)
   attachPaper(ctx)
   attachRead(ctx)
+  attachMail(ctx)
   registerPaperOps()
+  registerMailOps()
   // THE DRAFT'S OWN VERBS THROUGH THE SAME DOOR. `drive` and `park` are two of the
   // sixteen in OP_VOCABULARY_DRAFT.md §3 and they are wired here rather than left
   // to the pane ops alone, because §9's test is about whether ONE seam serves
@@ -861,10 +900,23 @@ function buildWorld(canvas) {
   // or out of a pane that the log does not see.
   hooks.paperUnread = paperUnread
   hooks.flyToPaper = flyToPaper
+  // Same arrangement for the mailbox panel: Escape inside it leaves through the
+  // seam, so there is no way into or out of a box the log does not see.
+  hooks.mailUnread = mailUnread
+  // A link inside a document is travel, not navigation -- see paper.js paperFollow.
+  hooks.paperFollow = paperFollow
+  hooks.flyToMail = flyToMail
+  // The flight out of anything you are standing in, and the unmount that goes with
+  // it. `leaveInside` closes BOTH detail views unconditionally: only one can be up
+  // at a time, closing a closed one is a no-op, and asking "which kind was it" here
+  // would be a second place that has to agree with `state.inside`.
+  hooks.releaseInside = release
+  hooks.leaveInside = () => { closeRead(); closeMail() }
   attachBack(backTarget)
   syncGantries()
   syncRamps()
   syncPaper()
+  syncMail()
   // `?papers=seed` puts the bundled sample documents on the road you start on.
   // A URL PARAM AND NOT A STARTUP DEFAULT, the same shape `?layout=reset` and
   // `?tracks=` already use: a shell that invents road furniture on every boot is a
@@ -1119,7 +1171,19 @@ function buildWorld(canvas) {
         // already on turns the TV OFF, which is the only way this dropdown can
         // express "nothing" -- there is no other control for it, and a tuner you
         // cannot switch off is one where a window is stuck on the screen.
-        onAirKey = onAirKey === on.key ? null : on.key
+        //
+        // BOTH KINDS, and tuning to either kind turns the other off: there is one
+        // screen, so `onAirKey` and `onAirPaper` can never both be set. The row
+        // carries its `kind` rather than this guessing from the key -- see castList.
+        const kind = on.chan ?? castList.get(on.key) ?? 'window'
+        if (kind === 'paper') {
+          const p = papers.get(on.key)
+          onAirPaper = onAirPaper?.key === on.key ? null : (p ?? null)
+          if (onAirPaper) onAirKey = null
+        } else {
+          onAirKey = onAirKey === on.key ? null : on.key
+          if (onAirKey) onAirPaper = null
+        }
         dash.closeMenu()
       }
     }
@@ -1129,21 +1193,69 @@ function buildWorld(canvas) {
       // one act is how you end up pressing the wrong one. Off the list is off
       // the air as well, because a window broadcasting that nothing on the
       // dashboard admits to has no way back.
+      //
+      // `on.key` is whatever is ON AIR, which for a pane is its pane key -- and
+      // that key was never in `castList`, so this deleted nothing and the button
+      // read as dead. It is in the list now, and both kinds are cleared off the
+      // glass here rather than only the window one.
       if (on.key) castList.delete(on.key)
       if (onAirKey === on.key) onAirKey = null
+      if (onAirPaper?.key === on.key) onAirPaper = null
       dash.closeMenu()
     }
     if (on.kind === 'screen' && on.key) {
       // CLICKING THE TV FLIES YOU INTO THE WINDOW ON IT. The same gesture as
       // clicking its sign out on the road, and it resolves through the same
       // function -- the TV is a view of a window, so it answers like one.
-      const s = signs.get(on.key)
-      if (s) {
+      //
+      // A PANE ANSWERS THE SAME WAY, through the `read` op rather than through
+      // `flattenTo`, because that is the one door into a pane (paper.js). Without
+      // this branch clicking a broadcast document did nothing at all -- `signs.get`
+      // on a pane key is undefined and the whole branch fell through in silence.
+      const paper = papers.get(on.key)
+      if (paper) {
         dash.closeMenu()
-        flattenTo(s.milepost, s.district)
+        applyOp({ op: 'read', district: paper.district, side: paper.side, dash: paper.dash }, { by: 'pointer' })
+      } else {
+        const s = signs.get(on.key)
+        if (s) {
+          dash.closeMenu()
+          flattenTo(s.milepost, s.district)
+        }
       }
     }
     return on
+  }
+
+  // SCROLLING WHAT IS ON THE TELEVISION.
+  //
+  // A pane's picture is a canvas the document was painted into once, so before
+  // this there was nothing to scroll -- the wheel over the glass drove the road,
+  // and past the bottom edge of an overflowing document there was no way to see
+  // the rest except to make the pane bigger. `scrollPaper` repaints at an offset
+  // without redoing the layout.
+  //
+  // A LIVE WINDOW ON THE TV STILL DOES NOT TAKE THE WHEEL, and that is stated
+  // rather than quietly true. Its picture is a Wayland client's own surface; to
+  // scroll it the axis has to be queued into that client's input, which is the
+  // flat-mode path and is bound to the window you are STANDING in. Doing it from
+  // the dashboard is a real piece of work and is not done here.
+  //
+  // Returns whether the gesture was spent, so the caller can fall through to the
+  // road when it was not -- including at the ends of a document, where refusing
+  // would leave the wheel dead over the glass.
+  hooks.tvWheel = (x, y, dy) => {
+    if (!dash || !onAirPaper) return false
+    const rect = dash.tvRect()
+    if (!rect) return false
+    if (x < rect.x || x > rect.x + rect.w || y < rect.y || y > rect.y + rect.h) return false
+    // Scaled to CANVAS pixels: the glass is `rect.h` screen pixels showing a canvas
+    // `onAirPaper.size.height` tall, so a notch that moved the document by its raw
+    // deltaY would move it by a different amount depending on how big the cockpit
+    // is on this display.
+    const perPx = (onAirPaper.size?.height ?? rect.h) / Math.max(1, rect.h)
+    scrollPaper(onAirPaper, dy * perPx)
+    return true
   }
 
   // `--&` on a flattened window. Adds it to the list AND puts it on air, because
@@ -1155,9 +1267,18 @@ function buildWorld(canvas) {
   // `signs.get(onAirKey)` ask which kind of thing it is holding.
   hooks.castPaper = (pane) => {
     if (!pane?.tex) return null
+    // ON THE LIST AS WELL AS ON THE SCREEN, which is what `castWindow` has always
+    // done and what this did not. Being listed is what makes a second pane
+    // reachable after a third one takes the glass -- without it every `&--` could
+    // only replace what was there, reported as "only one thing loads at a time".
+    //
+    // ADDED EVEN WHEN THIS PRESS TAKES IT OFF AIR. Taking it off the screen is not
+    // taking it off the list; that is what `delete` is for, and the list keeping it
+    // is the only way back.
+    castList.set(pane.key, 'paper')
     onAirPaper = onAirPaper === pane ? null : pane
     if (onAirPaper) onAirKey = null
-    return { on: !!onAirPaper, key: pane.key }
+    return { on: !!onAirPaper, key: pane.key, listed: castList.size }
   }
 
   hooks.castWindow = (district, milepost) => {
@@ -1166,8 +1287,12 @@ function buildWorld(canvas) {
       return s && s.district === district && s.milepost === milepost
     })
     if (!k) return null
-    castList.add(k)
+    castList.set(k, 'window')
     onAirKey = k
+    // One screen, one picture -- and the pane has to be let go of here as well as
+    // the other way round, or a window cast while a pane was on air left both set
+    // and `cast()` reported the pane's key as what was on the glass.
+    onAirPaper = null
     // AND IT LETS GO OF THE WINDOW, which is the half that was missing.
     //
     // The cockpit slides out of the way while you are standing in a window (the
@@ -1985,6 +2110,10 @@ function frame(now = 0) {
     // settled and before the frame is drawn -- a pane that retiers after the draw
     // shows the previous tier for one frame, which reads as a flicker on entry.
     syncPaper()
+    // After syncRamps for the same reason panes are: the exit gate stands past
+    // the last thing on the road and `lastMailZ` now joins that min, so the gate
+    // has to have moved before anything is placed against it.
+    syncMail()
     // After the roads, because this puts the windows back over them.
     syncPlacement()
     syncTitles()
@@ -2035,16 +2164,31 @@ function frame(now = 0) {
     // against the signs that actually exist, every frame, exactly the way
     // syncPlacement and syncTitles do it.
     if (tv && dash) {
-      for (const k of [...castList]) if (!signs.has(k)) castList.delete(k)
+      // PER KIND. Sweeping every key against `signs` would delete every pane
+      // channel on the first frame after it was added -- the list would empty
+      // itself faster than you could open the menu, which is indistinguishable
+      // from the list never being written to.
+      for (const [k, kind] of [...castList]) if (!channelAlive(k, kind)) castList.delete(k)
       if (onAirKey && !signs.has(onAirKey)) onAirKey = null
-      // A PANE THAT WENT AWAY CANNOT STAY ON AIR, and neither can one that dropped
-      // out of the paint tier -- its texture is released on downgrade, and three
-      // would happily keep drawing a disposed one.
-      if (onAirPaper && !onAirPaper.tex) onAirPaper = null
+      // A PANE THAT NO LONGER EXISTS CANNOT STAY ON AIR.
+      //
+      // THE TEST IS EXISTENCE, NOT TEXTURE, and that correction is what makes the
+      // tuner able to select a pane at all. It used to clear `onAirPaper` the
+      // moment `!onAirPaper.tex`, which is true of every pane that is not at the
+      // paint tier -- so tuning to a document further up the road cleared itself in
+      // the same frame, before the pin below could promote it. Having no picture
+      // yet is a reason not to DRAW it, which is the `?.tex` on the line that sets
+      // the TV, and it is not a reason to stop being the channel.
+      if (onAirPaper && !papers.has(onAirPaper.key)) onAirPaper = null
+      // AND paper.js IS TOLD, every frame, because the tuner can change what is on
+      // air without any op running. The pin is what holds a broadcasting pane at
+      // the paint tier while you drive away from it; an unpinned channel loses its
+      // texture and goes blank.
+      pinPaper(onAirPaper?.key ?? null)
       const rect = dash.tvRect()
       // No rect means the cockpit is out of the way (flat, or the map is up), and
       // a TV with nowhere to be does not draw. It keeps its place on the list.
-      tv.set(rect ? (onAirKey ? signs.get(onAirKey) : onAirPaper) : null)
+      tv.set(rect ? (onAirKey ? signs.get(onAirKey) : (onAirPaper?.tex ? onAirPaper : null)) : null)
       if (rect) {
         // ALIVE-KEYS ONLY WHEN A WINDOW IS ON AIR. broadcast.js's liveness check is
         // `keyOf(showing)` against the sign ledger, and `keyOf` reads
@@ -2414,6 +2558,19 @@ window.__ramps = () => rampReport()
 // facts and only the second one is a cost. See docs/PAPER_ROADS.md.
 window.__papers = () => paperReport()
 
+// THE DRIVERSIDE MAILBOXES. `wanted` (what the store says each badge should read)
+// and `painted` (what each face was last drawn with) are reported SEPARATELY and
+// deliberately, so the two can disagree in the report. A badge showing a number
+// that is no longer true is the one failure of this feature a driver could not
+// tell from an agent having nothing to say.
+window.__mail = () => mailReport()
+
+// Put a box on the road, and put something in it. Test affordances, and named as
+// such: nothing spawns a mailbox on its own, because a shell that invents road
+// furniture on boot is one you cannot take a clean reading from.
+window.__mailBox = (agent = 'planner', opts = {}) => placeBox({ agent, ...opts })
+window.__mailPost = (key, kind = 'note', subject = 'hello', body = '') => postTo(key, { kind, subject, body })
+
 // RUNG 7. The road you are standing on, as a WRL network, sealed to a `sem-` id.
 // The SOURCE comes back with the id on purpose: an identity whose input you cannot
 // read is a number you have to trust rather than one you can check.
@@ -2664,10 +2821,23 @@ window.__cast = () => ({
   // window still exist"; `live` is "is this the chip lit on the TV". Without the
   // second, a test of the toggle reads the first, sees no change, and concludes
   // the toggle is broken -- which is exactly what happened.
-  list: [...castList].map((k) => ({
-    key: k, label: labelOfKey(k), alive: signs.has(k), live: k === onAirKey,
+  // `kind` because the list holds both windows and panes now, and every one of
+  // "is it alive", "is it live" and "what does it say" is answered against a
+  // different map depending on which it is. A probe that flattened the two would
+  // report every pane as dead.
+  list: [...castList].map(([k, kind]) => ({
+    key: k,
+    kind,
+    label: labelOfKey(k, kind),
+    alive: channelAlive(k, kind),
+    live: kind === 'paper' ? onAirPaper?.key === k : k === onAirKey,
   })),
-  onAir: onAirKey,
+  onAir: onAirKey ?? onAirPaper?.key ?? null,
+  onAirKind: onAirKey ? 'window' : onAirPaper ? 'paper' : null,
+  // What the pointer can scroll, and how far it can go -- the two numbers that
+  // separate "the wheel is not reaching the TV" from "this document does not
+  // overflow", which read identically on screen.
+  scroll: onAirPaper ? { y: Math.round(onAirPaper.scrollY ?? 0), max: Math.round(onAirPaper.scrollMax ?? 0) } : null,
   rect: dash ? dash.tvRect() : null,
   tv: tv ? tv.report() : null,
 })
@@ -3241,9 +3411,44 @@ window.__chromePoint = (which) => {
       Math.round(rect.top + ((1 - v.y) / 2) * rect.height),
     ],
     armed: !!pad.userData.armed,
-    drawn: !!s[which.replace('Pad', 'Btn')]?.visible,
+    // WHICH MESH THIS PAD ACTUALLY DRAWS. `Pad -> Btn` is right for close/cast/
+    // full/plate and WRONG for the resize grip, whose mesh is `handle` -- there is
+    // no `grabBtn`, so this reported a hard `false` for it however the grip was
+    // behaving. Found while measuring the chrome-hover fix: every other control
+    // moved and that one never did, which looked like a bug in the fix.
+    // A probe that cannot say `true` is worse than no probe.
+    drawn: !!(which === 'grabPad' ? s.handle : s[which.replace('Pad', 'Btn')])?.visible,
   }
 }
+// THE SAME QUESTION, ABOUT A PANE, and its absence is half of why the pane's
+// controls shipped four faults deep.
+//
+// `__chromePoint` made a window's chrome drivable and checkable from outside; the
+// pane's chrome had no equivalent, so every check of it was a screen-wide `__aim`
+// sweep for a mark that is only DRAWN while you are pointing at it -- a search that
+// cannot find what it is looking for. `which` is `close`, `cast`, `resize`, `keep`
+// or `close--X`; `armed` and `drawn` come back with the point for the reason the
+// window's version states, and `paperReport().chrome` is the fleet-wide view.
+window.__paperPoint = (which) => {
+  const p = readingPane()
+  if (!p?.chrome) return null
+  const want = which === 'keep' || which === 'close--X' ? which === 'keep' ? 'keep' : 'close' : null
+  const of = (m) => (want ? m.userData.paperAnswer === want : m.userData.paperCtl === which && !m.userData.paperAnswer)
+  const pad = p.chrome.find((m) => of(m) && !m.material.map)
+  const btn = p.chrome.find((m) => of(m) && m.material.map)
+  if (!pad) return null
+  const v = pad.getWorldPosition(new THREE.Vector3()).project(camera)
+  const rect = renderer.domElement.getBoundingClientRect()
+  return {
+    at: [
+      Math.round(rect.left + ((v.x + 1) / 2) * rect.width),
+      Math.round(rect.top + ((1 - v.y) / 2) * rect.height),
+    ],
+    armed: !!pad.userData.armed,
+    drawn: !!btn?.visible,
+  }
+}
+
 window.__resized = () =>
   [...signs.values()]
     .filter((s) => s.district === state.flatDistrict && s.milepost === state.flatMilepost)

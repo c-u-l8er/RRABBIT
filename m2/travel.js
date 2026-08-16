@@ -20,7 +20,11 @@ import { state, signs,
   papers, hooks, keyOf, SCENE_ID, exitZOf, GANTRY_VIEW, HEAD_ROOM, roadOrder, dashZ, slotFree } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
-import { paperMeshes, setPaperHover, isReadingPaper, readingPane } from './paper.js'
+import {
+  paperMeshes, setPaperHover, setPaperChromeHot, isReadingPaper, readingPane,
+  paperSize, paperFitHeight, clearPaperAsk, paperAt, scrollPaper, PAPER_MIN_W, PAPER_MAX_W,
+} from './paper.js'
+import { mailMeshes, mailAt, isReadingMail } from './mail.js'
 import { apply as applyOp } from './ops.js'
 import * as layout from './layout.js'
 import { gantryMeshes, actionOf, setHovered, scrollGateOf } from './gantry.js'
@@ -745,22 +749,95 @@ function flattenTo(milepost, district = state.district) {
 // and left the camera wherever it stood -- so a document you entered appeared
 // somewhere off in the distance instead of being arrived at.
 //
-// `target: null` on the flight, NOT a milepost: landing sets `state.mode` back to
-// `driving` rather than to `flat`. A pane is not a window and does not flatten --
-// the read tier is a DOM object standing at the pane's own position, so the camera
-// coming to it is the whole of "entering" one. The pane stays put and you move,
-// which is also why it reads as flying in.
+// IT LANDS IN `read`, NOT IN `driving`, and that is the fix for a whole family of
+// reports at once.
+//
+// This used to fly with `target: null`, which lands the shell back in `driving` --
+// and the consequences were patched one at a time wherever they surfaced: the
+// wheel handler grew a `readingPane()` branch because the driving wheel had the
+// event and drove away; the cockpit stayed up over a document it was covering;
+// Escape had to be special-cased; and the panel floated over the dashboard instead
+// of the dashboard getting out of the way. Reported as "they float at the top of
+// everything even the dashboard when really the dash is supposed to disappear when
+// the spaceship flys in".
+//
+// All of those are one fact: STANDING IN A PANE IS A PLACE, and the shell had no
+// word for it. `read` is that word, and it is the same shape `flat` is -- so the
+// cockpit hides, the wheel belongs to what you are standing in, and `release()`
+// flies you out the way it flies you out of a window.
 export function flyToPaper(pane) {
   const m = pane?.frame ?? pane?.paintMesh
   if (!m) return null
+  // THE CHROME IS PART OF WHAT HAS TO BE IN FRAME -- see `paperFitHeight`, which
+  // is the pane's `chromeTop` and which this used to ignore, arriving with `X--`
+  // above the top edge of the screen and `&--` below the bottom one.
+  return flyInto(m, paperFitHeight(pane), { kind: 'paper', key: pane.key })
+}
+
+// The same arrival for a mailbox. One function rather than two near-copies,
+// because "fly to a thing standing on the verge and stand in it" is one motion
+// and the only thing that differs is how tall the thing is.
+export function flyToMail(box, mesh, height) {
+  if (!mesh) return null
+  return flyInto(mesh, height, { kind: 'mail', key: box.key })
+}
+
+// HOW FAR BACK YOU LEFT IT, per pane and per mailbox.
+//
+// Windows have had this since zoom went per-window (`zoomMemory` above); a pane
+// did not, so the wheel moved the camera and the next entry threw that away and
+// recomputed the frustum default. Reported: "when i am in window detail view and
+// exit then enter back in my scroll position is not being persisted".
+//
+// Keyed by the SLOT KEY (`district:side:dash`), which is what `state.inside`
+// already carries -- so a pane that is moved to another dash correctly arrives at
+// the default rather than inheriting a distance set for a different place. That is
+// the opposite call to `rekeyZoom`'s for windows, and deliberately: a window's
+// milepost is an identity that travels with it, a pane's dash is where it stands.
+// The wheel's own bounds, spelled once. Closer than READ_NEAR and the near plane
+// eats the document; further than READ_FAR and you are reading it from the road.
+const READ_NEAR = 60
+const READ_FAR = 2400
+const insideZoom = new Map()
+export const forgetInsideZoom = (key) => insideZoom.delete(key)
+
+// Move the camera along the thing's normal. NOT a scale: the pane is an object in
+// the world, and zooming it by scale would make it a different size than the frame
+// it sits in.
+function zoomRead(deltaY) {
+  const rp = readingPane()
+  const m = rp?.frame ?? rp?.paintMesh
+  if (!m) return
+  state.paperWheel = (state.paperWheel ?? 0) + 1
+  const t = m.rotation.y
+  const n = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
+  const to = m.position
+  const clamped = Math.max(READ_NEAR, Math.min(READ_FAR, camera.position.distanceTo(to) + deltaY * 0.5))
+  camera.position.copy(to).addScaledVector(n, clamped)
+  camera.lookAt(to)
+  // Remembered at the one place the distance actually changes, so there is no
+  // second path that has to remember to record it. `flyInto` reads it back.
+  if (state.inside?.key) insideZoom.set(state.inside.key, clamped)
+}
+
+function flyInto(m, h, inside) {
   const t = m.rotation.y
   const normal = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
-  // Far enough back that the whole pane is in frame with a margin. Derived from
+  // Far enough back that the whole thing is in frame with a margin. Derived from
   // the frustum rather than chosen: at distance d the visible half-height is
-  // d*tan(fov/2), so fitting a pane of height h needs d = (h/2)/tan(fov/2).
-  const h = pane.h ?? 197
-  const d = (h / 2) / Math.tan((camera.fov / 2) * Math.PI / 180) * 1.25
-  flight = { from: currentPose(), to: { pos: m.position.clone().addScaledVector(normal, d), look: m.position.clone() }, t: 0, target: null }
+  // d*tan(fov/2), so fitting something of height h needs d = (h/2)/tan(fov/2).
+  const fit = (h / 2) / Math.tan((camera.fov / 2) * Math.PI / 180) * 1.25
+  // Clamped to the same bounds the wheel uses, or a stored distance could outlive
+  // a change to those limits and put the camera somewhere the wheel cannot undo.
+  const saved = insideZoom.get(inside?.key)
+  const d = saved == null ? fit : Math.max(READ_NEAR, Math.min(READ_FAR, saved))
+  flight = {
+    from: currentPose(),
+    to: { pos: m.position.clone().addScaledVector(normal, d), look: m.position.clone() },
+    t: 0,
+    target: null,
+    landIn: inside,
+  }
   state.mode = 'flying'
   return true
 }
@@ -964,25 +1041,77 @@ function handlePoint() {
   }
 }
 
+// ARE YOU REACHING FOR THIS WINDOW AT ALL -- as opposed to being exactly on one
+// 66-unit corner pad.
+//
+// THE BUG THIS FIXES, measured rather than guessed. On a 250x250 client the
+// window's box on screen was [544,193]-[736,384] and `closePad` projected to
+// [461,109] -- 83px outside its own corner. That is not a placement mistake: the
+// pads are `PAD/2` beyond each corner by construction (rrabbit.js), so their inner
+// edge only just touches the corner POINT and every one of them lies wholly
+// outside the picture. Hovering at [461,109] drew the control; hovering the
+// window's own top-left at [548,197] drew nothing. Reported as "i can't see the
+// controls around the windows when i onhover around the edges", and that is
+// exactly right -- the edges are the one place they do not appear.
+//
+// DRAWING AND HITTING ARE SEPARATED, which is the whole of the fix. The pads keep
+// deciding what a click lands on, so nothing is taken from the application: this
+// only decides whether the marks are PAINTED. A control you can see and then aim
+// at is discoverable; one you must aim at before it exists is not.
+const CHROME_NEAR = 90
+function nearFlatWindow(ev) {
+  const s = flatSign()
+  if (!s?.mesh) return false
+  const rect = renderer.domElement.getBoundingClientRect()
+  const w = renderer.domElement.clientWidth
+  const h = renderer.domElement.clientHeight
+  // The sign's own four corners, projected. Read off the MESH rather than from the
+  // surface size, because the mesh is what the pads are hung on -- deriving the
+  // band from something else is how the two would drift apart.
+  const g = s.mesh.geometry
+  g.computeBoundingBox?.()
+  const bb = g.boundingBox
+  if (!bb) return false
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const [cx, cy] of [[bb.min.x, bb.min.y], [bb.max.x, bb.min.y], [bb.max.x, bb.max.y], [bb.min.x, bb.max.y]]) {
+    const v = new THREE.Vector3(cx, cy, 0)
+    s.mesh.localToWorld(v)
+    v.project(camera)
+    const x = ((v.x + 1) / 2) * w
+    const y = ((1 - v.y) / 2) * h
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  const px = ev.clientX - rect.left
+  const py = ev.clientY - rect.top
+  return px >= minX - CHROME_NEAR && px <= maxX + CHROME_NEAR
+      && py >= minY - CHROME_NEAR && py <= maxY + CHROME_NEAR
+}
+
 // The grip brightens and the cursor changes when the pointer is over the pad --
 // the same signal the gantry lanes give, and the only thing that says a control
 // is there before you press it.
-function setGrabHot(s, hot) {
+//
+// `hot` is "over the pad" and decides the CURSOR and the click; `near` is "reaching
+// for the window" and decides only whether the mark is drawn.
+function setGrabHot(s, hot, near = false) {
   if (!s?.handle) return
-  const show = !!hot && !!s.handle.userData.armed
-  s.handle.visible = show
-  state.grabHot = show
+  const armed = !!s.handle.userData.armed
+  s.handle.visible = armed && (!!hot || !!near)
+  state.grabHot = !!hot && armed
 }
 
 // `X--` appears the same way `-->` does, and the two are checked together so
 // that exactly one cursor is set per pointer move. Two independent "hot"
 // functions each writing `style.cursor` means whichever ran second wins, and
 // leaving one control's corner would clear the cursor the other had just set.
-function setCloseHot(s, hot) {
+function setCloseHot(s, hot, near = false) {
   if (!s?.closeBtn) return
-  const show = !!hot && !!s.closeBtn.userData.armed
-  s.closeBtn.visible = show
-  state.closeHot = show
+  const armed = !!s.closeBtn.userData.armed
+  s.closeBtn.visible = armed && (!!hot || !!near)
+  state.closeHot = !!hot && armed
 }
 
 // `&--` JOINS THE HOVER-ONLY FAMILY, which is a change of mind worth recording.
@@ -996,19 +1125,21 @@ function setCloseHot(s, hot) {
 // you stand in is furniture the other three corners had already argued against.
 //
 // Asked for, and it puts the pair on the left edge back in step with `-->`.
-function setCastHot(s, hot) {
+function setCastHot(s, hot, near = false) {
   if (!s?.castBtn) return
-  const show = !!hot && !!s.castBtn.userData.armed
-  s.castBtn.visible = show
-  state.castHot = show
+  const armed = !!s.castBtn.userData.armed
+  s.castBtn.visible = armed && (!!hot || !!near)
+  state.castHot = !!hot && armed
 }
 
-function setStepHot(s, which, hot) {
+function setStepHot(s, which, hot, near = false) {
   const btn = s?.[which === -1 ? 'prevBtn' : 'nextBtn']
   if (!btn) return false
-  const show = !!hot && !!btn.userData.armed
-  btn.visible = show
-  return show
+  const armed = !!btn.userData.armed
+  btn.visible = armed && (!!hot || !!near)
+  // The RETURN is still "over the pad", because the caller uses it for the cursor
+  // and for `state.stepHot`. Drawing is not hovering.
+  return !!hot && armed
 }
 
 function setChromeCursor() {
@@ -1321,6 +1452,145 @@ function endResize() {
   return true
 }
 
+// ---- a pane's resize, which is a DRAG ---------------------------------------
+//
+// Reported: "window resize is completely broken". It was a CLICK that added 150
+// units, which is not a resize by any reading -- it could only grow, it stopped
+// dead at MAX_W after four presses with no way back, and it never once consulted
+// where the pointer went. The window it is supposed to match has had a grab-and-
+// drag since the beginning; this was a placeholder that shipped.
+//
+// MEASURED ALONG THE PANE'S OWN X AXIS, not along the screen's. A pane stands at
+// `-side * 0.42` radians, so a pointer moving right is moving diagonally across the
+// document -- projecting the frame's local +X and taking the pointer delta's
+// component along it is what makes the corner follow the hand on BOTH sides of the
+// road. Taking `ev.clientX` alone would have made the left side resize backwards
+// and the right side resize at the wrong rate, which is the kind of wrong that
+// looks like a sensitivity problem and is not.
+let paperResizing = null
+
+// Screen pixels per world unit along the pane's local +X, and the pane's centre in
+// screen pixels. Null when the pane is edge-on, where the answer is a division by
+// something near zero and the correct move is to refuse the drag.
+function paperAxis(p) {
+  if (!p?.frame) return null
+  const el = renderer.domElement
+  const w = el.clientWidth
+  const h = el.clientHeight
+  const o = p.frame.localToWorld(new THREE.Vector3(0, 0, 0)).project(camera)
+  const u = p.frame.localToWorld(new THREE.Vector3(1, 0, 0)).project(camera)
+  const dx = ((u.x - o.x) / 2) * w
+  const dy = ((o.y - u.y) / 2) * h
+  const len = Math.hypot(dx, dy)
+  if (!(len > 1e-4)) return null
+  return { ux: dx / len, uy: dy / len, pxPerUnit: len }
+}
+
+function startPaperResize(p, ev) {
+  const axis = paperAxis(p)
+  if (!axis) return false
+  paperResizing = {
+    pane: p,
+    sx: ev.clientX,
+    sy: ev.clientY,
+    w0: paperSize(p).w,
+    axis,
+    w: paperSize(p).w,
+    // `last` starts at the CURRENT width so a press with no drag commits nothing.
+    // Without it the first `commitPaperResize` fires on release with the width it
+    // already had, which the op answers `unchanged` -- correct, and still a log
+    // entry for a gesture that did not happen.
+    last: paperSize(p).w,
+    ops: 0,
+  }
+  return true
+}
+
+// THE DOCUMENT RE-RENDERS AS YOU DRAG, and the outline is gone.
+//
+// The first cut drew a rubber band and committed once on release, on the argument
+// that the `resize` op re-lays the document out and remounts the read tier's DOM,
+// which is too much to do per pointermove. Asked for the other way -- "the resize
+// --> button needs to receive a live update and latest render while it is being
+// resized so it looks smooth" -- and the ask is right: a band tells you the extent
+// and a resize on a DOCUMENT is a question about the LAYOUT, which is the one thing
+// the band could not show. Reflowing at 500 units wide is the answer you are
+// actually asking for.
+//
+// THREE THINGS MAKE IT AFFORDABLE, and none of them is doing less work:
+//
+//   ONE OP PER FRAME, not one per event. A pointermove stream is 120Hz on a
+//   trackpad and the screen is 60; the extra ops are relayouts nobody ever saw.
+//   `rafPending` is the gate, and the LAST position wins rather than the first.
+//
+//   A DEAD BAND. Sub-`STEP` moves are dropped, so the ordinary jitter of a held
+//   hand does not relayout a document. 6 units is under 2% of a default pane and
+//   is invisible in the result.
+//
+//   THE SCROLL SURVIVES. read.js remembers `scrollTop` per pane across the
+//   close/open the op forces, which is what stops a live resize from slamming a
+//   half-read document back to its title sixty times a second.
+//
+// THE COST, STATED: a drag now writes one `resize` op per frame it moved, so the
+// op log records the whole gesture rather than its result, and a replay re-runs
+// every step. That is the honest record of what happened -- the alternative is a
+// log that says the pane arrived at a width nobody dragged it to.
+const RESIZE_STEP = 6
+function stepPaperResize(ev) {
+  const r = paperResizing
+  if (!r) return
+  const dx = ev.clientX - r.sx
+  const dy = ev.clientY - r.sy
+  // The grab is at the top-right corner and the geometry is centred, so the corner
+  // moves by half the width. Doubling is what makes the mark stay under the pointer
+  // instead of drifting away from it at half speed.
+  const along = (dx * r.axis.ux + dy * r.axis.uy) / r.axis.pxPerUnit
+  const want = Math.max(PAPER_MIN_W, Math.min(PAPER_MAX_W, Math.round(r.w0 + along * 2)))
+  state.paperResize = { key: r.pane.key, from: r.w0, to: want, dx: Math.round(dx), ops: r.ops ?? 0 }
+  if (Math.abs(want - r.w) < RESIZE_STEP) return
+  r.w = want
+  if (r.rafPending) return
+  r.rafPending = true
+  requestAnimationFrame(() => {
+    r.rafPending = false
+    // Re-read `r.w` INSIDE the frame. Everything between the schedule and this
+    // callback moved the target, and sending the width that was current when the
+    // frame was booked is how a drag ends up one frame behind the hand.
+    if (paperResizing !== r) return
+    commitPaperResize(r)
+  })
+}
+
+function commitPaperResize(r) {
+  if (r.w === r.last) return
+  r.last = r.w
+  r.ops = (r.ops ?? 0) + 1
+  // THROUGH THE SEAM, like every other pane operation -- including mid-drag. A
+  // gesture that mutated the world directly and only told the seam at the end
+  // would be a second path into `papers`, which is the thing ops.js exists to
+  // prevent.
+  applyOp({ op: 'resize', district: r.pane.district, side: r.pane.side, dash: r.pane.dash, w: r.w }, { by: 'pointer' })
+}
+
+function endPaperResize() {
+  const r = paperResizing
+  if (!r) return false
+  paperResizing = null
+  if (r.captured !== undefined) {
+    try {
+      renderer.domElement.releasePointerCapture(r.captured)
+    } catch {
+      /* already gone */
+    }
+  }
+  // THE LAST POSITION IS COMMITTED HERE AND NOT LEFT TO THE PENDING FRAME.
+  // Releasing cancels the callback's guard (`paperResizing !== r`), so a drag that
+  // ended between two frames would otherwise settle at the second-to-last width --
+  // a pane that stops a few units short of where you let go, every time.
+  commitPaperResize(r)
+  return true
+}
+
 // Drive a resize without a mouse, for the same reason __pointAt exists.
 function resizeFlatBy(dxScreen, dyScreen) {
   const s = flatSign()
@@ -1347,6 +1617,18 @@ function release() {
   // and the only control that could undo it is one that only appears while full.
   clearFull()
   if (state.mode === 'driving') return false
+  // LEAVING A PANE OR A MAILBOX IS LEAVING, and it comes out here rather than at
+  // the two ops that can start it. `release` is the one place every route out of
+  // somewhere converges -- that is the argument `clearFull` above already makes --
+  // and a detail view left mounted while the camera flies back to the road is a
+  // document hanging in the air over a road it is no longer standing on.
+  //
+  // A HOOK, not an import: travel.js cannot import paper.js or mail.js (they
+  // import it), which is the same reason `hooks.flyToPaper` goes the other way.
+  if (state.mode === 'read') {
+    state.inside = null
+    hooks.leaveInside?.()
+  }
   // Back to the district you were in, not to district 0 -- releasing must
   // not silently move you between workspaces.
   state.flewBy = { why: 'release', at: state.frames }
@@ -1605,9 +1887,14 @@ function stepFlight(dt) {
   camera.lookAt(look)
   if (flight.t >= 1) {
     const target = flight.target
+    const landIn = flight.landIn ?? null
     flight = null
     if (target === null) {
-      state.mode = 'driving'
+      // A flight that was flown INTO something lands standing in it. Every other
+      // `target: null` flight -- release, reloop, goDistrict -- carries no
+      // `landIn` and still lands on the road, so this is additive.
+      state.mode = landIn ? 'read' : 'driving'
+      state.inside = landIn
     } else {
       state.mode = 'flat'
       state.flatMilepost = target
@@ -1900,12 +2187,17 @@ function installInput() {
   swallow('pointermove', (ev) => {
     if (resizing) return stepResize(ev)
     const on = flatSign()
-    setGrabHot(on, !!handleUnder(ev))
-    setCloseHot(on, !!chromeUnder(ev, 'closePad'))
-    setCastHot(on, !!chromeUnder(ev, 'castPad'))
+    // One proximity test for all five marks, so they appear and disappear together
+    // -- four corner controls that fade in at different moments would read as five
+    // separate features rather than as the window's chrome.
+    const near = nearFlatWindow(ev)
+    state.chromeNear = near
+    setGrabHot(on, !!handleUnder(ev), near)
+    setCloseHot(on, !!chromeUnder(ev, 'closePad'), near)
+    setCastHot(on, !!chromeUnder(ev, 'castPad'), near)
     state.titleHot = !!chromeUnder(ev, 'platePad')
-    const prevHot = setStepHot(on, -1, !!chromeUnder(ev, 'prevPad'))
-    const nextHot = setStepHot(on, 1, !!chromeUnder(ev, 'nextPad'))
+    const prevHot = setStepHot(on, -1, !!chromeUnder(ev, 'prevPad'), near)
+    const nextHot = setStepHot(on, 1, !!chromeUnder(ev, 'nextPad'), near)
     state.stepHot = prevHot || nextHot
     setChromeCursor()
     sendMotion(ev)
@@ -2120,7 +2412,60 @@ function installInput() {
       // The map is over the road, and scrolling a map you are reading must
       // scroll the MAP -- which is a normal overflowing element, so the answer
       // is simply not to take the event.
-      if (state.mode !== 'driving' || mapIsOpen()) return
+      // `read` is admitted here because the wheel belongs to the thing you are
+      // standing in, and the branch just below is what it belongs to.
+      if ((state.mode !== 'driving' && state.mode !== 'read') || mapIsOpen()) return
+
+      // INSIDE A DETAIL VIEW THE WHEEL BELONGS TO THE DOCUMENT, NOT TO THE SHELL,
+      // and the shell takes it back only while Escape is held.
+      //
+      // This is the flat window's rule, applied to a pane -- deliberately the same
+      // code shape (gesture latching, `escIsHeld`, ctrl/cmd as the always-shell
+      // escape hatch) because it is the same question with a different "app": for
+      // a window the app is a Wayland client and the axis is queued to it; for a
+      // pane the app is the read tier's own element, which has `overflow:auto`, so
+      // "give it to the app" simply means DO NOT `preventDefault` and let the
+      // element scroll. Reported: scrolling a pane should pass through to what is
+      // running in it, and only Escape-held should move the view.
+      //
+      // Latching matters here for the reason it matters there: a fast scroll must
+      // not be stolen by the shell because the pointer strayed off the document.
+      if (state.mode === 'read') {
+        const now = ev.timeStamp
+        if (wheelOwner === null || now - lastWheelAt > GESTURE_GAP) {
+          const forced = ev.ctrlKey || ev.metaKey || escIsHeld()
+          wheelOwner = forced ? 'shell' : overDetailView(ev) ? 'app' : 'shell'
+          state.wheelGestures++
+        }
+        lastWheelAt = now
+        // Recorded whether or not it ended up a zoom: what this marks is that the
+        // key was USED, so the Escape keyup does not also read as "leave".
+        if (escIsHeld()) noteEscUsed()
+        if (wheelOwner === 'app') { state.lastAxisToApp = true; return }
+        state.lastAxisToApp = false
+        ev.preventDefault()
+        zoomRead(ev.deltaY)
+        return
+      }
+
+      // THE TELEVISION TAKES THE WHEEL WHEN THE POINTER IS ON THE GLASS.
+      //
+      // Reported: "the scroll doesn't work in the tv screen when it's moused over".
+      // It did not, and there was no branch for it -- the wheel over the cockpit
+      // drove the road, because the dashboard is `pointer-events:none` and every
+      // wheel arrives here regardless of what it is over.
+      //
+      // Asked BEFORE the road and before the gate, in the same paint order the
+      // click test uses: the TV is drawn over the road, so a wheel that fell
+      // through to the road would be scrolling the thing behind the thing you are
+      // looking at. The hook answers false when the pointer is elsewhere, when
+      // nothing is on air, and when what is on air is a live client rather than a
+      // document -- so the drive is unaffected in every case that is not this one.
+      if (hooks.tvWheel?.(ev.clientX, ev.clientY, ev.deltaY)) {
+        ev.preventDefault()
+        return
+      }
+
       ev.preventDefault()
 
       // READING A PANE? THE WHEEL IS A ZOOM, NOT A DRIVE.
@@ -2132,26 +2477,7 @@ function installInput() {
       // the wheel belongs to the thing you are standing in, which is the same rule
       // `overFlatSurface` applies for a window.
       //
-      // Moves the CAMERA along the pane's normal rather than scaling anything: the
-      // pane is an object in the world and zooming it by scale would make it a
-      // different size than the frame it sits in.
-      const rp = readingPane()
-      if (rp) {
-        state.paperWheel = (state.paperWheel ?? 0) + 1
-        const m = rp.frame ?? rp.paintMesh
-        if (m) {
-          const t = m.rotation.y
-          const n = new THREE.Vector3(Math.sin(t), 0, Math.cos(t))
-          const to = m.position
-          const d = camera.position.distanceTo(to) + ev.deltaY * 0.5
-          // Clamped either side: closer than this and the near plane eats the
-          // document, further and you are reading it from the road.
-          const clamped = Math.max(60, Math.min(2400, d))
-          camera.position.copy(to).addScaledVector(n, clamped)
-          camera.lookAt(to)
-        }
-        return
-      }
+      // (The read-mode branch above owns this now -- see `zoomRead`.)
       // A GATE WITH MORE LANES THAN IT CAN SHOW TAKES THE WHEEL, and only then.
       // Same rule the flatten uses -- the wheel belongs to whatever the pointer
       // is over -- and scrollGateOf refuses when a gate has nothing off-screen,
@@ -2161,6 +2487,34 @@ function installInput() {
         state.lastGateScroll = ev.deltaY > 0 ? 'down' : 'up'
         return
       }
+
+      // A PANE UNDER THE POINTER TAKES THE WHEEL WHILE YOU ARE DRIVING.
+      //
+      // Asked for: "enable scrolling inside the window when the spaceship is flying
+      // on the road ... without having to click on them and zoom in". So reading a
+      // long document stops being a place you have to go; it is something you do
+      // while driving past, which is the thing a road of documents was for.
+      //
+      // THE SAME RULE THE REST OF THIS HANDLER ALREADY KEEPS -- the wheel belongs to
+      // whatever the pointer is over, and a gate has taken it on exactly these terms
+      // since it was built. This adds one more owner rather than a mode.
+      //
+      // AND IT REFUSES AT THE ENDS, which is why `scrollPaper` returns whether
+      // anything moved. A pane whose document fits, or one already at the bottom,
+      // hands the gesture back and the road drives -- so the wheel never dies over a
+      // short document, and driving past a wall of them is not a series of stops.
+      //
+      // Only the PAINT tier: a card has no document laid out, so there is nothing to
+      // scroll, and pretending otherwise would be a control that eats the wheel and
+      // does nothing.
+      if (over) {
+        const p = paperAt(over)
+        if (p?.canvas && scrollPaper(p, ev.deltaY)) {
+          state.lastPaperScroll = { key: p.key, y: Math.round(p.scrollY), max: Math.round(p.scrollMax) }
+          return
+        }
+      }
+
       const { near, far } = roadBounds()
       // Trackpads emit many small deltas and a wheel a few large ones; scaling
       // by the delta keeps both feeling like the same road.
@@ -2206,6 +2560,23 @@ function installInput() {
     // while there were ten tracks in ten slots; with a sparse set the third
     // entry is not track 3 and this reported another track's roads.
     parked: tracks.report().tracks.find((t) => t.id === tracks.activeIndex())?.roads ?? {},
+    // WHO OWNED THE LAST WHEEL, and how many gestures have been latched. These
+    // were written to `state` and reported nowhere, so "the wheel did nothing"
+    // could not be told apart from "the wheel went to the document" or "the
+    // handler never ran" -- three different faults with one symptom. Debugging
+    // the pane's passthrough by watching cameraZ alone cost several rounds.
+    wheel: {
+      owner: wheelOwner,
+      gestures: state.wheelGestures,
+      lastToApp: state.lastAxisToApp,
+      zooms: state.paperWheel ?? 0,
+      escHeld: escIsHeld(),
+      // WHY that owner: what the pointer was over when the gesture latched.
+      // Kept because `owner: shell` while the pointer is plainly on the document
+      // is the shape of every bug this branch has had, and the answer is always
+      // in these three fields.
+      over: state.overDetail ?? null,
+    },
   })
 
   // What the GPU is actually holding. A shell that gets slower with every
@@ -2250,8 +2621,42 @@ function installInput() {
     // upright loses to the upright and a ramp board in front of a window takes the
     // click -- whatever is nearest wins, which is what everything else in a world
     // does.
-    const meshes = [...gantryMeshes(), ...rampMeshes(), ...liveSigns(), ...paperMeshes()]
+    const meshes = [...gantryMeshes(), ...rampMeshes(), ...liveSigns(), ...paperMeshes(), ...mailMeshes()]
     return raycaster.intersectObjects(meshes, false)[0] ?? null
+  }
+
+  // IS THE POINTER OVER THE DETAIL VIEW ITSELF -- the pane's read tier or a
+  // mailbox panel. The flat window answers the same question with
+  // `overFlatSurface`.
+  //
+  // IT LIVES HERE, BESIDE `aim`, BECAUSE IT USES `aim`. The first cut put it at
+  // module scope and `aim` is local to `installInput` -- a ReferenceError thrown
+  // inside a wheel listener, which `node --check` and `vite build` both pass and
+  // which presented as the whole read-mode wheel branch silently doing nothing:
+  // the handler was entered (instrumented and confirmed), the owner was never
+  // assigned, and no zoom and no passthrough happened. Exactly the failure shape
+  // this tree records for `ramps.js` -- only the running page can see it.
+  //
+  // THE PANE IS ANSWERED BY RAYCAST, NOT BY `ev.target`, and that is not a style
+  // choice. The read tier is a CSS3DObject under a `matrix3d` wrapper and the two
+  // browsers disagree about hit-testing it: measured here, Chrome's
+  // `elementFromPoint` over the middle of a mounted pane returns the CANVAS and a
+  // real click takes the canvas path, while the shipped kiosk (Firefox) delivers
+  // the same click to the DOM -- which is how a `bend:` link reached the browser's
+  // redirect prompt on the guest and could not be reproduced here. A test that
+  // answers differently in the browser I verify in and the browser that ships is
+  // worse than useless, so ask our own raycast, which is the same in both.
+  //
+  // The mailbox panel is ordinary fixed DOM with no 3D transform, so `ev.target`
+  // is reliable for it and is the simpler answer.
+  const overDetailView = (ev) => {
+    if (ev.target?.closest?.('.mail-panel')) return true
+    const held = readingPane()
+    const hit = held ? aim(ev) : null
+    const key = hit?.object?.userData?.paperKey ?? null
+    state.overDetail = { held: held?.key ?? null, key, target: ev.target?.tagName ?? null, at: [ev.clientX, ev.clientY] }
+    if (!held) return false
+    return key === held.key
   }
 
   // A hit is one of four things now, in the order they are asked: a dash or a ramp
@@ -2323,6 +2728,17 @@ function installInput() {
     return {
       action: actionAt(hit),
       isSign: !!hit.object.userData.signKey,
+      // A fourth occupant the probe has to be able to NAME. Without it "did the
+      // pointer reach the mailbox" can only be answered by whether the panel
+      // opened -- which is the effect, not the hit, and conflates a raycast miss
+      // with a refused op.
+      isMail: hit.object.userData.mailKey ?? null,
+      // And the pane, for the same reason -- an omission that cost real time:
+      // with only `textured` to go on, "find a pane on screen" matched a gantry
+      // board, the click emitted no op at all, and that reads exactly like the
+      // click handler being broken. `paperKey` is what the handler itself
+      // branches on, so this is the probe asking the question the code asks.
+      isPaper: hit.object.userData.paperKey ?? null,
       // A ramp's tarmac and its board give the same action, and telling them apart
       // is the whole question when the claim is "the sign lights, the road does
       // not". The board is the one carrying a texture.
@@ -2331,8 +2747,113 @@ function installInput() {
     }
   }
 
+  // A PANE IS ENTERED -- OR OPERATED -- THROUGH THE SEAM, exactly as a program
+  // does it. This is the click OP_VOCABULARY_DRAFT.md §9 is about: the pointer
+  // emits the same ops `window.__op` does, and the log cannot tell them apart
+  // except by the `by` field it records and never consults.
+  //
+  // ONE FUNCTION because both modes reach it. Standing on the road you press a
+  // pane to enter it; standing IN one you press its corner controls, and those
+  // are 3D meshes outside the DOM element so their clicks arrive at the canvas
+  // either way. Two copies of this would be two places for the control list to
+  // drift.
+  function onPaperHit(hit, paperKey, ev) {
+    const p = papers.get(paperKey)
+    if (!p) return
+    const at = { district: p.district, side: p.side, dash: p.dash }
+    const u = hit.object.userData
+    // THE ANSWERS ARE ASKED FIRST, and they are their own targets -- `<--keep` and
+    // `close--X` above the top edge, the same board a window carries. `X--` asks and
+    // can only unask; the pointer has to travel to the yes.
+    if (u.paperAnswer) applyOp({ op: 'close', ...at, answer: u.paperAnswer === 'keep' ? 'keep' : 'close' }, { by: 'pointer' })
+    else if (u.paperClose) applyOp({ op: 'close', ...at }, { by: 'pointer' })
+    else if (u.paperCast) applyOp({ op: 'cast', ...at }, { by: 'pointer' })
+    else if (u.paperResize) {
+      // A GESTURE, NOT AN OP. The op is emitted when the drag ends -- see
+      // `endPaperResize` -- so a resize that is dragged and a resize that is
+      // replayed are the same single entry in the log rather than one per frame.
+      if (startPaperResize(p, ev)) {
+        ev.preventDefault()
+        // The same capture the window's grab takes, for the same measured reason:
+        // an unprevented pointerdown on a canvas can begin a native drag, the
+        // browser stops delivering moves and fires pointercancel, and the drag
+        // ends on its first pixel while reading as a dead control.
+        try {
+          canvas.setPointerCapture(ev.pointerId)
+          paperResizing.captured = ev.pointerId
+        } catch {
+          /* synthetic events have no real pointer to capture; the drag still works */
+        }
+      }
+    }
+    else applyOp({ op: 'read', ...at }, { by: 'pointer' })
+  }
+
   canvas.addEventListener('pointerdown', (ev) => {
-    if (state.mode !== 'driving' || mapIsOpen()) return
+    // A CLICK ON THE WORLD WHILE YOU ARE STANDING IN SOMETHING IS LEAVING IT.
+    //
+    // The detail view's own element takes its own clicks (`pointer-events: auto`
+    // on the pane/panel, never on the layer), so anything arriving at the canvas
+    // is by definition outside it -- which is the same gesture that leaves a
+    // flattened window. Without this, `read` would be a mode you could only exit
+    // with the keyboard, and a view you cannot click out of is the complaint that
+    // put the pull tab on the cockpit.
+    // THE COCKPIT IS ASKED BEFORE ANY OF THIS, INCLUDING BEFORE "leave".
+    //
+    // This block used to sit above the `read` branch below, and it put the pull
+    // tab out of reach the moment the cockpit was hidden: the tab is painted on
+    // the dash canvas, which is `pointer-events: none` by design, so its click
+    // arrives HERE -- and "a click on the world while standing in something is
+    // leaving it" ate it. Pressing the one control that brings the dashboard back
+    // flew you out to the road instead. Measured: mode went read -> driving.
+    //
+    // That is the fault the comment below already states in as many words ("an
+    // instrument painted OVER the road must take the click that lands on it"),
+    // committed by inserting a branch above it. Order is the fix.
+    if (hooks.dashHit) {
+      const on = hooks.dashHit(ev.clientX, ev.clientY)
+      if (on) return
+    }
+    if (mapIsOpen()) return
+    if (state.mode !== 'driving' && state.mode !== 'read') return
+    // THE RAYCAST RUNS IN `read` TOO, and it has to run BEFORE "leave".
+    //
+    // The first cut released on any canvas press while reading, on the reasoning
+    // that the detail view owns its own clicks so everything else is outside it.
+    // That is true of the DOM element and false of the pane's CHROME: `X--`,
+    // `--&` and the resize grip are 3D meshes hung on the frame, OUTSIDE the
+    // element, so their clicks arrive here -- and were being spent on leaving.
+    // Between that and the hover fix in paper.js, the controls could be neither
+    // seen nor pressed. `paperMeshes()` already offers the held pane's pads for
+    // aiming, so the branch below was always ready; it just was not reached.
+    const hit = aim(ev)
+
+    // THE CLOSE QUESTION IS SETTLED BEFORE ANY OTHER BRANCH DECIDES ANYTHING, and
+    // it runs here for the reason `closeClick` gives for a window: every branch
+    // below either returns or begins a gesture, so a cancel written after them is
+    // one that a resize, a read or a press into the document would skip -- and the
+    // question would be left standing over a pane you had gone back to reading.
+    // The two controls that are allowed to survive it are the ones that answer it.
+    {
+      const u = hit?.object?.userData
+      if (!u?.paperAnswer && !u?.paperClose) clearPaperAsk()
+    }
+
+    // The pane branch first, in both modes. In `read` this is the only press that
+    // is not "leave"; in `driving` it is unchanged.
+    if (hit) {
+      const key = hit.object.userData.paperKey
+      if (key) return onPaperHit(hit, key, ev)
+      const box = mailAt(hit)
+      if (box) {
+        applyOp({ op: 'mail', district: box.district, side: box.side, dash: box.dash }, { by: 'pointer' })
+        return
+      }
+    }
+
+    // Anything else while standing in something is leaving it -- the same gesture
+    // that leaves a flattened window.
+    if (state.mode === 'read') { release(); return }
     // THE COCKPIT GETS ASKED FIRST, and it is asked rather than listening.
     //
     // The dash canvas is `pointer-events: none` and stays that way -- a second
@@ -2342,34 +2863,12 @@ function installInput() {
     // which keeps one input path with one owner. Before the raycast, because an
     // instrument painted OVER the road must take the click that lands on it --
     // otherwise the shifter is furniture with a window behind it.
-    if (hooks.dashHit) {
-      const on = hooks.dashHit(ev.clientX, ev.clientY)
-      if (on) return
-    }
-    const hit = aim(ev)
+    // (The ask itself has moved above the `read` branch; see the note there.)
+    // `hit` was taken above, before the `read` branch, because the pane's chrome
+    // has to be reachable while you are standing in it.
     if (!hit) return
     const action = actionAt(hit)
     if (action) return doGantryAction(action)
-
-    // A PANE IS ENTERED THROUGH THE SEAM, exactly as a program enters one. This
-    // is the click OP_VOCABULARY_DRAFT.md §9 is about: the pointer emits the same
-    // `read` op `window.__op` does, and the log cannot tell them apart except by
-    // the `by` field it records and never consults.
-    const paperKey = hit.object.userData.paperKey
-    if (paperKey) {
-      const p = papers.get(paperKey)
-      if (!p) return
-      const at = { district: p.district, side: p.side, dash: p.dash }
-      const u = hit.object.userData
-      // WHICH CONTROL, or the document itself. Every branch emits an op; none of
-      // them touches a pane directly, so a click and a program and a replay are
-      // still one code path.
-      if (u.paperClose) applyOp({ op: 'close', ...at }, { by: 'pointer' })
-      else if (u.paperCast) applyOp({ op: 'cast', ...at }, { by: 'pointer' })
-      else if (u.paperResize) applyOp({ op: 'resize', ...at, w: (p.w ?? 300) + 150 }, { by: 'pointer' })
-      else applyOp({ op: 'read', ...at }, { by: 'pointer' })
-      return
-    }
 
     // GUARDED, because the raycast now returns things that are not windows. It
     // read `signs.get(key).milepost` unconditionally, so any hit without a
@@ -2393,6 +2892,12 @@ function installInput() {
     setHovered(null)
     setRampHover(null)
     setPaperHover(null)
+    // AND THE CORNER CONTROLS, which is not covered by the line above. Moving off a
+    // corner and onto the document is a `pointerout` on the canvas -- the read
+    // tier's element is a sibling that takes the pointer -- so without this the mark
+    // you last reached for stays lit for as long as you read, which is the same
+    // always-on chrome by a different route.
+    setPaperChromeHot(null, null)
     canvas.style.cursor = ''
   }
   for (const kind of ['pointerout', 'pointerleave', 'pointercancel']) {
@@ -2400,11 +2905,68 @@ function installInput() {
   }
   window.addEventListener('blur', dropHover)
 
+  // WHICH CORNER CONTROL THE POINTER IS REACHING FOR, in screen pixels.
+  //
+  // The window's `near` band is one rectangle around the whole window
+  // (`nearFlatWindow`), because a flat window IS the screen and five marks fading
+  // in together read as one fitting. A pane at the read tier is also most of the
+  // screen, so that band would be true wherever the pointer can be -- which is the
+  // permanently-drawn chrome that was just reported as wrong. So the band is per
+  // CORNER: each mark's own pad is projected and the pointer is measured against
+  // it. You do not have to hit the mark to see it; you do have to be at its corner.
+  //
+  // MEASURED OFF THE PAD, not off the mark. The pad is the thing you can actually
+  // hit, so a band centred on anything else would draw a control in one place and
+  // accept the press in another -- which is the fault rrabbit.js records at length
+  // for a window's own controls ("83px outside its own corner").
+  const CORNER_NEAR = 70
+  const paperChromeAt = (ev) => {
+    const held = readingPane()
+    if (!held?.chrome) return [null, null]
+    const el = renderer.domElement
+    const rect = el.getBoundingClientRect()
+    const px = ev.clientX - rect.left
+    const py = ev.clientY - rect.top
+    let near = null
+    let best = Infinity
+    for (const m of held.chrome) {
+      const which = m.userData.paperCtl
+      // The pads only. A mark and its pad share a `paperCtl`, and measuring both
+      // would just pick whichever came first in the list.
+      if (!which || m.material.map || !m.userData.armed) continue
+      const v = m.getWorldPosition(new THREE.Vector3()).project(camera)
+      const mx = ((v.x + 1) / 2) * el.clientWidth
+      const my = ((1 - v.y) / 2) * el.clientHeight
+      const d = Math.hypot(px - mx, py - my)
+      if (d < CORNER_NEAR && d < best) { best = d; near = which }
+    }
+    // `hot` is the raycast, which is what the click uses -- so what lights the
+    // cursor and what takes the press can never disagree.
+    const hit = aim(ev)
+    const hot = hit?.object?.userData?.paperKey === held.key ? (hit.object.userData.paperCtl ?? null) : null
+    return [hot, hot ?? near]
+  }
+
   // Hover, so a lane reads as clickable before you click it.
   canvas.addEventListener('pointermove', (ev) => {
+    // A DRAG OWNS EVERY MOVE UNTIL IT ENDS, and it is asked before the mode test
+    // below -- a pane resize runs in `read`, which that test returns out of.
+    if (paperResizing) { stepPaperResize(ev); return }
+    // THE PANE'S CHROME IS FED IN EVERY MODE THIS HANDLER RUNS IN, which is the
+    // whole of the hover fix. This branch used to return here and nothing else fed
+    // `setPaperHover`, so once the read tier took the pointer off the canvas no
+    // hover could ever be reported again -- and the previous cut "fixed" that by
+    // deleting the hover condition instead of by feeding it.
+    if (state.mode === 'read') {
+      const [hot, draw] = paperChromeAt(ev)
+      setPaperChromeHot(hot, draw)
+      canvas.style.cursor = hot === 'resize' ? 'nesw-resize' : hot ? 'pointer' : ''
+      return
+    }
     if (state.mode !== 'driving') {
       setHovered(null)
       setRampHover(null)
+      setPaperChromeHot(null, null)
       return
     }
     const hit = aim(ev)
@@ -2426,6 +2988,15 @@ function installInput() {
     setPaperHover(hit?.object?.userData?.paperKey ?? null)
     canvas.style.cursor = hit && (action || hit.object.userData.signKey) ? 'pointer' : ''
   })
+
+  // THE DRAG ENDS ON THE POINTER, AND ON EVERY WAY THE POINTER CAN BE TAKEN AWAY.
+  // A resize left running because the browser cancelled the gesture is a pane that
+  // keeps following the mouse with no button held -- the shape of "the window is
+  // stuck to my cursor", and the reason the window's own resize is wired to all
+  // three of these.
+  canvas.addEventListener('pointerup', endPaperResize)
+  window.addEventListener('pointercancel', endPaperResize, { capture: true })
+  window.addEventListener('blur', endPaperResize)
 
   // THE ESCAPE HATCH (invariant 8). Capture phase, or the focused client's
   // keydown listener eats it first -- a focused surface swallows every key
@@ -2506,12 +3077,36 @@ function installInput() {
       // exact fault TRACKS_HANDOFF.md §3 records for the replay's Escape, written
       // down and then repeated. A key that belongs to the topmost thing on screen
       // belongs in the chain that decides what the topmost thing is.
-      if (ev.key === 'Escape' && isReadingPaper()) {
+      // ESCAPE IN A DETAIL VIEW IS A TAP-OR-HOLD, NOT A PRESS.
+      //
+      // This used to leave on keydown, and that silently killed the other job the
+      // key has: held, it is the wheel modifier that means "the shell, wherever
+      // the pointer is", which is how you move the view while the pointer is over
+      // a document that is taking the scroll. The first keydown walked you out, so
+      // `escIsHeld()` was never true by the time a wheel arrived. Reported: "the
+      // press and hold esc plus scroll doesn't work because pressing esc
+      // immediately causes the spaceship to back out back to the road".
+      //
+      // That is word for word the fault the flat window's own Escape block records
+      // having made and fixed -- "Releasing on keydown was the first cut of this
+      // and it silently killed the other thing Esc does" -- committed again here
+      // because this branch was written as a leave rather than as a press.
+      //
+      // So the press becomes a decision only when it ENDS. The keyup handler below
+      // leaves if nothing used the hold; `noteEscUsed()` from the wheel is what
+      // marks that it was used. Same three variables, one discipline for windows
+      // and detail views both.
+      if (ev.key === 'Escape' && (isReadingPaper() || isReadingMail())) {
         ev.preventDefault()
         ev.stopImmediatePropagation()
-        applyOp({ op: 'unread' }, { by: 'pointer' })
+        if (!ev.repeat && !escHeld) {
+          escHeld = true
+          escUsed = false
+          escOwnedRead = isReadingMail() ? 'mail' : 'paper'
+        }
         return
       }
+
 
       if (ev.key === 'Escape' && reelIsOpen()) {
         ev.preventDefault()
@@ -2680,6 +3275,11 @@ function installInput() {
   // `escHeld`, because the map's Esc branch above returns before any of this and
   // must not leave a keyup behind that walks you out of the window as well.
   let escOwned = false
+  // Which detail view, if any, owns this Escape press. Separate from `escOwned`
+  // (which means a flattened WINDOW owns it) because the two leave through
+  // different doors -- `release()` for a window, the `unread`/`unmail` ops for a
+  // detail view, so that the log sees every exit.
+  let escOwnedRead = null
 
   window.addEventListener(
     'keydown',
@@ -2764,11 +3364,22 @@ function installInput() {
     (ev) => {
       if (ev.key !== 'Escape') return
       const owned = escOwned
+      const ownedRead = escOwnedRead
       const used = escUsed
       escHeld = false
       escOwned = false
+      escOwnedRead = null
       state.escZoomGesture = used
       escUsed = false
+      // A TAP LEAVES THE DETAIL VIEW; A HOLD THAT MOVED THE VIEW LEAVES NOTHING.
+      // Through the ops, so the log sees the exit exactly as it sees the entry.
+      if (ownedRead) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        state.escUp = { at: state.frames, owned: ownedRead, used }
+        if (!used) applyOp({ op: ownedRead === 'mail' ? 'unmail' : 'unread' }, { by: 'pointer' })
+        return
+      }
       // A TAP LEAVES THE WINDOW; A HOLD THAT WAS USED LEAVES NOTHING.
       //
       // `owned` is what keeps this honest about which press it is answering: an

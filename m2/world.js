@@ -168,8 +168,19 @@ export function lastPaperZ(district) {
   return z
 }
 
+// The furthest mailbox down a road. A FOURTH occupant, joining the min for
+// exactly the reason `lastPaperZ` did -- and this is the second time that bug has
+// been available: `d1aabd6`'s notes record the exit gate ignoring panes, which is
+// this omission with a different noun. A gate standing in front of a mailbox does
+// not read as "the gate is misplaced", it reads as a mailbox that is not there.
+export function lastMailZ(district) {
+  let z = 0
+  for (const b of mailboxes.values()) if (b.district === district) z = Math.min(z, dashZ(b.dash))
+  return z
+}
+
 export const exitZOf = (district) =>
-  Math.min(lastWindowZ(district), lastRampZ(district), lastPaperZ(district)) - GATE_GAP
+  Math.min(lastWindowZ(district), lastRampZ(district), lastPaperZ(district), lastMailZ(district)) - GATE_GAP
 
 // How many dashes a road needs: enough to run past its own exit gate, and never
 // fewer than enough to carry its furthest ramp. Capped, because the count is a
@@ -234,6 +245,9 @@ export function slotAt(district, side, dash) {
   for (const p of papers.values()) {
     if (p.district === district && sideOf(p.side) === s && p.dash === dash) return { kind: 'paper', paper: p }
   }
+  for (const b of mailboxes.values()) {
+    if (b.district === district && sideOf(b.side) === s && b.dash === dash) return { kind: 'mail', mail: b }
+  }
   return null
 }
 
@@ -260,6 +274,14 @@ export function slotFree(district, side, dash, kind = 'window', ignore = null) {
     if (p === ignore || p.district !== district || sideOf(p.side) !== s) continue
     if (!Number.isInteger(p.dash)) continue
     if (kind === 'ramp' ? inRampSweep(p.dash, dash) : Math.abs(p.dash - dash) < SLOT_GAP) return false
+  }
+  // A mailbox crowds like a window and a pane do -- it is a structure standing on
+  // the verge, not a marking on the tarmac. Same `ignore` honouring, so a box
+  // being moved does not find itself in the way.
+  for (const b of mailboxes.values()) {
+    if (b === ignore || b.district !== district || sideOf(b.side) !== s) continue
+    if (!Number.isInteger(b.dash)) continue
+    if (kind === 'ramp' ? inRampSweep(b.dash, dash) : Math.abs(b.dash - dash) < SLOT_GAP) return false
   }
   return true
 }
@@ -431,7 +453,21 @@ export const state = {
   lastGlErrorFrame: 0,
   sessionId: null,
   // M2
-  mode: 'driving', // driving | flying | flat
+  mode: 'driving', // driving | flying | flat | read
+  // WHAT YOU ARE STANDING INSIDE, when it is not a window. `flat` means a window
+  // and its address is `flatDistrict`/`flatMilepost`; `read` means a pane or a
+  // mailbox, whose address is a slot key rather than a milepost.
+  //
+  // TWO MODES RATHER THAN ONE WITH A KIND, and the reason is blast radius. Some
+  // two dozen sites across travel/rrabbit/shell/world read `mode === 'flat'` and
+  // then immediately look up a SIGN by `flatMilepost`. Widening `flat` to cover
+  // panes would make every one of those searches miss, and a miss there is not a
+  // refusal -- it is a lookup returning undefined inside a frame loop. So `read`
+  // is its own mode, and only the handful of places that decide *shared UX* --
+  // does the cockpit hide, does Escape leave, does the wheel drive -- were taught
+  // about it. Everything window-specific keeps working because `flat` still means
+  // exactly what it always meant.
+  inside: null, // { kind: 'paper' | 'mail', key } while mode === 'read'
   flatMilepost: null,
   flatDistrict: null,
   // WHICH WINDOW HAS BEEN ASKED ABOUT AND NOT ANSWERED, as `district:milepost`.
@@ -504,6 +540,20 @@ export const signs = new Map()
 // that owns the object and the module that owns the addressing cannot import each
 // other.
 export const papers = new Map()
+
+// `district:side:dash` -> the driverside mailbox standing there.
+//
+// A FOURTH KIND OF THING THAT STANDS ON A DASH. Registered out here for the same
+// reason `papers` is: `mail.js` owns the object, `world.js` owns the addressing,
+// and neither can import the other. The slot algebra below consults it, `dashCount`
+// and `exitZOf` reach it through `lastMailZ`.
+//
+// A mailbox is NOT a WRL mailbox -- see the header of `mail/box.js`. It is a
+// boundary surface for a human, and the vendored 0.1.2 identity spine cannot
+// spell one anyway (`UNWRITABLE_ROLE_IDS`), so no mailbox is in any road's sealed
+// `sem-` id today. `test/mail.mjs` §0 pins that and will fail when it stops being
+// true, which is the signal to wire it into `paper/wiring.js`.
+export const mailboxes = new Map()
 
 // surface key -> the title the client last set for itself.
 //
@@ -586,6 +636,30 @@ export const hooks = {
   // the thing it was transporting. A hook rather than an import because travel.js
   // must not learn that a bar exists.
   replayEnded: null,
+
+  // ---- standing inside a pane or a mailbox (mode 'read') --------------------
+  //
+  // Three hooks and not one, because they run in three different directions and
+  // collapsing them would put an import cycle back in:
+  //
+  //   flyToMail      mail.js  -> travel.js   arrive: fly the camera into the box
+  //   leaveInside    travel.js -> paper/mail unmount whatever detail view is up
+  //   releaseInside  paper/mail -> travel.js fly back out to the road
+  //
+  // `leaveInside` exists so that EVERY route out -- Escape, a click on the world,
+  // a window dying, changing road -- takes the view down, rather than the two ops
+  // that happen to be the common case. It must be idempotent: both the op path and
+  // `release` call it, and closing an already-closed view is a no-op by design.
+  flyToMail: null,
+  leaveInside: null,
+  releaseInside: null,
+
+  // (href, fromPane) => void -- a link inside a read pane was followed.
+  //
+  // read.js raises it and paper.js answers it, because resolving `bend:<id>` to a
+  // place on the road is a question about the ROAD and the module that draws a
+  // document has no business knowing the answer.
+  paperFollow: null,
 }
 
 // WHERE the next adopted window stands: `{ side, dash }`, and the dash may be null

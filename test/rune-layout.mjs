@@ -7,7 +7,8 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { layoutRune, floorsOf, classFor, RUNE_THEME } from '../m2/paper/rune-layout.js'
+import { layoutRune, floorsOf, classFor, runeMetrics, RUNE_THEME } from '../m2/paper/rune-layout.js'
+import { runeToSpec, walk } from '../m2/paper/dom-spec.js'
 import { wrapPlain, ellipsize } from '../m2/paper/wrap.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -182,6 +183,64 @@ for (const f of floors) {
   let threw = false
   try { layoutRune(floors[0], { width: W, height: H }) } catch { threw = true }
   ok('missing measure is refused', threw)
+}
+
+// ---- THE TWO TIERS AGREE ----------------------------------------------------
+//
+// This is the assertion the `runeMetrics` refactor exists to make, and without it
+// the refactor is just moving numbers around. A runefort pane is drawn twice --
+// on canvas at distance, as DOM when you enter it -- and the reported fault was
+// that entering one re-flowed it: "the text and box sizes janks to a different
+// size ... i want it to be consistent as it zooms it".
+//
+// Two renderers will never be glyph-identical. They CAN agree about geometry, and
+// these are the numbers that decide whether a box moves or changes size.
+{
+  const floors = floorsOf(JSON.parse(readFileSync(WELCOME, 'utf8')))
+  for (const f of floors) {
+    for (const [W, H] of [[640, 420], [960, 631], [420, 300]]) {
+      const M = runeMetrics(f, { width: W, height: H })
+      const spec = runeToSpec(f, { classFor, metrics: M })
+
+      const grid = []
+      walk(spec, (n) => { if (n.attrs?.role === 'grid') grid.push(n) })
+      const cells = []
+      walk(spec, (n) => { if (n.attrs?.role === 'gridcell') cells.push(n) })
+
+      // ROW HEIGHT was the worst of them: the canvas compresses rows to fill the
+      // pane and a CSS grid with no explicit row size fits them to their content.
+      ok(`${f.id} @${W}: the DOM grid uses the canvas row height`,
+        grid[0]?.attrs.style.includes(`grid-auto-rows:${M.cellH}px`), grid[0]?.attrs.style)
+      ok(`${f.id} @${W}: and the canvas gap`,
+        grid[0]?.attrs.style.includes(`gap:${M.gap}px`))
+
+      // The room text sizes the CSS used to hard-code at 13/11.
+      const label = cells[0]?.children?.[0]
+      ok(`${f.id} @${W}: the room label is the canvas label size`,
+        label?.attrs?.style?.includes(`font-size:${M.labelSize}px`), label?.attrs?.style)
+      ok(`${f.id} @${W}: rooms use the canvas horizontal padding`,
+        cells[0]?.attrs.style.includes(`padding:6px ${M.roomPadX}px`))
+
+      // The heading the DOM tier did not have at all. Its absence moved the whole
+      // grid up by headAdvance + ruleGap, so every room was in the wrong place
+      // even before any of them was the wrong size.
+      const head = []
+      walk(spec, (n) => { if (n.attrs?.class === 'rune-floor-head') head.push(n) })
+      if (M.heading) {
+        ok(`${f.id} @${W}: the DOM draws the floor heading the canvas draws`, head.length === 1)
+        ok(`${f.id} @${W}: reserving the same vertical block`,
+          head[0]?.attrs.style.includes(`height:${M.headAdvance}px`) &&
+          head[0]?.attrs.style.includes(`margin-bottom:${M.ruleGap}px`))
+      }
+
+      // And the canvas really is drawing at those metrics, not at its own copy --
+      // otherwise the DOM would be agreeing with a table nobody uses.
+      const r = layoutRune(f, { width: W, height: H, measure })
+      const labels = r.commands.filter((c) => c.op === 'text' && c.font?.weight >= 700 && c.font.size === M.labelSize)
+      ok(`${f.id} @${W}: the canvas draws labels at that same size`, labels.length > 0)
+      ok(`${f.id} @${W}: rows agree`, r.rows === M.rowsUsed)
+    }
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

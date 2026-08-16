@@ -24,6 +24,13 @@
 import { signs, state, titles, renames, hooks, windowZ, dashZ, dashCount, exitZOf, slotAt, slotFree, nextFreeSlot, SLOT_FIRST, SLOT_GAP } from './world.js'
 import * as ws from './workspaces.js'
 import * as tracks from './tracks.js'
+// Placing a mailbox is a direct call and not a hook, unlike `spawnWindow`. The
+// hook exists because a window comes from the compositor and only shell.js can
+// reach it; a mailbox is a record at an address, `mail.js` does not import this
+// file, and a hook would be indirection with nothing on the other end of it.
+import { placeBox, removeBox } from './mail.js'
+import { keyOf as mailKeyOf, unreadCount as mailUnreadOn } from './mail/box.js'
+import { apply as applyOp } from './ops.js'
 
 // Filled by shell.js. The map never navigates -- it says what was picked and
 // Travel does the flying, the same division the gates keep. `move` is the same
@@ -872,6 +879,59 @@ function rampPanel() {
         return `<button class="goto open" data-openwin="${esc(ramp.district)}|${ramp.at}|${sd}">open a window on the ${sd < 0 ? 'left' : 'right'}</button>`
       })
           .join('')) +
+
+    // ---- the fourth thing a marker can hold -------------------------------
+    //
+    // A MAILBOX IS PLACED THE SAME WAY A WINDOW AND A RAMP ARE, on the same page,
+    // for the reason the window section above already gives: this is the page that
+    // answers "what is at this dash", and a thing you can stand on a dash and
+    // cannot create from here is a thing with no way in. Reported exactly that --
+    // "there is no way to create driverside mailboxes".
+    //
+    // Unlike a window, this one IS offered on another road: a mailbox is placed by
+    // `mail.js` at an address, not adopted from the compositor's queue, so there is
+    // no second placement rule to disagree with. That is why the window section
+    // has to withhold its button and this one does not.
+    '<h3>a mailbox here</h3>' +
+    '<p class="note">A mailbox is where an agent reaches you: it shows how many messages are waiting and opens a page you can read and reply on.</p>' +
+    [-1, 1]
+      .map((sd) => {
+        const dash = ramp.at
+        const here = slotAt(ramp.district, sd, dash)
+        const name = sd < 0 ? '&lsaquo; left' : 'right &rsaquo;'
+        if (here?.kind === 'mail') {
+          const b = here.mail
+          return (
+            `<p class="note">${name}: <b>${esc(b.agent)}</b>'s mailbox stands here. ` +
+            `<button class="mini" data-openmail="${esc(ramp.district)}|${dash}|${sd}">open it</button> ` +
+            `<button class="mini danger" data-cutmail="${esc(ramp.district)}|${dash}|${sd}">remove it</button></p>`
+          )
+        }
+        if (here) return `<p class="note">${name}: taken.</p>`
+        if (!slotFree(ramp.district, sd, dash, 'window')) {
+          return dash < SLOT_FIRST
+            ? `<p class="note">${name}: dash ${SLOT_FIRST} is the first anything may stand on &mdash; the road keeps a clear run past the entrance.</p>`
+            : `<p class="note">${name}: no room &mdash; something is standing within ${SLOT_GAP} dashes, or a ramp sweeps through here.</p>`
+        }
+        // The last refusal for THIS side, in words. Kept on `state` rather than in
+        // a module variable so a re-render cannot lose it, and scoped by side so a
+        // failure on the left does not print a warning under the right.
+        const last = state.lastMailPlace?.side === sd && state.lastMailPlace?.ok === false
+          ? state.lastMailPlace.why
+          : null
+        const why = last === 'MAIL_NO_AGENT' ? 'Give the agent a name &mdash; every box on the road is labelled with whose it is.'
+          : last === 'MAIL_SLOT_TAKEN' || last === 'MAIL_BOX_EXISTS' ? 'Something is standing there now.'
+          : last === 'MAIL_NO_SLOT' ? 'No free dash on this side.'
+          : last ? esc(last) : null
+        return (
+          `<div class="field"><label>${name}</label>` +
+          `<input id="mail-agent-${sd < 0 ? 'l' : 'r'}" type="text" placeholder="agent name" value="" />` +
+          `<button class="mini" data-addmail="${esc(ramp.district)}|${dash}|${sd}">put a mailbox here</button>` +
+          (why ? `<span class="note warn">${why}</span>` : '') +
+          '</div>'
+        )
+      })
+      .join('') +
     '</aside>'
   )
 }
@@ -884,6 +944,19 @@ function sideSummary(district, side, dash) {
     return `a ramp to <b>${esc(to?.name ?? here.to)}</b> in ${esc(ws.tenant(ws.tenantOf(here.to))?.name ?? '?')}`
   }
   if (here?.kind === 'window') return `<b>window ${here.milepost}</b>`
+  // THE OTHER TWO OCCUPANTS, which this used to fall straight past. `slotAt` grew
+  // panes and then mailboxes; this did not, so a dash carrying either reported
+  // "crowded" -- which is what a dash blocked by something you cannot see says,
+  // and sends you looking for a window that is not there.
+  if (here?.kind === 'paper') {
+    const t = here.paper?.card?.title ?? here.paper?.doc?.title ?? here.paper?.format ?? 'document'
+    return `a pane &mdash; <b>${esc(String(t))}</b>`
+  }
+  if (here?.kind === 'mail') {
+    const b = here.mail
+    const n = mailUnreadOn(b)
+    return `a mailbox for <b>${esc(b.agent)}</b>${n ? ` &middot; ${n} unread` : ''}${b.status === 'quiescent' ? ' &middot; parked' : ''}`
+  }
   if (slotFree(district, side, dash, 'window')) return 'free'
   // Two different refusals, and telling them apart is the difference between "move
   // something" and "you cannot put a window this close to the gate at all".
@@ -1543,6 +1616,44 @@ function install() {
       closeMap()
       state.lastOpenAt = { district, dash: Number(at), side: Number(sd) }
       hooks.spawnWindow?.(Number(sd), Number(at))
+      return
+    }
+    // ---- mailboxes on a dash ------------------------------------------------
+    const addmail = ev.target.closest('[data-addmail]')
+    if (addmail) {
+      const [district, at, sd] = addmail.dataset.addmail.split('|')
+      const field = el?.querySelector(`#mail-agent-${Number(sd) < 0 ? 'l' : 'r'}`)
+      // AN AGENT NEEDS A NAME, and the box is refused rather than defaulted.
+      // Every mailbox on the road is labelled with whose it is, so an unnamed one
+      // is a box you cannot tell from the next one along.
+      const agent = String(field?.value ?? '').trim()
+      // EVERY REFUSAL IS SHOWN, including this one. The first cut just focused the
+      // field and returned, which is a button that does nothing -- the exact fault
+      // this file's ramp section already records, committed one section below it.
+      if (!agent) {
+        state.lastMailPlace = { ok: false, why: 'MAIL_NO_AGENT', side: Number(sd) }
+        render(true)
+        el?.querySelector(`#mail-agent-${Number(sd) < 0 ? 'l' : 'r'}`)?.focus()
+        return
+      }
+      state.lastMailPlace = { ...placeBox({ district, side: Number(sd), dash: Number(at), agent }), side: Number(sd) }
+      return render(true)
+    }
+    const cutmail = ev.target.closest('[data-cutmail]')
+    if (cutmail) {
+      const [district, at, sd] = cutmail.dataset.cutmail.split('|')
+      removeBox(mailKeyOf(district, Number(sd), Number(at)))
+      return render(true)
+    }
+    const openmail = ev.target.closest('[data-openmail]')
+    if (openmail) {
+      const [district, at, sd] = openmail.dataset.openmail.split('|')
+      closeMap()
+      // A BOX ON ANOTHER ROAD IS DRIVEN TO, NOT OPENED. The `mail` op refuses with
+      // OP_BOX_NOT_HERE off-road by design, so this drives you there and leaves the
+      // box in front of you -- the same division `drive to dash` already keeps.
+      if (district !== state.district) { go.dash?.(district, Number(at)); return }
+      applyOp({ op: 'mail', district, side: Number(sd), dash: Number(at) }, { by: 'pointer' })
       return
     }
     const drivedash = ev.target.closest('[data-drivedash]')

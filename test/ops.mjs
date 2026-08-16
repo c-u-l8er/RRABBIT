@@ -246,15 +246,35 @@ function wire(w) {
   // to forbid. They are here because the alternative was a pane whose close button
   // reached past the vocabulary and mutated the world directly -- which would have
   // made the log wrong rather than the table long.
-  ok('the table is exactly the seven ops built so far',
-    Object.keys(TABLE).sort().join(',') === 'cast,close,drive,park,read,resize,unread',
+  // WENT 7 -> 13 for the driverside mailbox. The pin fired again, and the same
+  // argument applies with one addition worth recording: `reply` and `ack` are in
+  // the table because they are the two acts that CROSS A BOUNDARY -- a human
+  // answering an agent, and a human taking responsibility for having read
+  // something. Core 0.2.1 §6 makes replay of a wall-clock answer possible only if
+  // the recording carries the answer, so a reply that reached past the seam would
+  // not merely make the log wrong; it would make a replayed session diverge at
+  // the first question an agent asked. That is the strongest case any verb here
+  // has had for existing.
+  //
+  // Six is a lot at once. If §8.1 comes back "the vocabulary is closed at N", the
+  // mailbox ops are the first place to look, and `rest`/`wake` are the most
+  // droppable of them -- they set a two-valued status and nothing depends on
+  // their being separate verbs.
+  ok('the table is exactly the thirteen ops built so far',
+    Object.keys(TABLE).sort().join(',') === 'ack,cast,close,drive,mail,park,read,reply,resize,rest,unmail,unread,wake',
     Object.keys(TABLE).join(','))
   ok('two are the draft\'s own nav verbs', ['drive', 'park'].every((k) => k in TABLE))
   ok('five are pane verbs, none of them in the draft\'s sixteen',
     ['read', 'unread', 'close', 'resize', 'cast'].every((k) => k in TABLE))
-  // `unread` is the only one that is not plannable, and §4 above is why.
-  ok('exactly one op is unplannable',
-    Object.values(TABLE).filter((t) => !t.plan).length === 1)
+  ok('six are driverside-mailbox verbs, none of them in the draft\'s sixteen either',
+    ['mail', 'unmail', 'ack', 'reply', 'rest', 'wake'].every((k) => k in TABLE))
+  // `unread` and `unmail` are the only two that are not plannable, and §4 above is
+  // why: both are leaving something, which a driver does anyway on the way to the
+  // next step. Every other verb changes what a replay would see.
+  ok('exactly two ops are unplannable',
+    Object.values(TABLE).filter((t) => !t.plan).length === 2)
+  ok('...and they are the two "leave it" verbs',
+    Object.entries(TABLE).filter(([, t]) => !t.plan).map(([k]) => k).sort().join(',') === 'unmail,unread')
   ok('every op declares its args', Object.values(TABLE).every((t) => Array.isArray(t.args)))
   ok('every op declares whether it is plannable', Object.values(TABLE).every((t) => typeof t.plan === 'boolean'))
 }

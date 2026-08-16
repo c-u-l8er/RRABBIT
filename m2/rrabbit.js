@@ -116,7 +116,7 @@ export const PAD = 66
 // edge is 7 out from the picture -- an inner edge at 6 was sitting on the cyan
 // border rather than beyond it, which is the one place a control must not be:
 // half on the chrome of the thing it acts on. 8 is one unit clear of it.
-const STEP_H = 20
+export const STEP_H = 20
 const STEP_GAP = 8
 
 // The grab's face: the text `-->`, and nothing else.
@@ -234,7 +234,7 @@ function stepTexture(which) {
 // either crops a word or leaves a word swimming in it, and both read as a control
 // somebody forgot to finish.
 const answerTex = {}
-function answerTexture(which) {
+export function answerTexture(which) {
   if (answerTex[which]) return answerTex[which]
   const text = which === 'keep' ? '<--keep' : 'close--X'
   const measure = document.createElement('canvas').getContext('2d')

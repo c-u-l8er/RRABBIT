@@ -1596,14 +1596,31 @@ export function createDash({ canvas, yokeCanvas, makeYoke, rack, state, camera, 
   // an instrument. So the cockpit slides out while you are standing in a window,
   // and while the map is up for the same reason: that view already spends the
   // whole frame on itself.
+  // "You are standing in something" -- a window (`flat`) or a pane/mailbox
+  // (`read`). Spelled once because three separate places have to agree about it,
+  // and the first version of this feature got two of them right and the third
+  // wrong, which is how the cockpit came to hide with no handle to bring it back.
+  const insideSomething = () => state?.mode === 'flat' || state?.mode === 'read'
+
   function wantHidden() {
     // The map is never negotiable: that view spends the whole frame on itself.
     const map = document.getElementById('map')
     if (map && !map.hidden) return 1
-    if (state?.mode === 'flat') return flatRaised ? 0 : 1
-    // Leaving the window puts the cockpit back where it belongs AND forgets that
-    // you had pulled it up, so the next window you stand in starts pixel-exact
-    // again. A raise is a thing you asked for about THIS window.
+    // STANDING IN A PANE OR A MAILBOX HIDES IT ON THE SAME TERMS AS A WINDOW,
+    // INCLUDING THE WAY BACK.
+    //
+    // The first cut returned a bare 1 for `read` on the argument that the pull tab
+    // is a window control -- it exists to trade instruments against pixel-exactness
+    // and a pane has nothing to trade. That reasoning was about why the tab EXISTS
+    // and answered the wrong question. What the tab actually is, is the only way to
+    // get the cockpit back without leaving, and hiding a panel with no handle to
+    // bring it back is the exact fault `pullVisible` below already records for full
+    // screen. Reported: "there is also not the button above the tv screen that
+    // shows up at the bottom of the screen to bring back the spaceship dashboard".
+    if (insideSomething()) return flatRaised ? 0 : 1
+    // Leaving puts the cockpit back where it belongs AND forgets that you had
+    // pulled it up, so the next thing you stand in starts clean. A raise is a thing
+    // you asked for about THIS one.
     flatRaised = false
     return 0
   }
@@ -1641,7 +1658,7 @@ export function createDash({ canvas, yokeCanvas, makeYoke, rack, state, camera, 
   // a panel you can put up and not take down is a panel that has covered the
   // window you were working in.
   function pullVisible() {
-    if (state?.mode !== 'flat') return false
+    if (!insideSomething()) return false
     // Nothing of the cockpit is offered while full screen is on -- including the
     // handle that would bring it back. The ship is the only way out, which is
     // what makes "no permanent bar" true rather than nearly true.
@@ -2022,7 +2039,11 @@ export function createDash({ canvas, yokeCanvas, makeYoke, rack, state, camera, 
 
     if (menuOpen) {
       for (const r of tunerRows(st.list)) {
-        if (box(r)) return { kind: 'channel', action: 'pick', key: r.key, label: r.label }
+        // `chan` and not `kind`: `kind` is already this hit's own kind (`channel`),
+        // and a row carries a SECOND kind -- window or pane -- which decides which
+        // map the shell looks the key up in. Two different meanings under one name
+        // is how the pick would silently tune to nothing.
+        if (box(r)) return { kind: 'channel', action: 'pick', key: r.key, chan: r.kind, label: r.label }
       }
     }
     for (const ctl of tunerControls({ onAir: st.onAir })) {
@@ -2202,7 +2223,7 @@ export function createDash({ canvas, yokeCanvas, makeYoke, rack, state, camera, 
       pull: pullVisible() ? pullRect() : null,
       full: !!state?.full,
       fly: flyAt(),
-      pullWouldShow: state?.mode === 'flat',
+      pullWouldShow: insideSomething(),
       unbuilt: [...unbuilt],
       refused: lastRefusal,
       // WHICH WHEEL IS ON SCREEN, named rather than implied. A screenshot cannot

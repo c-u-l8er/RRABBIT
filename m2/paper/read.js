@@ -27,7 +27,8 @@
 import * as THREE from 'three'
 import { CSS3DRenderer, CSS3DObject } from 'three/examples/jsm/renderers/CSS3DRenderer.js'
 import { bendToSpec, runeToSpec } from './dom-spec.js'
-import { classFor } from './rune-layout.js'
+import { classFor, runeMetrics } from './rune-layout.js'
+import { BEND_METRICS } from './bend-layout.js'
 import { hooks } from '../world.js'
 
 let renderer = null
@@ -52,7 +53,17 @@ export function attachRead(ctx) {
   layer = renderer.domElement
   layer.id = 'paper-read-layer'
   layer.style.cssText = [
-    'position:fixed', 'inset:0', 'z-index:35',
+    // UNDER THE COCKPIT. `index.html` sets the shell's stacking contract and this
+    // layer was outside it at 35 -- above the dashboard (3), the yoke (4), the
+    // strips that carry invariant 1 (5) and the map (6). So a RuneFort pane drew
+    // OVER the spaceship, which is not a depth question the CSS3D layer can lose
+    // on its own merits: it does not composite with WebGL depth at all, so
+    // whatever number it carries it is in front of the whole road. The only place
+    // it can sit correctly is between the scene (auto) and the instruments.
+    //
+    // Reported: "the runefort window should never appear in front of or
+    // z-indexed above the spaceship dashboard".
+    'position:fixed', 'inset:0', 'z-index:2',
     // POINTER EVENTS OFF, ALWAYS, ON THE LAYER. Reported: "clicking anywhere on
     // the dashboard does nothing". The layer is `inset:0`, so flipping IT to
     // `auto` while a pane was open made the whole viewport eat every click meant
@@ -72,17 +83,68 @@ export function attachRead(ctx) {
   // §5.5 lives here rather than on each room, because focus movement is a property
   // of the floor and a listener per room is N listeners to remove.
   layer.addEventListener('keydown', onKey)
+
+  // A LINK IN A DOCUMENT MUST NEVER NAVIGATE, and this is a hard rule rather than
+  // a routing preference.
+  //
+  // A BendScript link's href is its target URI -- `bend:bafyfake01` -- and this
+  // shell is a KIOSK FIREFOX. Letting that reach the browser asks the OS to find
+  // an application for an unknown scheme, so the guest put a redirect prompt over
+  // the road. Reported exactly that. There is no href here that a browser should
+  // ever act on: an internal one is a place on the road, and an external one is
+  // not this shell's to open.
+  //
+  // Raised as a hook, not resolved here. This module draws a pane; it does not
+  // decide what following a link means -- the same division that moved Escape out
+  // to travel.js's ladder.
+  layer.addEventListener('click', (ev) => {
+    const a = ev.target?.closest?.('a[href]')
+    if (!a) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    hooks.paperFollow?.(a.getAttribute('href'), current?.pane ?? null)
+  })
 }
 
 function resize() {
   if (renderer) renderer.setSize(window.innerWidth, window.innerHeight)
 }
 
+let pendingScroll = 0
+
 export function renderRead() {
-  if (renderer && current) renderer.render(scene3d, camera)
+  if (!renderer || !current) return
+  renderer.render(scene3d, camera)
+  // AFTER the render, because that is the call that attaches the element. Applied
+  // once, and only once the element has an extent to apply it to -- a pane whose
+  // document fits has `scrollHeight === clientHeight` and nothing to restore.
+  if (pendingScroll > 0) {
+    const r = current.root
+    if (r.scrollHeight > r.clientHeight) {
+      r.scrollTop = pendingScroll
+      pendingScroll = 0
+    }
+  }
 }
 
 // ---- open / close -----------------------------------------------------------
+
+// HOW FAR DOWN A DOCUMENT YOU ARE IS ONE NUMBER, AND IT LIVES ON THE PANE.
+//
+// It was briefly two: `p.scrollY`, which the canvas tier repaints at and which the
+// wheel moves while you drive past, and a private map in here for the DOM tier.
+// Two numbers meant scrolling a document on the road and then entering it put you
+// back at its title -- the shell forgetting, in the space of one click, something
+// it was already holding.
+//
+// THEY ARE IN THE SAME UNITS, which is what makes this possible rather than a
+// coincidence: the canvas is `w * PX_PER_UNIT` pixels wide and the DOM root is laid
+// out at exactly that many CSS pixels, so an offset means the same distance down
+// the same document in both. `openRead` reads it, `closeRead` writes it back.
+//
+// It also covers what the map was added for: a resize tears the read tier down and
+// rebuilds it -- a LIVE resize does that many times in one drag -- and the offset
+// survives because it was never stored in here.
 
 export function openRead(pane, { resolve } = {}) {
   if (!renderer) return { ok: false, why: 'READ_NO_LAYER' }
@@ -98,11 +160,27 @@ export function openRead(pane, { resolve } = {}) {
   // exactly the "font size changes when I click on them" that was reported.
   const px = Math.round((pane.w ?? W) * (PX_W / W))
   const py = Math.round((pane.h ?? 197) * (PX_W / W))
-  root.style.cssText = `width:${px}px;height:${py}px`
+  // THE PAD COMES FROM THE METRICS TOO, and it is inline for the same reason every
+  // other number now is: the canvas wraps at `width - pad*2` and the stylesheet
+  // used to say `18px 20px`, so the two tiers had different line widths and broke
+  // lines in different places. Identical fonts at different measures still re-flow.
+  root.style.cssText = `width:${px}px;height:${py}px;padding:${BEND_METRICS.pad}px`
 
-  const spec = pane.format === 'rune'
-    ? runeToSpec(pane.doc, { classFor })
+  // THE SAME GEOMETRY THE CANVAS TIER USED, at this pane's pixel size.
+  //
+  // Without this the two tiers computed a floor independently and disagreed about
+  // the row height, the room padding, both font sizes and whether there is a floor
+  // heading at all -- so entering a runefort pane re-flowed it. Reported as "the
+  // text and box sizes janks to a different size ... i want it to be consistent as
+  // it zooms". `runeMetrics` is now the one source and both tiers project it.
+  const rune = pane.format === 'rune'
+  const spec = rune
+    ? runeToSpec(pane.doc, { classFor, metrics: runeMetrics(pane.doc, { width: px, height: py }) })
     : bendToSpec(pane.doc, { resolve: resolve ?? pane.resolve ?? (() => 'pending') })
+  // A rune floor owns its own padding, from the metrics, because the canvas's
+  // `pad` is part of the grid arithmetic (`cellW` is derived from it). The root's
+  // 18/20 would add to it and shift every column.
+  if (rune) root.style.padding = '0'
   root.appendChild(mount(spec))
 
   const object = new CSS3DObject(root)
@@ -126,6 +204,17 @@ export function openRead(pane, { resolve } = {}) {
   const first = root.querySelector('[tabindex="0"], a[href], h1')
   first?.focus?.({ preventScroll: true })
 
+  // AFTER the focus, not before: `focus()` scrolls its element into view, and a
+  // scroll restored first is a scroll that call then undoes. `preventScroll`
+  // covers the layer, not this element's own scroller.
+  // DEFERRED, NOT SET HERE, and the reason is worth writing down: a CSS3DObject's
+  // element is not attached to the document until the renderer next runs, so at
+  // this point `root` has no layout and no scroll extent -- assigning `scrollTop`
+  // to a detached element is silently a no-op. Measured: a pane scrolled to 277 on
+  // the road opened at 0. `renderRead` applies it on the first frame that the
+  // element actually has somewhere to scroll to.
+  pendingScroll = pane.scrollY || 0
+
   // WHAT WAS ACTUALLY RENDERED, not what the caller believed it asked for. The
   // seam panel reported `[rune]` beside a BendScript document on screen, and there
   // was no way to tell from the outside which of the two was wrong. Reporting the
@@ -136,6 +225,18 @@ export function openRead(pane, { resolve } = {}) {
 
 export function closeRead() {
   if (!current) return false
+  // Written back to the pane on the way out, so the rebuild a resize forces lands
+  // where the reader was -- and so the canvas the road draws can be repainted at
+  // the same place by whoever closed it.
+  //
+  // UNLESS THE RESTORE NEVER RAN. A tier that opens and closes inside one frame --
+  // which is exactly what a live resize drag does, many times a second -- has a
+  // `scrollTop` of 0 because the element was never attached long enough to take
+  // one. Writing that back would zero the pane's real position on the first frame
+  // of every drag, which is the bug this whole pair exists to prevent, arrived at
+  // from the other side.
+  if (current.pane && !pendingScroll) current.pane.scrollY = current.root.scrollTop || 0
+  pendingScroll = 0
   scene3d.remove(current.object)
   current.root.remove()
   current = null
@@ -223,44 +324,61 @@ function injectStyle() {
   const s = document.createElement('style')
   s.id = 'paper-read-style'
   s.textContent = `
+/* NO BORDER HERE. The pane already has one: paper.js builds p.frame as a plane
+   w+10 x h+10 behind the pane, which draws as a 5-unit cyan band around it AND
+   carries the close/resize/cast buttons, so it is the border that cannot be
+   removed. This tier drawing its own 2px cyan edge inside that band is why a
+   runefort pane appeared to have two borders -- reported as exactly that.
+   It also narrowed the content box by 4px against a canvas tier that has no
+   border, so removing it makes the two tiers agree on width as well.
+   (No backticks: template literal. Second time this bit in one session.) */
 #paper-read-layer .paper-read-root {
-  background:#03040a; color:#d7dbe8; overflow:auto; padding:18px 20px;
-  border:2px solid #2de2e6; border-radius:4px; box-sizing:border-box;
-  font:15px/1.5 ui-sans-serif,"DejaVu Sans",system-ui,sans-serif;
+  background:#03040a; color:#d7dbe8; overflow:auto;
+  border-radius:4px; box-sizing:border-box;
+  font-family:ui-sans-serif,"DejaVu Sans",system-ui,sans-serif;
 }
-#paper-read-layer h1,#paper-read-layer h2,#paper-read-layer h3 { color:#f2c14e; margin:.5em 0 .35em; line-height:1.25 }
-/* MATCHED TO bend-layout.js's HEADING_SIZE table. The canvas tier draws h1 at
-   30px and the DOM tier drew it at 24, so entering a pane visibly re-flowed the
-   document -- reported as the font size changing on click. Two renderers will
-   never be glyph-identical, but they can agree about size. */
-#paper-read-layer h1 { font-size:30px } #paper-read-layer h2 { font-size:25px } #paper-read-layer h3 { font-size:21px }
-#paper-read-layer h4 { font-size:18px } #paper-read-layer h5 { font-size:16px } #paper-read-layer h6 { font-size:15px }
-#paper-read-layer .paper-read-root { font-size:15px }
-#paper-read-layer p { margin:.5em 0 }
-#paper-read-layer pre { background:#0b0e1a; color:#2de2e6; padding:10px; overflow:auto; border-radius:3px }
-#paper-read-layer blockquote { border-left:3px solid #2de2e6; margin:.6em 0; padding-left:12px; color:#a9b2c6 }
-#paper-read-layer hr { border:0; border-top:1px solid #232838; margin:1em 0 }
+/* COLOUR ONLY, FROM HERE DOWN.
+   Every size, line-height, padding and gap for a BendScript block now arrives as
+   an inline style from BEND_METRICS, which is the object bend-layout.js lays the
+   CANVAS out with -- see dom-spec.js. This stylesheet used to carry its own set
+   (margin .5em, line-height 1.5, padding 18px 20px) and the two disagreed about
+   the box, the advance and every block gap, so entering a pane re-flowed the
+   document even though the font sizes matched.
+   The rune rules below already learned this; the same rule holds here. Anything
+   geometric that reappears in this file re-opens the jank.
+   NO BACKTICKS IN THIS COMMENT -- it lives inside a template literal, which two
+   other comments in this same file already record having been bitten by. Third. */
+#paper-read-layer h1,#paper-read-layer h2,#paper-read-layer h3,
+#paper-read-layer h4,#paper-read-layer h5,#paper-read-layer h6 { color:#f2c14e }
+#paper-read-layer pre { background:#0b0e1a; color:#2de2e6; overflow:auto; border-radius:3px }
+#paper-read-layer blockquote { color:#a9b2c6 }
+#paper-read-layer hr { border:0; border-top:1px solid #232838 }
 #paper-read-layer a { color:#2de2e6 }
 #paper-read-layer a[data-resolution="broken"] { color:#e2564d; text-decoration-style:wavy }
 #paper-read-layer a[data-resolution="pending"] { color:#8b93a7 }
 #paper-read-layer a[data-resolution="unauthorized"] { color:#f2c14e }
 #paper-read-layer .paper-unknown { border:1px dashed #3a4258; padding:6px 8px; margin:.5em 0 }
 #paper-read-layer .paper-unknown-label { font:11px ui-monospace,monospace; color:#8b93a7; display:block }
-#paper-read-layer .paper-edges { margin-top:14px; border-top:1px solid #232838; padding-top:8px }
-#paper-read-layer .paper-edges ul { list-style:none; padding:0; margin:0; font:12px ui-monospace,monospace }
-#paper-read-layer .paper-edges li { padding:2px 0 }
+#paper-read-layer .paper-edges { border-top:1px solid #232838 }
+#paper-read-layer .paper-edges ul { list-style:none; font-family:ui-monospace,monospace }
 #paper-read-layer .paper-predicate { color:#f2c14e; font-weight:700; margin-right:8px }
+/* COLOURS AND BORDERS ONLY. Padding, both font sizes and the row height come from
+   runeMetrics as inline styles, because they are the numbers the canvas tier also
+   draws with -- a stylesheet competing with them is how the two tiers came to
+   disagree. Anything geometric that appears here again will re-open the jank.
+   (No backticks in this comment: it lives inside a template literal, the same
+   trap reel.js records above its own stylesheet.) */
 #paper-read-layer .rune-room {
-  background:#0e1424; border:1px solid #243049; border-radius:3px; padding:8px 10px; overflow:hidden;
+  background:#0e1424; border:1px solid #243049; border-radius:3px; overflow:hidden;
 }
+#paper-read-layer .rune-floor-head { color:#f2c14e }
 /* §5.3 -- the class names the protocol requires, doing real work. */
 #paper-read-layer .runefort-state-warm { background:#231c0d; border-color:#5c4718 }
 #paper-read-layer .runefort-state-hot  { background:#2a1410; border-color:#6b2a1e }
 #paper-read-layer .runefort-state-fault{ background:#31090c; border-color:#8b1b22 }
 #paper-read-layer .runefort-state-idle { background:#0a0c14; border-color:#1b2030 }
 #paper-read-layer .rune-room:focus { outline:2px solid #f2c14e; outline-offset:1px }
-#paper-read-layer .rune-room h3 { margin:0 0 4px; font-size:13px }
-#paper-read-layer .rune-room p { margin:0; font-size:11px; color:#8b93a7 }
+#paper-read-layer .rune-room p { color:#8b93a7 }
 `
   document.head.appendChild(s)
 }

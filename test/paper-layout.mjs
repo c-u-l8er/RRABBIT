@@ -12,7 +12,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { layoutBend, cardOf, THEME } from '../m2/paper/bend-layout.js'
+import { layoutBend, cardOf, THEME, BEND_METRICS } from '../m2/paper/bend-layout.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const CORPUS = join(here, '..', '..', 'bendscript.com', 'test-corpus', 'v0.1')
@@ -191,6 +191,59 @@ for (const f of docs) {
   }
   const empty = cardOf(null)
   ok('card of nothing does not throw', empty.title === '(untitled)' && empty.blocks === 0)
+}
+
+// ---- 12. NO GLYPH IS DRAWN ABOVE THE BOX IT BELONGS TO --------------------
+//
+// The assertion this file was missing, and the one that would have caught the bug
+// reported as "the multi lined headers are rendering broken".
+//
+// `paint` draws with textBaseline 'alphabetic', so a text command's `y` is the
+// BASELINE and the ascender rises ABOVE it. The layout used to emit its first line
+// at the block's own top edge, which put that whole ascender through the bottom of
+// whatever was drawn before -- invisible on a single line preceded by a gap, and
+// unmistakable on a heading that wrapped, where only the first line is lifted.
+//
+// Nothing here asked. Every previous assertion was about wrapping, kinds, counts
+// and determinism -- all of which a document with overlapping lines passes.
+{
+  let worst = null
+  let checked = 0
+  for (const name of docs) {
+    const doc = JSON.parse(readFileSync(join(CORPUS, name), 'utf8'))
+    const r = layoutBend(doc, { width: W, height: H, pad: PAD, measure })
+    for (const c of r.commands) {
+      if (c.op !== 'text') continue
+      checked++
+      // The top of this glyph's em box. It must be inside the pane, never above it.
+      const top = c.y - c.font.size
+      if (worst === null || top < worst.top) worst = { top, name, text: c.text }
+    }
+  }
+  ok('every corpus document draws text inside the box', checked > 0 && worst && worst.top >= 0,
+     worst ? `worst top=${worst.top} in ${worst.name} ("${String(worst.text).slice(0, 24)}")` : 'no text')
+}
+
+// ---- 13. a wrapped heading's lines are one advance apart, and no more ------
+//
+// The other half of the same bug: the lines AFTER the first were spaced correctly
+// all along, so a test that only measured the gap between them would have passed.
+// What was wrong was where the run STARTED, which is only visible by comparing the
+// first baseline against the block's top -- so this checks both at once.
+{
+  const long = { blocks: [{ kind: 'heading', level: 1, spans: [{ text: 'a heading long enough that it certainly has to wrap across several lines in a narrow pane' }] }] }
+  const r = layoutBend(long, { width: 300, height: 400, pad: PAD, measure })
+  const ys = [...new Set(r.commands.filter((c) => c.op === 'text').map((c) => c.y))].sort((a, b) => a - b)
+  ok('the heading wrapped', ys.length >= 2, `lines=${ys.length}`)
+  const advance = BEND_METRICS.headLine(1)
+  const gaps = ys.slice(1).map((y, i) => y - ys[i])
+  ok('every heading line is exactly one advance below the last',
+     gaps.every((g) => g === advance), `advance=${advance} gaps=${gaps.join(',')}`)
+  // The first baseline sits one line below the block top, which is `pad` plus the
+  // heading's own space above it. Anything less and the glyph is outside the pane.
+  ok('the first heading baseline clears the top of the pane',
+     ys[0] >= PAD + BEND_METRICS.headAbove + BEND_METRICS.headSize[1] - 1,
+     `first=${ys[0]}`)
 }
 
 // ---- 11. a missing measure is refused loudly ------------------------------

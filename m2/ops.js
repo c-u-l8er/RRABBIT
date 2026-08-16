@@ -45,9 +45,40 @@ export const TABLE = {
   // --- panes (rung 6; PROPOSED, not in the draft's sixteen) ---
   read: { args: ['district', 'side', 'dash'], plan: true },
   unread: { args: [], plan: false },
+  // `answer` is OPTIONAL and deliberately not in `args`: absent it is the press on
+  // `X--`, which asks and can only unask, and `'close'` from the `close--X` target
+  // is the only thing that destroys a pane. A plan that means to close one
+  // therefore carries the answer -- see paper.js for why `X--` may not be the yes.
   close: { args: ['district', 'side', 'dash'], plan: true },
   resize: { args: ['district', 'side', 'dash', 'w'], plan: true },
   cast: { args: ['district', 'side', 'dash'], plan: true },
+  // --- driverside mailboxes (PROPOSED, not in the draft's sixteen) ------------
+  //
+  // Adding names here is the decision §8 reserves, and these six are added
+  // knowingly rather than by drift. The rung-6 argument forces it: the moment a
+  // mailbox accepts a click, that click either passes this seam or the recorder
+  // acquires a second vocabulary. `m2/mail/box.js` is the world they act on.
+  //
+  // `mail`/`unmail` mirror `read`/`unread` exactly, including the plan split --
+  // opening a box is worth replaying, leaving one is a no-op the driver performs
+  // anyway.
+  mail: { args: ['district', 'side', 'dash'], plan: true },
+  unmail: { args: [], plan: false },
+  // ACK IS PLANNABLE **BECAUSE** IT IS IDEMPOTENT. The high-water mark is a
+  // `Math.max`, so replaying an ack twice lands in the same place -- which is
+  // what makes it safe to put in a plan at all. An ack implemented as a set of
+  // read ids would not be, and that is a second reason the mark is a mark.
+  ack: { args: ['district', 'side', 'dash', 'seq'], plan: true },
+  // REPLY IS PLANNABLE, and this one is a real decision rather than a default.
+  // A reply is the driver's answer crossing a boundary, and Core 0.2.1 §6 is why
+  // it must be in the plan: wall-clock answers are replayable only if the
+  // recording feeds the recorded answer back. Dropping it would make a replayed
+  // session diverge at the first question the agent asked.
+  reply: { args: ['district', 'side', 'dash', 'text'], plan: true },
+  // Park and wake an agent. WRL.md §24.2's own two words, and the status names
+  // they set are Core §20.1's `quiescent`/`runnable` -- see m2/mail/box.js.
+  rest: { args: ['district', 'side', 'dash'], plan: true },
+  wake: { args: ['district', 'side', 'dash'], plan: true },
 }
 
 const performers = new Map()
