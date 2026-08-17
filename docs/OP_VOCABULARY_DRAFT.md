@@ -277,10 +277,77 @@ answer is still no*.
 > answering the same question.** The test was right to go red and would have been
 > useless if it had been satisfied.
 
-**Not settled here, and worth an eye:** `close` is published today. It destroys a
-pane on the machine that replays it. It is guarded — `close` cannot destroy without
-the recorded `answer` (`PAPER_ROADS.md` §17) — but it is the same *shape* as the
-four above, and it was already in the list rather than being ruled into it.
+**Not settled here, and it is bigger than one op: A SLOT ADDRESS IS NOT A PORTABLE
+IDENTITY.** The boundary rule above is about *what* an op writes. There is a second
+question it does not answer — *what the op's arguments will mean over there* — and
+the published set is already full of it:
+
+| op | address | means on the recipient's machine |
+|---|---|---|
+| `close` | `district, side, dash` | destroys **whatever pane is at that dash** |
+| `read` / `resize` / `cast` | `district, side, dash` | acts on whatever is there |
+| `enter` | `road, milepost` | stands in **whatever window is there** — some application of theirs |
+| `track` | `n` | switches to **their** track *n* and drives it, moving its parked position and trail |
+
+`requires.roads` exists precisely because a road is a name that may not exist over
+there, and `check()` refuses when one is missing. Nothing plays that role for a
+dash, a milepost or a track number: those always "exist", and always denote
+something else. `close` is guarded — it cannot destroy without the recorded
+`answer` (`PAPER_ROADS.md` §17) — and the rest are not.
+
+This is not fixed here because the fix is a design decision, not a patch: either
+these ops carry something identifying about their target (which is `requires` grown
+a second axis), or published tracks are declared road-scoped and the slot-addressed
+ops leave the boundary. **§8 should decide which.** Naming it now so the choice is
+made deliberately rather than discovered by someone whose pane was closed by a
+stranger's recording.
+
+### 8b.4c Ten of the sixteen exist now — and the six missing ones share a name
+
+The table had **two of §3's sixteen** (`drive`, `park`) and **eleven §3 never
+proposed** (five pane verbs, six mailbox verbs). So the recorder knew panes and
+mailboxes intimately and could not say *"enter that window"*. That is the wrong way
+round for a vocabulary whose §1 promises to be the API a WRL program and a code
+editor are written against: neither is worth building on a surface that cannot
+enter a window, take an exit, or open the map.
+
+Built now: **`enter`, `leave`, `back`, `exit`, `dash`** (completing §3's navigation
+row) and **`map`, `gear`, `track`** (all of §3's shell row). Each wraps a verb that
+already existed and adds nothing but the seam. Table 13 → **21**.
+
+**The six still missing are §3's whole WINDOW row, and they are blocked on a naming
+collision the draft has to settle.** `close` and `resize` in §3 act on a *window*;
+the table's `close` and `resize` already act on a *pane*, because panes were built
+first and took the names. `full`/`unfull`, `zoom` and `place` are free of this and
+were held back with the other two rather than shipping half a row. The choices are
+to overload on address shape (a pane is `district, side, dash`, a window is
+`road, milepost`, and `slotAt` already answers "what stands here"), or to give one
+of the two kinds different verbs. Overloading is the more honest algebra and the
+more surprising vocabulary; it is a §8.2 question.
+
+#### The property no consumer but a human can ignore
+
+> **The seam is synchronous and the world is animated.**
+
+`leave`'s precondition was `state.mode === 'flat'`, which reads correctly and is
+wrong. `enter` starts a **flight**: for about a second afterwards the shell is
+`flying`, and only then `flat`. So a program that entered a window and immediately
+left it was told `OP_NOT_INSIDE` *while flying into the window it had just asked
+for*. Measured: `enter` ok → `flying` → `leave` REFUSED; wait → `flat` → `leave` ok.
+
+A human never sees this, because a human waits by existing. A WRL program, an
+agent and a code editor all issue their next op immediately — and they are the
+three consumers §1 has not built yet, so this would have been discovered by all
+three at once.
+
+`leave` is now total, and it is the only op in the table whose precondition tested
+camera state. But the general fact remains and is not fixed by that: **an op that
+starts a flight does not complete it, and the vocabulary has no way to say "wait
+until you have arrived".** For a plan this is invisible (`replay` is a for-loop and
+the preconditions that matter test the ledger, not the camera). For a program it is
+the first thing that will bite. Whether the answer is an `arrived` op, an implicit
+await inside `apply`, or nothing at all is a §8 question, and it should be answered
+before the WRL binding rather than after.
 
 ### 8b.4 What is still open, unchanged
 

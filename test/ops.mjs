@@ -260,23 +260,98 @@ function wire(w) {
   // mailbox ops are the first place to look, and `rest`/`wake` are the most
   // droppable of them -- they set a two-valued status and nothing depends on
   // their being separate verbs.
-  ok('the table is exactly the thirteen ops built so far',
-    Object.keys(TABLE).sort().join(',') === 'ack,cast,close,drive,mail,park,read,reply,resize,rest,unmail,unread,wake',
+  ok('the table is exactly the twenty-one ops built so far',
+    Object.keys(TABLE).sort().join(',') === 'ack,back,cast,close,dash,drive,enter,exit,gear,leave,mail,map,park,read,reply,resize,rest,track,unmail,unread,wake',
     Object.keys(TABLE).join(','))
-  ok('two are the draft\'s own nav verbs', ['drive', 'park'].every((k) => k in TABLE))
+  // THE SHAPE OF THE TABLE IS THE FINDING, and it was upside down until now: two
+  // of the draft's sixteen were built and eleven it never proposed were, so the
+  // recorder knew panes and mailboxes intimately and could not say "enter that
+  // window". Ten of the sixteen exist now; the six that do not are the WINDOW row,
+  // and they are held back by a naming collision the draft has to settle -- see
+  // §8b.4c. The count is asserted rather than described because "most of the
+  // vocabulary" is exactly the kind of claim that quietly stops being true.
+  ok('ten of the draft\'s own sixteen now exist',
+    ['drive', 'park', 'enter', 'leave', 'back', 'exit', 'dash', 'map', 'gear', 'track']
+      .every((k) => k in TABLE))
+  ok('the six unbuilt ones are the WINDOW row, and none of them is here',
+    ['full', 'unfull', 'zoom', 'place'].every((k) => !(k in TABLE)))
   ok('five are pane verbs, none of them in the draft\'s sixteen',
     ['read', 'unread', 'close', 'resize', 'cast'].every((k) => k in TABLE))
   ok('six are driverside-mailbox verbs, none of them in the draft\'s sixteen either',
     ['mail', 'unmail', 'ack', 'reply', 'rest', 'wake'].every((k) => k in TABLE))
-  // `unread` and `unmail` are the only two that are not plannable, and §4 above is
-  // why: both are leaving something, which a driver does anyway on the way to the
-  // next step. Every other verb changes what a replay would see.
-  ok('exactly two ops are unplannable',
-    Object.values(TABLE).filter((t) => !t.plan).length === 2)
-  ok('...and they are the two "leave it" verbs',
-    Object.entries(TABLE).filter(([, t]) => !t.plan).map(([k]) => k).sort().join(',') === 'unmail,unread')
+  // Three now, and they are the same verb three times: leaving something. §4 above
+  // is why they are not plannable -- a driver leaves on the way to the next step
+  // anyway -- and §8b.2 is the condition that makes dropping them SAFE rather than
+  // merely convenient: the op that follows each one implies it. `enter` supersedes
+  // a flatten, `read` supersedes a read, `mail` supersedes a mailbox.
+  ok('exactly three ops are unplannable',
+    Object.values(TABLE).filter((t) => !t.plan).length === 3,
+    Object.entries(TABLE).filter(([, t]) => !t.plan).map(([k]) => k).join(','))
+  ok('...and they are the three "leave it" verbs',
+    Object.entries(TABLE).filter(([, t]) => !t.plan).map(([k]) => k).sort().join(',') === 'leave,unmail,unread')
   ok('every op declares its args', Object.values(TABLE).every((t) => Array.isArray(t.args)))
   ok('every op declares whether it is plannable', Object.values(TABLE).every((t) => typeof t.plan === 'boolean'))
+}
+
+// ---- 9. AN OP NAMES A STATE, AND `back` RECORDS ITS ARRIVAL ---------------
+//
+// Two properties the eight new verbs depend on, asserted against fakes because
+// that is what the injected-performer split is FOR: both are properties of the
+// seam, and neither is visible in a screenshot of a shell that happens to work.
+{
+  // (a) THE RECORD IS TAKEN AFTER `perform`, which is the whole mechanism behind
+  //     `back`. §2 says record the arrival, not the input -- and `back` is the one
+  //     verb whose arguments name no destination, so its performer resolves the
+  //     trail and writes the answer onto the op. If `apply` ever copied the op
+  //     BEFORE performing it, every recorded `back` would be a bare `back` again:
+  //     replayable on the author's machine, and arriving somewhere else on anyone
+  //     else's. Nothing else in the file would go red.
+  const w = world()
+  reset()
+  register('back', { pre: () => true, perform: (op) => { op.to = 'build'; w.road = 'build' } })
+  apply({ op: 'back' }, { by: 'pointer' })
+  const rec = log()
+  ok('a performer\'s write to the op reaches the log', rec[0]?.to === 'build', JSON.stringify(rec[0]))
+  ok('...so a recorded `back` names where it went', plan()[0]?.to === 'build')
+
+  // And the replay of that log is deterministic BECAUSE the destination is in it:
+  // a second machine with a different trail runs the recorded arrival.
+  const w2 = world()
+  reset()
+  register('back', {
+    pre: (op) => (op.to != null ? true : 'OP_NO_TRAIL'),
+    perform: (op) => { w2.road = op.to },
+  })
+  const rep = replay([{ op: 'back', to: 'build' }], { by: 'replay' })
+  ok('replaying it needs no trail of its own', rep.ok && w2.road === 'build', w2.road)
+  ok('while a bare `back` with no trail refuses by name',
+    apply({ op: 'back' }).why === 'OP_NO_TRAIL')
+
+  // (b) A STATE, NOT A TOGGLE. `map: {open: true}` on an already-open map must
+  //     SUCCEED and do nothing. A toggle here would make the result depend on how
+  //     many times the map happened to be opened before the plan ran -- which is
+  //     the same defect §2 rejects forty wheel notches for.
+  const m = { open: false, flips: 0 }
+  reset()
+  register('map', {
+    pre: (op) => (typeof op.open === 'boolean' ? true : 'OP_BAD_STATE'),
+    perform: (op) => {
+      if (m.open === op.open) return { ok: true, already: true }
+      m.open = op.open
+      m.flips++
+      return { ok: true }
+    },
+  })
+  ok('asking for a state it is not in changes it', apply({ op: 'map', open: true }).ok && m.open === true)
+  const again = apply({ op: 'map', open: true })
+  ok('asking for the state it IS in succeeds', again.ok, JSON.stringify(again))
+  ok('...and does nothing', m.flips === 1, String(m.flips))
+  ok('a non-boolean is refused', apply({ op: 'map', open: 'yes' }).why === 'OP_BAD_STATE')
+
+  // Which is what makes it replayable twice over -- the property a plan needs and
+  // a toggle cannot have.
+  const twice = replay([{ op: 'map', open: true }, { op: 'map', open: true }], { by: 'replay' })
+  ok('so replaying it twice is still ok', twice.ok && m.open === true && m.flips === 1)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

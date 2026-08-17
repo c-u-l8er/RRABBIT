@@ -42,6 +42,46 @@ export const TABLE = {
   // --- navigation (existing verbs, routed here to test the seam) ---
   drive: { args: ['road'], plan: true },
   park: { args: ['road', 'z'], plan: true },
+  // --- the rest of the draft's §3 navigation row -----------------------------
+  //
+  // Two of the sixteen had been built and eleven that §3 never proposed had, so
+  // the recorder covered panes and mailboxes well and THE DESKTOP BARELY AT ALL:
+  // there was no way to record entering a window, taking an exit, or standing at
+  // a marker. A vocabulary that cannot say "enter that window" is not a surface a
+  // code editor or a WRL program can be written against, which is why these come
+  // before either.
+  //
+  // AN OP NAMES A STATE TO BE IN, NEVER A TOGGLE TO FLIP. This is §2's "record the
+  // arrival, not the input" applied one level down, and it is what makes these
+  // replayable against a world that has moved: `map: {open: true}` on an already
+  // open map is SUCCESS, not a refusal, because the world is in the asked-for
+  // state. `toggleMap` is an input; `map(open)` is an arrival. Every registration
+  // in shell.js honours this, and `test/ops.mjs` §9 asserts it.
+  //
+  // `enter` is the gesture §2's own table describes -- "click a window, then click
+  // inside it" -- so it ends up STANDING IN the window (`flattenTo`). Note §3's row
+  // names `goWindow`, which is the road-BESIDE verb and a different arrival; that
+  // discrepancy is the draft's to settle, and it is flagged in §8b.4c rather than
+  // resolved by whichever one got built first.
+  enter: { args: ['road', 'milepost'], plan: true },
+  // NOT PLANNABLE, and it is §5's `out` under its own name -- with §8b.2's extra
+  // condition actually checked rather than assumed: `enter` supersedes, so the op
+  // that follows a `leave` implies it. Dropping it is therefore safe HERE for the
+  // stated reason, not by analogy.
+  leave: { args: [], plan: false },
+  // BACK IS THE ONE VERB WHOSE ARGUMENTS NAME NO DESTINATION, and that makes it
+  // the one place §2's rule has real work to do. The trail belongs to the track,
+  // so replaying a bare `back` on another machine pops THEIR trail and arrives
+  // somewhere the recording never went. So `perform` writes the road it resolved
+  // into `to`, and the log records the arrival -- exactly what `park(road, z)`
+  // does to forty wheel notches. A `to` supplied by a caller is honoured as-is.
+  back: { args: [], plan: true },
+  exit: { args: ['to'], plan: true },
+  dash: { args: ['road', 'at'], plan: true },
+  // --- shell: which world you are looking at (draft §3's third table) ---------
+  map: { args: ['open'], plan: true },
+  gear: { args: ['to'], plan: true },
+  track: { args: ['n'], plan: true },
   // --- panes (rung 6; PROPOSED, not in the draft's sixteen) ---
   read: { args: ['district', 'side', 'dash'], plan: true },
   unread: { args: [], plan: false },

@@ -97,6 +97,7 @@ import {
   enterFull,
   exitFull,
   backTarget,
+  goBack,
   sendMotion,
   resizeFlatBy,
   handlePoint,
@@ -131,7 +132,7 @@ import { attachPaper, syncPaper, paperReport, paperMeshes, placePaper, seedPaper
 import { attachMail, syncMail, mailReport, mailMeshes, mailAt, placeBox, postTo, registerMailOps, mailUnread, closeMail } from './mail.js'
 import { attachRead, renderRead, closeRead } from './paper/read.js'
 import { apply as applyOp, log as opLog, plan as opPlan, opCounts, replay as replayOps, precheck as precheckOps, register as registerOp } from './ops.js'
-import { attachMap, openMap, closeMap, mapReport } from './map.js'
+import { attachMap, openMap, closeMap, mapReport, isOpen as mapIsOpen } from './map.js'
 import {
   attachReel, openReel, closeReel, reelReport,
   attachTransport, transportStart, transportStop, transportReport,
@@ -894,6 +895,119 @@ function buildWorld(canvas) {
       return Number.isFinite(op.z) ? true : 'OP_BAD_Z'
     },
     perform: (op) => { goDistrict(op.road, { at: op.z }) },
+  })
+  // THE REST OF THE DRAFT'S §3 NAVIGATION AND SHELL ROWS. Each wraps a verb that
+  // already exists and adds nothing but the seam -- which is the whole point: an
+  // op that reimplemented `goExit` would be a second way to take an exit, and two
+  // ways to do one thing is what §0 of the draft calls accretion.
+  registerOp('enter', {
+    pre: (op) => {
+      if (!ws.has(op.road)) return 'OP_NO_ROAD'
+      // ASKED OF THE LEDGER, not of the layout: a milepost that no window is
+      // standing at is the ordinary way a recording goes stale, and it has to be
+      // a refusal by name rather than a flatten against nothing.
+      const there = [...signs.values()].some(
+        (s) => s.mesh && s.district === op.road && s.milepost === op.milepost,
+      )
+      return there ? true : 'OP_NO_WINDOW'
+    },
+    perform: (op) => { flattenTo(op.milepost, op.road) },
+  })
+  registerOp('leave', {
+    // TOTAL, AND IT WAS A REFUSAL FOR ONE ROUND. `pre: state.mode === 'flat'`
+    // reads correctly and is wrong, and only driving it showed why: `enter` starts
+    // a FLIGHT. The shell is `flying` for about a second afterwards and only then
+    // `flat`, so a program that entered a window and immediately left it was told
+    // `OP_NOT_INSIDE` while flying into the very window it had asked for.
+    // Measured: `enter` ok -> mode `flying` -> leave REFUSED; wait, mode `flat`,
+    // leave ok.
+    //
+    // THE SEAM IS SYNCHRONOUS AND THE WORLD IS ANIMATED. That is a property of
+    // this vocabulary rather than of this verb, and a precondition that tests
+    // camera state is the one shape that trips over it -- `leave` is the only op
+    // in the table that does. So it is total: leaving somewhere you are not is a
+    // no-op that SAYS SO, in `flew`, rather than a refusal. The log keeps the
+    // distinction I wanted the refusal for and the program keeps working.
+    //
+    // WHAT `flew` ACTUALLY MEANS, measured rather than assumed: it is whether
+    // `release()` acted, and `release()` declines only from a SETTLED road
+    // (`mode === 'driving'`). Leaving while already flying home reports `true`,
+    // because a flight home is still something to interrupt. Measured: settled
+    // road -> `flew:false`; mid-flight -> `flew:true`. So it is not "was I in
+    // something", it is "did anything change", which is the weaker claim and the
+    // true one.
+    perform: () => ({ ok: true, flew: release() }),
+  })
+  registerOp('back', {
+    pre: (op) => (op.to != null || backTarget() ? true : 'OP_NO_TRAIL'),
+    // WRITES WHERE IT WENT BACK ONTO THE OP, so the log records the arrival and
+    // not the gesture -- see the TABLE note. `apply` copies the op AFTER `perform`
+    // returns, which is what makes this land in the record; `test/ops.mjs` §9
+    // asserts that it does, because it is the kind of thing that would quietly
+    // stop working and leave a bare `back` in every published track.
+    perform: (op) => {
+      if (op.to != null) { goDistrict(op.to, { atHead: true }); return { to: op.to } }
+      const to = backTarget()
+      const r = goBack()
+      op.to = to
+      return { to, went: !!r }
+    },
+  })
+  registerOp('exit', {
+    pre: (op) => {
+      if (!ws.has(op.to)) return 'OP_NO_ROAD'
+      // An exit is a road you can reach FROM HERE. Without this, `exit` would be
+      // `drive` with a different name and the trail would record a junction that
+      // the network does not have.
+      return ws.exitsOf(state.district).includes(op.to) ? true : 'OP_NO_EXIT'
+    },
+    perform: (op) => { goExit(op.to) },
+  })
+  registerOp('dash', {
+    pre: (op) => {
+      if (!ws.has(op.road)) return 'OP_NO_ROAD'
+      return Number.isInteger(op.at) ? true : 'OP_BAD_DASH'
+    },
+    // `goDash` clamps to the road's own bounds rather than refusing, which is its
+    // documented answer for a marker past the exit gate. Not second-guessed here.
+    perform: (op) => ({ ok: true, went: !!goDash(op.road, op.at) }),
+  })
+  registerOp('map', {
+    pre: (op) => (typeof op.open === 'boolean' ? true : 'OP_BAD_STATE'),
+    // THE STATE, NOT THE TOGGLE. Asking for the state it is already in succeeds
+    // and does nothing -- a replay must not depend on how many times the map
+    // happened to be opened before it ran.
+    // `openMap`/`closeMap` rather than `toggleMap`, deliberately: a toggle is the
+    // input and this op is the arrival. Reaching for the toggle here is how an op
+    // acquires a dependency on how many times something happened before it.
+    perform: (op) => {
+      if (mapIsOpen() === op.open) return { ok: true, already: true }
+      if (op.open) openMap()
+      else closeMap()
+      return { ok: true, open: mapIsOpen() }
+    },
+  })
+  registerOp('gear', {
+    pre: (op) => (typeof op.to === 'string' && op.to ? true : 'OP_BAD_GEAR'),
+    perform: (op) => {
+      if (!dash) return { ok: false, why: 'OP_NO_DASH' }
+      // Already there is SUCCESS. `dash.setGear` returns false for three different
+      // reasons -- unknown, unbuilt, and already-in-it -- and only the first two
+      // are refusals. Replaying a plan that ends in D onto a shell already in D
+      // must not fail on the last step.
+      if (dash.gear() === op.to) return { ok: true, already: true }
+      // A GEAR WHOSE SCENE IS NOT BUILT REFUSES, and says which. `dash.report()`
+      // carries the stick's own refusal, so this reads the reason rather than
+      // inventing one.
+      if (!dash.setGear(op.to, 'op')) {
+        return { ok: false, why: 'OP_GEAR_REFUSED', detail: dash.report()?.refused?.why ?? op.to }
+      }
+      return { ok: true, gear: dash.gear() }
+    },
+  })
+  registerOp('track', {
+    pre: (op) => (Number.isInteger(op.n) && op.n >= 1 && op.n <= 999 ? true : 'OP_BAD_TRACK'),
+    perform: (op) => ({ ok: true, went: !!goTrack(op.n) }),
   })
   // Escape inside a read pane leaves it, and does so THROUGH THE SEAM -- read.js
   // raises the intent and paper.js turns it into an op, so there is no path into

@@ -48,7 +48,11 @@ export const BUNDLE_KIND = 'computedriven.track.v1'
 // have made the test green and shipped `ack` and `reply` across a machine
 // boundary, which is the thing the test was there to prevent it doing quietly.
 // Duplicated as data rather than imported so this module stays dependency-free.
-export const PLANNABLE = ['drive', 'park', 'read', 'close', 'resize', 'cast', 'mail']
+export const PLANNABLE = [
+  'drive', 'park', 'enter', 'back', 'exit', 'dash',
+  'map', 'gear', 'track',
+  'read', 'close', 'resize', 'cast', 'mail',
+]
 
 // PLANNABLE HERE, REFUSED AT THE BOUNDARY — each with its reason, because a
 // considered exclusion and a forgotten one look identical in a list. Every op
