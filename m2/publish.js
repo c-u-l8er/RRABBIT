@@ -34,12 +34,47 @@ export const PREFIX = 'track-'
 
 export const BUNDLE_KIND = 'computedriven.track.v1'
 
-// Only ops that CHANGE where you are can be replayed. `ops.js` already draws this
-// line for its own planner with `plan: true`, and the same line applies here for
-// the same reason: leaving a window is worth recording and is a no-op to replay.
-// Duplicated as data rather than imported so this module stays dependency-free;
-// `test/publish.mjs` asserts the two agree, so the duplication cannot rot silently.
-export const PLANNABLE = ['drive', 'park', 'read', 'close', 'resize', 'cast']
+// WHAT MAY BE REPLAYED **HERE** AND WHAT MAY BE REPLAYED **THERE** ARE TWO
+// QUESTIONS, and this list is the second one.
+//
+// `ops.js` marks an op `plan: true` when it belongs in a plan at all — replayable,
+// on this machine, by the person who recorded it. This list is the **publish
+// boundary**: what may cross into a stranger's world. It is a SUBSET, and it is
+// used in both directions — `seal` drops everything outside it on the way out,
+// and `check` refuses everything outside it on the way in.
+//
+// The two were briefly held to be the same list, asserted as an equality, and the
+// assertion went red the moment the mailbox ops arrived. Syncing the list would
+// have made the test green and shipped `ack` and `reply` across a machine
+// boundary, which is the thing the test was there to prevent it doing quietly.
+// Duplicated as data rather than imported so this module stays dependency-free.
+export const PLANNABLE = ['drive', 'park', 'read', 'close', 'resize', 'cast', 'mail']
+
+// PLANNABLE HERE, REFUSED AT THE BOUNDARY — each with its reason, because a
+// considered exclusion and a forgotten one look identical in a list. Every op
+// `ops.js` marks plannable must appear in exactly one of these two, which is what
+// keeps the duplication from rotting: a new plannable op fails `test/publish.mjs`
+// until somebody classifies it.
+//
+// One thread runs through all four: **they write to the recipient's own
+// correspondence or their agents.** `ops.js`'s arguments for marking them
+// plannable are sound and are all arguments about the same machine.
+export const WITHHELD = {
+  // `ops.js`: "ACK IS PLANNABLE **BECAUSE** IT IS IDEMPOTENT." True, and it is an
+  // argument about REPETITION, not about WHOSE INBOX. A `Math.max` high-water mark
+  // replayed twice lands in the same place; replayed against a different inbox it
+  // marks a stranger's mail read, once, and there is no un-read.
+  ack: 'marks the recipient’s own mail read; idempotent is not the same as harmless',
+  // `ops.js`: in the plan so a replay does not diverge at the first question the
+  // agent asked. That argues for the recording CARRYING the answer, not for
+  // posting it as somebody else. `reply()` returns `signed: false` because the
+  // principal question is unruled (Core 0.2.1 §16.2) — and a machine boundary is
+  // the worst possible place to answer an unruled question by default.
+  reply: 'posts the author’s words into the recipient’s queue as the recipient, unsigned',
+  // §24.2's own two words, against an agent that is not the author's.
+  rest: 'parks an agent belonging to the recipient',
+  wake: 'wakes an agent belonging to the recipient',
+}
 
 // Refusals are typed and named, never booleans -- the shell's existing discipline
 // (TRACK_ROAD_GONE and friends), continued. A caller must be able to tell "this is
@@ -52,6 +87,12 @@ export const REFUSE = {
   EMPTY: 'TRACK_EMPTY',
   ROAD_GONE: 'TRACK_ROAD_GONE',
   OP_UNKNOWN: 'OP_UNKNOWN',
+  // A VERB WE KNOW AND WILL NOT RUN FOR A STRANGER, which is not the same answer
+  // as a verb we have never heard of. `OP_UNKNOWN` says "your build is newer than
+  // mine"; this says "your build is the same as mine and the answer is still no".
+  // Conflating them would make a deliberate refusal read as a version skew, and
+  // the obvious repair for a version skew is to upgrade and try again.
+  OP_WITHHELD: 'OP_WITHHELD',
 }
 
 const bad = (why, detail = null) => ({ ok: false, why, detail })
@@ -200,6 +241,12 @@ export function check(bundle, { hasRoad, knownOps = PLANNABLE } = {}) {
   if (!req) return bad(REFUSE.MALFORMED, 'no requires')
 
   for (const op of req.ops ?? []) {
+    // Withheld is asked FIRST, and only when the caller has not substituted its
+    // own `knownOps` -- a caller that passed a list has answered this question
+    // itself. A bundle carrying `ack` is not a bundle from the future.
+    if (knownOps === PLANNABLE && Object.hasOwn(WITHHELD, op)) {
+      return bad(REFUSE.OP_WITHHELD, `${op}: ${WITHHELD[op]}`)
+    }
     if (!knownOps.includes(op)) return bad(REFUSE.OP_UNKNOWN, op)
   }
   for (const road of req.roads ?? []) {

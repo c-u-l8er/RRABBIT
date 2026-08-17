@@ -235,6 +235,53 @@ That is **evidence for freezing rather than against it** — but it sharpens §8
 with additions being a deliberate act". `test/ops.mjs` §8 pins the table's contents, so adding a verb
 breaks a test and has to be argued for rather than slipping in because a feature needed it.
 
+### 8b.4b `plan: true` is not one line, it is two — found by a red test
+
+`publish.js` kept `PLANNABLE` as its own copy of the table's `plan: true` set, and
+`test/publish.mjs` asserted the two were **equal** so the duplication could not rot.
+The mailbox ops made that assertion fail, and the repair that makes it green — copy
+the list across — is the one that must not be made:
+
+| | means |
+|---|---|
+| `plan: true` in `ops.js` | belongs in a plan **here**, replayed by the person who recorded it |
+| `PLANNABLE` in `publish.js` | may cross a **machine boundary** into a stranger's world |
+
+The second is a **subset**, and `ops.js`'s own arguments for the four excluded ops
+are sound *and are all arguments about the same machine*:
+
+- **`ack`** — *"PLANNABLE **BECAUSE** IT IS IDEMPOTENT."* True. Idempotence is a
+  statement about **repetition**, not about **whose inbox**. A `Math.max` high-water
+  mark replayed twice lands in the same place; replayed against a different inbox it
+  marks a stranger's mail read, once, and there is no un-read.
+- **`reply`** — in the plan so a replay does not diverge at the first question the
+  agent asked. That argues for the recording **carrying** the answer, not for
+  **posting** it as somebody else. `reply()` returns `signed: false` because the
+  principal question is unruled (Core 0.2.1 §16.2), and a machine boundary is the
+  worst place to answer an unruled question by default.
+- **`rest` / `wake`** — an agent's lifecycle. Not the author's agent.
+
+`mail` joins `PLANNABLE` (it mirrors `read` — it opens a panel, it does not write).
+The other four go in a `WITHHELD` map **with their reasons**, and the law becomes
+*containment plus exhaustive classification*: every `plan: true` op must appear in
+exactly one of the two lists. That keeps the whole anti-rot property the equality
+had — a new plannable op still fails the build — while making the gap a decision on
+the record instead of a list that drifted.
+
+`check()` refuses a withheld op as **`OP_WITHHELD`**, not `OP_UNKNOWN`. They are
+different sentences: `OP_UNKNOWN` says *your build is newer than mine*, whose
+obvious repair is to upgrade and retry; `OP_WITHHELD` says *our builds agree and the
+answer is still no*.
+
+> **A duplicated list guarded by an equality is only safe while the two lists are
+> answering the same question.** The test was right to go red and would have been
+> useless if it had been satisfied.
+
+**Not settled here, and worth an eye:** `close` is published today. It destroys a
+pane on the machine that replays it. It is guarded — `close` cannot destroy without
+the recorded `answer` (`PAPER_ROADS.md` §17) — but it is the same *shape* as the
+four above, and it was already in the list rather than being ruled into it.
+
 ### 8b.4 What is still open, unchanged
 
 - **§4's load-bearing item is NOT done.** Preconditions are hand-written JS closures. They are total

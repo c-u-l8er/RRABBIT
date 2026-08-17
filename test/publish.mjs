@@ -9,7 +9,7 @@
 // encrypts anything, and a test that expected it to would be testing the wrong
 // rung.
 
-import { seal, open, check, canonical, requirementsOf, PREFIX, PLANNABLE, REFUSE, BUNDLE_KIND } from '../m2/publish.js'
+import { seal, open, check, canonical, requirementsOf, PREFIX, PLANNABLE, WITHHELD, REFUSE, BUNDLE_KIND } from '../m2/publish.js'
 import { TABLE } from '../m2/ops.js'
 
 let pass = 0, fail = 0
@@ -136,14 +136,46 @@ console.log('\n4. roads before anything moves')
   ok('...and names it', typeof u.detail === 'string' && u.detail.length > 0, u.detail)
 }
 
-console.log('\n5. the duplicated op list cannot rot')
+console.log('\n5. every plannable op is CLASSIFIED for the boundary')
 {
-  // publish.js keeps PLANNABLE as data so it stays dependency-free. That is only
-  // safe if it is checked against the real table, which is what this is for.
+  // This used to assert PLANNABLE === the table's `plan: true` set, and that
+  // equality is the wrong law: `plan: true` means replayable HERE, PLANNABLE means
+  // replayable on a STRANGER'S machine, and the second is a subset. The equality
+  // went red when the mailbox ops arrived, and the repair that makes it green --
+  // copying the list across -- is the one that ships `ack` and `reply` over a
+  // machine boundary. So the law is containment plus EXHAUSTIVE CLASSIFICATION,
+  // which keeps exactly the anti-rot property the equality had: a new plannable op
+  // fails here until somebody decides which side of the boundary it is on.
   const fromTable = Object.entries(TABLE).filter(([, t]) => t.plan).map(([k]) => k).sort()
-  ok('PLANNABLE matches ops.js TABLE exactly',
-    JSON.stringify([...PLANNABLE].sort()) === JSON.stringify(fromTable),
-    `${JSON.stringify([...PLANNABLE].sort())} vs ${JSON.stringify(fromTable)}`)
+  const withheld = Object.keys(WITHHELD).sort()
+  const classified = [...PLANNABLE, ...withheld].sort()
+
+  ok('every plan:true op is either published or withheld -- no op is unclassified',
+    JSON.stringify(classified) === JSON.stringify(fromTable),
+    `${JSON.stringify(classified)} vs ${JSON.stringify(fromTable)}`)
+
+  ok('PLANNABLE is a SUBSET of the table -- nothing is published that cannot be planned',
+    PLANNABLE.every((op) => fromTable.includes(op)),
+    PLANNABLE.filter((op) => !fromTable.includes(op)).join(','))
+
+  ok('the two lists are disjoint', !PLANNABLE.some((op) => Object.hasOwn(WITHHELD, op)))
+
+  ok('every withheld op says WHY -- an unexplained exclusion is indistinguishable from an oversight',
+    withheld.length > 0 && withheld.every((op) => typeof WITHHELD[op] === 'string' && WITHHELD[op].length > 10))
+
+  // The boundary is only real if it REFUSES, and refuses by its own name. A
+  // withheld op arriving in a bundle is not a bundle from a newer build, and
+  // answering it with OP_UNKNOWN would tell the sender to upgrade and retry.
+  const bundle = { requires: { ops: ['drive', 'ack'], roads: [] } }
+  const r = check(bundle, { hasRoad: () => true })
+  ok('a bundle carrying a withheld op is refused', r.ok === false)
+  ok('...as OP_WITHHELD, not OP_UNKNOWN', r.why === REFUSE.OP_WITHHELD, r.why)
+  ok('...and the refusal carries the reason', typeof r.detail === 'string' && r.detail.includes('ack'), r.detail)
+
+  // And an op nobody has heard of still answers the other way, or the two
+  // diagnoses have been merged by the fix that was meant to separate them.
+  const future = check({ requires: { ops: ['teleport'], roads: [] } }, { hasRoad: () => true })
+  ok('an unknown op is still OP_UNKNOWN', future.why === REFUSE.OP_UNKNOWN, future.why)
 
   ok('requirementsOf is derived, not declared',
     JSON.stringify(requirementsOf([{ op: 'drive', road: 'a' }, { op: 'park', road: 'b', z: 1 }]))
