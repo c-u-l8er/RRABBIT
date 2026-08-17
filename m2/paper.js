@@ -1039,7 +1039,17 @@ export const paperUnread = () => applyOp({ op: 'unread' }, { by: 'pointer' })
 // the sealed arrangement says is not connected.
 export function paperFollow(href, from = null) {
   const raw = String(href ?? '')
-  state.lastPaperFollow = { href: raw, from: from?.key ?? null, went: null, why: null }
+  state.lastPaperFollow = {
+    href: raw, from: from?.key ?? null, went: null, why: null,
+    // WHAT THE RELEASE COUNTER READ WHEN THE LINK WAS FOLLOWED, and it is the
+    // whole point of this record. "Clicking a link off this road ejects you" has
+    // two candidate paths that look identical from the driver's seat -- this
+    // function releasing, or the canvas pointerdown having already released
+    // before this function ever ran -- and comparing `state.released` against
+    // this number tells them apart without a guess. See `window.__follow`.
+    released: state.released,
+    mode: state.mode,
+  }
   const m = /^bend:([^#]+)/.exec(raw)
   if (!m) {
     // NOT NAVIGATED, and not silently either. An external or malformed href is

@@ -3154,6 +3154,17 @@ window.__pointAtPopup = () => {
           // than only on `window` because the machine this question is about is
           // a kiosk with no console.
           edges: window.__edges(),
+          // WHY A LINK IN A DOCUMENT DID WHAT IT DID, on the one machine where a
+          // link in a document is reachable at all.
+          //
+          // This is in the report and not only on `window` for a reason measured
+          // rather than assumed: Chrome's `elementFromPoint` over a mounted read
+          // pane returns the CANVAS, so a real click on a `bend:` link never
+          // reaches the link on the dev host and the whole path is unreproducible
+          // there. The shipped kiosk (Firefox) delivers it to the DOM. So the only
+          // browser that runs this code is the one with no console, which is
+          // exactly the case §3 of the runbook exists for.
+          follow: window.__follow(),
           decode: decodeGeom,
           h264,
           errors: errorLog,
@@ -3446,6 +3457,33 @@ window.__paperPoint = (which) => {
     ],
     armed: !!pad.userData.armed,
     drawn: !!btn?.visible,
+  }
+}
+
+// WHY A LINK WENT WHERE IT WENT, AND WHO LET GO OF THE PANE.
+//
+// Both halves of this were already being recorded and NEITHER could be read from
+// anywhere: `paperFollow` writes `state.lastPaperFollow` on every link click, and
+// `release()` writes `state.releasedBy` -- with a STACK, deliberately, because it
+// has six call sites and a per-frame reconciler that from outside are one symptom.
+// A report of "clicking a link whose target is not on this road ejects you to the
+// road" is exactly the pair of facts these two hold, and it went a whole turn
+// undiagnosed because answering it needed a guess and a deploy per guess.
+//
+// `releasedSince` is the discriminator and the reason the follow record now stamps
+// the counter: > 0 means something released AFTER the link was followed, 0 means
+// the eject happened BEFORE this function ran -- which would put it on the canvas
+// `pointerdown` path (travel.js, "anything else while standing in something is
+// leaving it") and not on the link at all. Two different bugs, one symptom.
+window.__follow = () => {
+  const last = state.lastPaperFollow ?? null
+  return {
+    last,
+    releasedSince: last ? state.released - last.released : null,
+    mode: state.mode,
+    reading: readingPane()?.key ?? null,
+    released: state.released,
+    releasedBy: state.releasedBy ?? null,
   }
 }
 

@@ -773,8 +773,152 @@ pointer events. `wheelToPane` counts events that reach the pane branch and reads
 because no wheel has ever been sent. The counter is there so the first real scroll
 answers it.
 
+## 21. The link that ejects you — NOT REPRODUCED, and the browser that made it
+unaskable
+
+Carried two turns as *"clicking a `bend:` link whose target is not on this road
+ejects you to the road rather than doing nothing — `paperFollow` treats 'not here'
+as not-a-failure, but something still releases. Not diagnosed."*
+
+It is now diagnosed, and the measured answer is that **it does not happen**.
+
+### 21.1 Why it stayed undiagnosed: both instruments were write-only
+
+`paperFollow` has written `state.lastPaperFollow` on every link click since it was
+built, and `release()` has written `state.releasedBy` — **with a stack**,
+deliberately, because it has six call sites and a per-frame reconciler that from
+outside are one symptom. Neither was readable from anywhere. So the one question
+that decides this — *did the release happen before the link was followed, or
+after?* — could only be answered by a guess and a deploy per guess, and two turns
+went by without one.
+
+`window.__follow()` asks both, and `releasedSince` is the discriminator:
+
+```
+> 0   something released AFTER the link was followed  -> the link path
+  0   the eject happened BEFORE paperFollow ran       -> the canvas pointerdown
+                                                         path, and not the link
+```
+
+It is in the `?report=` payload too, for the reason §21.2 makes unavoidable.
+
+### 21.2 The dev host cannot ask this question at all, and that is measured
+
+Chrome's `elementFromPoint` over the middle of a mounted read pane returns
+`CANVAS#gl`, not the link:
+
+```
+link  bend:bafyfakeloopdoc   rect [462,231,66,12]   at [495,237]
+elementFromPoint  CANVAS#gl     isTheLink  false
+__aim(495,237)    isPaper "home:r:8"  textured true
+```
+
+So on the host a real click on a `bend:` link never reaches the link. The raycast
+hits the pane's own quad and `onPaperHit` falls through to `read` on the pane you
+are already in — **the link does nothing and `paperFollow` never runs**. travel.js
+already states this divergence beside `overDetailView`; this is the same fact
+measured from the other side, and its consequence is worth naming plainly:
+
+> **The `bend:` link path exists only in the shipped kiosk.** It cannot be
+> exercised on the dev host in any browser available here, so it is guest-only
+> testable — which is exactly the case §3 of the runbook exists for, and why
+> `follow` had to go into the report rather than only onto `window`.
+
+### 21.3 What was measured in the guest
+
+FreeBSD guest, Firefox kiosk, real pointer via `xdotool` (the live `XAUTHORITY`
+off the running firefox, not `~/.Xauthority`), read back out of `?report=10`.
+**Both** anchor kinds, because they are two different code paths in `dom-spec.js`
+— the edge rail's `<a>` (line 167) and an inline span's link mark (line 56):
+
+```
+rail   "All nine core predicates"    click bend:bafyfake01
+       why PAPER_LINK_NOT_ON_THIS_ROAD   releasedSince 0   mode read   reading home:l:8
+inline "Larger structured document"  click bend:bafyfakeloopdoc
+       why PAPER_LINK_NOT_ON_THIS_ROAD   releasedSince 0   mode read   reading home:r:8
+```
+
+`releasedSince 0` on both, still in the same pane on both, confirmed on the glass.
+The link is reached, refused by name, and nothing releases. **The reported
+behaviour is the behaviour that was wanted.**
+
+The two `release()` calls that did occur during the session were both an `Escape`
+leaving a pane, and `releasedBy`'s stack says so — `perform → applyOp → the
+pointer path` — which is `unread` doing exactly its job. That is the instrument
+earning its place: a release *did* happen twice and it named itself both times.
+
+**Stated as a limit rather than hidden:** this is a non-reproduction, not a fix.
+Nothing was changed in the follow path. If it returns, `__follow()` now answers it
+in one report instead of a turn.
+
+### 21.4 Keyboard cannot activate a link in a pane, found while measuring
+
+`Tab` then `Return` inside a read pane produced `last: null` — `paperFollow` never
+ran, so no link was activated. `openRead` focuses `[tabindex="0"], a[href], h1`,
+and for a BendScript document the first match in document order is the title
+`h1`, which has no `tabindex` and therefore does not take focus at all.
+
+Not chased, and it is a smaller thing than it looks *for BendScript* — but it is
+not small for Runefort, where §5.4/§5.5 conformance is *about* keyboard reach and
+`test/dom-spec.mjs` asserts 95 times against the element tree while no key has
+ever been sent to one. **The spec-conformance suite and the running pane have
+never been checked against each other with a keyboard.**
+
+## 22. Pane spacing — the arithmetic says do not widen the constant
+
+Also carried two turns: *"pane RAMP SPACING … the law exists and the rule itself is
+wrong somewhere. Best hypothesis: the sweep is counted in DASHES while a pane's
+real footprint is not fixed."* The hypothesis is testable without asking anyone,
+and it does not survive.
+
+A pane and a window are both turned `0.42` rad, so an occupant of world width `w`
+takes `w · sin(0.42)` of z. `SLOT_GAP = 4` dashes at `DASH_PITCH = 180` is **720
+units** between adjacent occupants on a side:
+
+| pane width | z footprint | |
+|---|---|---|
+| 150 (`MIN_W`) | 61.2 | |
+| 300 (default) | 122.3 | the number a window is compared against |
+| 900 (`MAX_W`) | 367.0 | the widest `resize` will ever produce |
+
+Two panes **at maximum width** on adjacent legal slots clear each other by **353
+units** — nearly half the pitch again. A 900-wide pane and a default window clear
+by 475. **Nothing the resize op can produce collides at the current spacing**, so
+footprint does not justify widening anything.
+
+### 22.1 And the premise was half wrong — reading `slotFree` settles it
+
+The asymmetric sweep is **not** the pane-vs-pane rule. Placing a window or a pane
+tests panes with `Math.abs(p.dash - dash) < SLOT_GAP` — the window rule, four
+dashes, symmetric. `inRampSweep` (`RAMP_AHEAD = 1`, `RAMP_BEHIND = 4`) reaches a
+pane in exactly two places: when placing a **ramp**, and when placing a pane near
+an **existing ramp**. So the 1-ahead/4-behind asymmetry governs **pane vs ramp**,
+and its asymmetry is about the ramp's own curved sweep back along the road, which
+is the shape it should have. Six dashes of envelope against a footprint of at most
+367 units is conservative, not wrong.
+
+> **A constant was about to be widened to fix a collision that the arithmetic says
+> cannot occur.** If panes are seen crowding on the road, `SLOT_GAP` and the ramp
+> sweep are both ruled out and the cause is elsewhere — what is needed is what was
+> actually seen, not a bigger number.
+
 ## DOCTRINE
 
+- **not reproduced** — the off-road `bend:` link does not eject you. Measured in
+  the shipped kiosk on both anchor kinds: reached, refused by name, `releasedSince
+  0`, still in the pane. A non-reproduction, not a fix — nothing was changed.
+- **found** — a fact that is recorded but not readable is not an instrument. Both
+  halves of this question had been written to `state` for two turns and neither
+  could be asked, so the only way to answer it was a guess and a deploy per guess.
+  Same class as `__paperPoint`'s absence, one object over.
+- **measured** — Chrome's `elementFromPoint` over a mounted read pane returns the
+  CANVAS, so a real click never reaches a `bend:` link on the dev host and the
+  whole path is **guest-only testable**. Not an opinion about which browser is
+  right: it is why `follow` is in the report.
+- **falsified** — the pane-spacing hypothesis. At the 0.42 turn the widest pane
+  `resize` can produce takes 367 units of z against 720 between slots, so the
+  collision the constant was going to be widened for cannot occur; and the
+  asymmetric sweep is the pane-vs-**ramp** rule, not the pane-vs-pane one.
 - **corrected** — the `[rune]`/BendScript "mismatch" reported last turn was a
   misread screenshot, not a defect. Raised as possibly serious, and it was not.
 - **found, again** — a key that belongs to the topmost thing on screen belongs in

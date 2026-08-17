@@ -353,6 +353,40 @@ returning rows does not mean anything is on the display.
 
 `magick` is present on this host; there is no python `PIL`.
 
+### A pointer inside the guest — `xdotool`, and the cookie it needs
+
+`virsh send-key` sends keys and **cannot click**, which is why the wheel and every
+pane control went unverified for a turn. `xdotool` is installed in the image and
+can, but only with the session's live X cookie: **`~/.Xauthority` is not it**, and
+using it fails with an authorisation error that reads like the display being down.
+The cookie is in the environment of the running kiosk firefox. Install this once
+and every later command is one line:
+
+```sh
+#!/bin/sh
+# ~/gx.sh in the guest.
+P=$(pgrep -f "firefox --profile" | head -1)
+XA=$(procstat -e $P | tr ' ' '\n' | grep '^XAUTHORITY=' | cut -d= -f2)
+export DISPLAY=:0 XAUTHORITY=$XA
+exec xdotool "$@"
+```
+
+```bash
+ssh -p 2224 driver@127.0.0.1 '~/gx.sh getdisplaygeometry'        # 3840 2160
+ssh -p 2224 driver@127.0.0.1 '~/gx.sh mousemove 1416 904; ~/gx.sh click 1'
+ssh -p 2224 driver@127.0.0.1 '~/gx.sh key Escape'
+```
+
+The screen is **3840×2160**, and a `virsh screenshot` is that size — so a coordinate
+read off a screenshot resized to N wide is multiplied by `3840/N` and clicked
+directly. Absolute, no warping, same as the tablet in §5 above.
+
+**Read the effect out of `?report=`, not off the picture.** A pane looks the same
+whether an op refused or never dispatched; `RRABBIT_URL_EXTRA="papers=seed&report=10"`
+in `~/.xprofile` makes every probe in the report payload answerable between clicks.
+That pairing — xdotool for the input, the report for the effect — is what made
+PAPER_ROADS §21 measurable at all.
+
 ### Getting a new shell build into a running guest
 
 The image ships `dist/` and `bridge.py` to `/usr/local/share/rrabbit/` and runs
