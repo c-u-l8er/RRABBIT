@@ -1,0 +1,197 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tier 1 proof — the road</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:13px/1.5 ui-sans-serif,system-ui,sans-serif; background:#0b0d13; color:#c9d3e4; }
+  header { padding:10px 14px; border-bottom:1px solid #1c2130; }
+  h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.02em; }
+  .sub { color:#6b7689; font-size:11px; margin-top:2px; }
+  #road { position:relative; height:300px; margin:14px; border:1px solid #1c2130;
+          border-radius:6px; background:
+            repeating-linear-gradient(90deg,#11131f 0 60px,#141726 60px 120px); overflow:hidden; }
+  #centre { position:absolute; left:0; right:0; top:150px; height:2px; background:#c8912f; }
+  #signwrap { position:absolute; left:40px; top:22px; }
+  #readframe { position:absolute; left:300px; top:20px; width:520px; height:260px;
+               border:1px dashed #35507a; border-radius:4px; display:none; }
+  #readframe.on { display:block; }
+  .bar { padding:0 14px 10px; display:flex; gap:6px; flex-wrap:wrap; }
+  button { font:12px ui-sans-serif,system-ui,sans-serif; background:#171b28; color:#c9d3e4;
+           border:1px solid #2a3145; border-radius:4px; padding:5px 9px; cursor:pointer; }
+  button:hover { background:#1e2434; }
+  pre { margin:0 14px 14px; padding:10px; background:#0f1219; border:1px solid #1c2130;
+        border-radius:6px; font:11px/1.45 ui-monospace,monospace; color:#8fa0bb;
+        white-space:pre-wrap; max-height:230px; overflow:auto; }
+</style>
+
+<header>
+  <h1>Tier 1 proof — the road</h1>
+  <div class="sub">DOM, not three.js. What is under test is the transition and the authority
+    boundary, not the rendering. ROAD_SHELL.md §12.</div>
+</header>
+
+<div id="road">
+  <div id="centre"></div>
+  <div id="signwrap"><canvas id="sign" width="240" height="132"></canvas></div>
+  <div id="readframe"></div>
+</div>
+
+<div class="bar">
+  <button id="enter">read — promote to live</button>
+  <button id="leave">leave — demote to sign</button>
+  <button id="try-place">allowed op (place)</button>
+  <button id="try-intent">privileged op</button>
+  <button id="try-intent-as-cockpit">privileged op, claiming by: 'cockpit'</button>
+  <button id="replay-old-gen">replay captured old generation</button>
+  <button id="refresh">status</button>
+</div>
+
+<pre id="status">…</pre>
+
+<script>
+const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+/* The road's generation is ASKED FOR, never waited for. `whoami` is the only
+   call that needs none, which is what makes it the bootstrap. */
+let ROAD_GENERATION = null;
+const gen = () => ROAD_GENERATION;
+
+/* ── THE VOCABULARY SEAM (page side). ─────────────────────────────────────
+   ROAD_SHELL.md §6.2.1: this is the closed table, the validation, the log and
+   the refusal FEEDBACK. It enforces nothing against its own page and is not
+   described as a boundary. `by` is recorded here and travels no further than
+   the log — the host never reads it.                                        */
+const TABLE = {
+  place:   { args: ['dash', 'side'], host: 'road_place' },
+  promote: { args: ['rect'],         host: 'road_promote' },
+  demote:  { args: [],               host: 'road_demote' },
+  status:  { args: [],               host: 'road_status' },
+  manifest:{ args: [],               host: 'road_manifest' },
+  intent:  { args: ['payload'],      host: 'privileged_intent' },
+};
+const LOG = [];
+
+async function apply(op, args = {}, { by = 'road', generation = null } = {}) {
+  const spec = TABLE[op];
+  if (!spec) return { ok: false, why: 'OP_UNKNOWN' };
+  for (const a of spec.args) {
+    if (!(a in args)) return { ok: false, why: `OP_MISSING_ARG:${a}` };
+  }
+  LOG.push({ op, by, at: Date.now() });
+  try {
+    const result = await invoke(spec.host, { generation: generation ?? gen(), ...args, by });
+    return { ok: true, result };
+  } catch (e) {
+    /* A refusal from the HOST, surfaced through the seam rather than decided
+       by it. The distinction is the whole of §6.2.1. */
+    return { ok: false, why: String(e) };
+  }
+}
+
+/* ── the published sign — no pixels are ever sampled from anywhere ───────── */
+let MANIFEST = null;
+let SIGN_PRIMITIVES = 0;
+
+function drawSign(manifest) {
+  const c = document.getElementById('sign'), g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  let n = 0;
+  for (const p of manifest.sign.primitives) {
+    if (p.kind === 'rect') {
+      g.fillStyle = '#141a28'; g.strokeStyle = '#2c3549';
+      g.fillRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+      g.strokeRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+    } else if (p.kind === 'line') {
+      g.strokeStyle = '#2c3549'; g.beginPath();
+      g.moveTo(p.x, p.y + .5); g.lineTo(p.x + p.w, p.y + .5); g.stroke();
+    } else if (p.kind === 'text') {
+      g.fillStyle = p.weight ? '#dbe4f2' : '#8fa0bb';
+      g.font = `${p.weight ?? 400} ${p.size}px ui-sans-serif, system-ui, sans-serif`;
+      g.fillText(p.value, p.x, p.y);
+    } else { continue; }
+    n++;
+  }
+  SIGN_PRIMITIVES = n;
+}
+
+const show = (v) => { document.getElementById('status').textContent =
+  typeof v === 'string' ? v : JSON.stringify(v, null, 2); };
+
+async function status() {
+  const r = await apply('status');
+  show(r.ok ? r.result : r);
+  return r;
+}
+
+/* the read rect, in the road window's logical coordinates */
+function readRect() {
+  const f = document.getElementById('readframe').getBoundingClientRect();
+  return { x: f.x, y: f.y, width: f.width, height: f.height };
+}
+
+let CAPTURED_GENERATION = null;
+
+document.getElementById('enter').onclick = async () => {
+  document.getElementById('readframe').classList.add('on');
+  const r = await apply('promote', { rect: readRect() });
+  if (r.ok) {
+    CAPTURED_GENERATION = r.result.pane.generation;   /* for the stale replay */
+    document.getElementById('signwrap').style.display = 'none';
+  } else {
+    document.getElementById('readframe').classList.remove('on');
+  }
+  show(r.ok ? r.result : r);
+};
+
+document.getElementById('leave').onclick = async () => {
+  const r = await apply('demote');
+  document.getElementById('readframe').classList.remove('on');
+  document.getElementById('signwrap').style.display = '';
+  drawSign(MANIFEST);            /* redrawn FROM THE MANIFEST, never restored */
+  show(r.ok ? r.result : r);
+};
+
+document.getElementById('try-place').onclick = async () =>
+  show(await apply('place', { dash: 12, side: 1 }));
+
+document.getElementById('try-intent').onclick = async () =>
+  show(await apply('intent', { payload: 'do a privileged thing' }));
+
+document.getElementById('try-intent-as-cockpit').onclick = async () =>
+  show(await apply('intent', { payload: 'do a privileged thing' }, { by: 'cockpit' }));
+
+document.getElementById('replay-old-gen').onclick = async () =>
+  show(await apply('place', { dash: 12, side: 1 }, { generation: CAPTURED_GENERATION ?? 0 }));
+
+document.getElementById('refresh').onclick = status;
+
+/* the probe. A fact written to state that nothing can read is not an
+   instrument — PAPER_ROADS.md DOCTRINE, learned there and reused here. */
+window.__probe = () => ({
+  roadGeneration: gen(),
+  signSource: 'coordinator',      /* there is no fetch in this file at all */
+  manifestOwner: 'host',
+  signPrimitives: SIGN_PRIMITIVES,
+  signVisible: document.getElementById('signwrap').style.display !== 'none',
+  readPose: document.getElementById('readframe').classList.contains('on'),
+  capturedGeneration: CAPTURED_GENERATION,
+  log: LOG.slice(-8),
+});
+window.__apply = apply;
+
+/* THE SIGN ARRIVES FROM THE COORDINATOR, and this page contains no `fetch`
+   at all — `tools/check-acl.mjs` asserts that statically. §5 says a sign is
+   renderable before any app is live; an app fetching its own sign only looks
+   like that because the file sits in the same bundle. The road asks the HOST,
+   which holds the package. No pane has ever existed at this point. */
+(async () => {
+  const me = await invoke('whoami');
+  ROAD_GENERATION = me.principal.generation;
+  window.__ROAD_GENERATION = ROAD_GENERATION;   /* for the battery's probes */
+  const r = await apply('manifest');
+  if (!r.ok) { show(r); return; }
+  MANIFEST = r.result;
+  drawSign(MANIFEST);
+  await status();
+  document.body.dataset.ready = '1';
+})();
+</script>

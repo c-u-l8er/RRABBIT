@@ -1,0 +1,25 @@
+[package]
+name = "tier1-proof"
+version = "0.1.0"
+edition = "2021"
+description = "The Tier 1 road-shell proof: one pane, one transition, one authority boundary. See ../docs/ROAD_SHELL.md §12."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `unstable` gates `Window::add_child` + `WebviewBuilder` — the
+# multi-webview-per-window primitive this whole proof is about. Same reason
+# `super/cockpit` turns it on, and the only reason it is on here.
+tauri = { version = "2", features = ["unstable"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+# The GTK overlay in `src/layout.rs`. Linux only, and required rather than
+# optional: without it `add_child` gives the child the whole window and
+# collapses the parent to one pixel. ROAD_SHELL.md §10.6.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"

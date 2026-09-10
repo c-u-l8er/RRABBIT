@@ -8,6 +8,12 @@ facts before it could start work.
 Nothing here is optional folklore — each rule below is a trap someone already
 fell into, with the section of the spec that records it.
 
+> **`ROAD_SHELL.md` is a PROPOSED SPECIFICATION; DECISIONS PENDING.** It describes the road
+> hosting web applications as live child webviews inside a Tauri window (Tier 1, ruled
+> 2026-09-10). **Nothing in it is built and seven [TRAVIS] decisions are open (§13)** — it is
+> linked here for discoverability, which does not imply approval. Nothing in this runbook
+> depends on it, and no command below comes from it.
+
 ---
 
 ## 1. The port map
