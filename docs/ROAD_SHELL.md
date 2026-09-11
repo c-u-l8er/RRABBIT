@@ -1146,8 +1146,16 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   recovery; a later session reads it back.
 - **found, a third time** — both of that probe's bugs were assertion WINDOWS. A window that
   extends past a deliberate act counts that act as a violation of the rule it obeys.
-- **not measured** — source unavailability (there is no dev server), and **anything at all on
-  macOS**.
+- **blocked on a ruling, not on effort** — source unavailability. The harness bakes its UI into
+  the binary, so there is no origin to take away; reaching the condition needs a pane on an
+  **external origin**, which is §13 #7. Building it would answer that decision by accident.
+- **not measured** — **anything at all on macOS**.
+- **measured** — every instrument runs from one command now (`tools/verify.mjs`), which writes a
+  dated receipt carrying the commit, the host's capabilities and every count, and **refuses to
+  say "all held" when any stage was skipped**. Its own first version proved why: it probed for
+  tools with `--version`, which `tauri-driver` does not answer, and skipped every stage that
+  mattered while reporting *all stages held · 5 skipped*. **A capability probe that errs toward
+  SKIP is the worst kind — the run goes green having tested nothing.**
 - **stated as a limit** — macOS is an **explicitly unverified target** and its runtime check is a
   **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
   prints, on every run, that it has validated no geometry, no containment and no input — a green

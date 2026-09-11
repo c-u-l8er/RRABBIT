@@ -18,11 +18,23 @@ pane's creation through its settling, it is never visible or interactive outside
 that rectangle. The host holds it contained ~2.7 s, then reveals it in one step.
 
 ```bash
-cargo build --release && cargo test --release \
-  && node tools/check-acl.mjs && node tools/proof-battery.mjs
+node tools/verify.mjs              # every instrument, one command, writes a receipt
+node tools/verify.mjs --sweep      # …and the sabotage sweep (~20 min)
+```
+
+`verify` runs each stage below, writes `receipts/VERIFY-<stamp>.md` with the commit, the host's
+capabilities and every count, and **states what it skipped and why** — a stage the host cannot
+run is a gap, not a pass, and the summary refuses to say "all held" when anything was skipped.
+The pieces still run standalone:
+
+```bash
+cargo build --release && cargo test --release   # the registry invariants, no renderer needed
+node tools/check-acl.mjs           # the static gate: three lists agree, no capability names a window
+node tools/proof-battery.mjs       # the round trip, containment, the authority boundary
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
+node tools/renderer-crash.mjs      # SIGKILL the pane's renderer; read what the host makes of it
 node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
-node tools/renderer-crash.mjs      # SIGKILL the pane's renderer and read what the host makes of it
+node tools/sabotage.sh             # break one law at a time; the battery must go red
 ```
 
 `tools/sabotage.sh` breaks one law at a time and requires the battery to go red. It reports
@@ -135,7 +147,10 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
 ## Not exercised, named rather than implied
 
 - **Source availability** (kill the dev server). There is no dev server here — the UI is baked
-  in — so the condition cannot arise. Unproven.
+  into the binary — so the condition cannot arise. Reaching it needs a pane loaded from an
+  **external origin**, and whether a live pane may do that is **ROAD_SHELL.md §13 #7, an open
+  [TRAVIS] decision**. Building it would answer that ruling by accident, which is the reason
+  this harness is standalone in the first place. **Blocked on a ruling, not on effort.**
 - ~~An actual renderer crash.~~ **MEASURED** — `tools/renderer-crash.mjs`, 12 held · 0 failed.
   `SIGKILL` to the pane's own `WebKitWebProcess`: `unresponsive` and never `gone` while the dead
   pane is left alone, `present` true throughout, the road untouched and still answering,
