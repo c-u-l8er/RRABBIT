@@ -11,7 +11,7 @@
           border-radius:6px; background:
             repeating-linear-gradient(90deg,#11131f 0 60px,#141726 60px 120px); overflow:hidden; }
   #centre { position:absolute; left:0; right:0; top:150px; height:2px; background:#c8912f; }
-  #signwrap { position:absolute; left:40px; top:22px; }
+  #signwrap { position:absolute; left:24px; top:18px; display:flex; gap:10px; }
   #readframe { position:absolute; left:300px; top:20px; width:520px; height:260px;
                border:1px dashed #35507a; border-radius:4px; display:none; }
   #readframe.on { display:block; }
@@ -32,7 +32,7 @@
 
 <div id="road">
   <div id="centre"></div>
-  <div id="signwrap"><canvas id="sign" width="240" height="132"></canvas></div>
+  <div id="signwrap"></div>
   <div id="readframe"></div>
 </div>
 
@@ -44,6 +44,7 @@
   <button id="try-intent-as-cockpit">privileged op, claiming by: 'cockpit'</button>
   <button id="replay-old-gen">replay captured old generation</button>
   <button id="refresh">status</button>
+  <button id="handoff">run the handoff</button>
 </div>
 
 <pre id="status">…</pre>
@@ -62,7 +63,8 @@ const gen = () => ROAD_GENERATION;
    the log — the host never reads it.                                        */
 const TABLE = {
   place:   { args: ['dash', 'side'], host: 'road_place' },
-  promote: { args: ['rect'],         host: 'road_promote' },
+  promote: { args: ['rect', 'package'], host: 'road_promote' },
+  route:   { args: ['kind'],         host: 'road_route' },
   demote:  { args: [],               host: 'road_demote' },
   status:  { args: [],               host: 'road_status' },
   manifest:{ args: [],               host: 'road_manifest' },
@@ -88,14 +90,29 @@ async function apply(op, args = {}, { by = 'road', generation = null } = {}) {
 }
 
 /* ── the published sign — no pixels are ever sampled from anywhere ───────── */
-let MANIFEST = null;
+let CATALOGUE = null;
 let SIGN_PRIMITIVES = 0;
 
-function drawSign(manifest) {
-  const c = document.getElementById('sign'), g = c.getContext('2d');
+/* ONE SIGN PER PACKAGE, all of them drawn with ZERO LIVE PANES. That is the
+   §5 claim in its strongest form: a road is laid out from the coordinator's
+   catalogue, and nothing on it required an app to start. */
+function drawSigns(catalogue) {
+  const wrap = document.getElementById('signwrap');
+  wrap.textContent = '';
+  SIGN_PRIMITIVES = 0;
+  for (const pkg of catalogue.packages) {
+    const c = document.createElement('canvas');
+    c.width = 240; c.height = 132; c.id = `sign-${pkg.id}`;
+    wrap.appendChild(c);
+    SIGN_PRIMITIVES += drawSign(c, pkg.sign);
+  }
+}
+
+function drawSign(c, sign) {
+  const g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
   let n = 0;
-  for (const p of manifest.sign.primitives) {
+  for (const p of sign.primitives) {
     if (p.kind === 'rect') {
       g.fillStyle = '#141a28'; g.strokeStyle = '#2c3549';
       g.fillRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
@@ -110,7 +127,7 @@ function drawSign(manifest) {
     } else { continue; }
     n++;
   }
-  SIGN_PRIMITIVES = n;
+  return n;
 }
 
 const show = (v) => { document.getElementById('status').textContent =
@@ -130,24 +147,64 @@ function readRect() {
 
 let CAPTURED_GENERATION = null;
 
-document.getElementById('enter').onclick = async () => {
+async function promote(pkg, task) {
   document.getElementById('readframe').classList.add('on');
-  const r = await apply('promote', { rect: readRect() });
+  const r = await apply('promote', { rect: readRect(), package: pkg, task: task ?? null });
   if (r.ok) {
-    CAPTURED_GENERATION = r.result.pane.generation;   /* for the stale replay */
+    CAPTURED_GENERATION = r.result.pane.generation;
     document.getElementById('signwrap').style.display = 'none';
   } else {
     document.getElementById('readframe').classList.remove('on');
   }
+  return r;
+}
+
+async function demote() {
+  const r = await apply('demote');
+  document.getElementById('readframe').classList.remove('on');
+  document.getElementById('signwrap').style.display = '';
+  drawSigns(CATALOGUE);
+  return r;
+}
+
+/* THE HANDOFF, UNDER N = 1. Route by declared acceptance, promote, let the app
+   offer, let the COORDINATOR accept, evict, route the accepted result, promote
+   the next. At no point are two panes live: eviction is not an optimisation
+   here, it is the only way the second app can stand. */
+window.__handoff = async (kind, payload) => {
+  const steps = [];
+  const step = (name, r) => { steps.push({ name, ...r }); return r; };
+  const first = step('route', await apply('route', { kind }));
+  if (!first.ok) return { ok: false, steps };
+  step('promote-1', await promote(first.result.package, { kind, payload }));
+  return { ok: true, steps, awaiting: 'the app to offer' };
+};
+
+window.__handoffNext = async () => {
+  const steps = [];
+  const st = await apply('status');
+  const ledger = st.ok ? st.result.ledger : [];
+  const latest = ledger[ledger.length - 1];
+  if (!latest) return { ok: false, why: 'nothing has been ACCEPTED — there is no transfer to route' };
+  steps.push({ name: 'evict', ...(await demote()) });
+  const next = await apply('route', { kind: latest.kind });
+  steps.push({ name: 'route', ...next });
+  if (!next.ok) return { ok: false, steps };
+  steps.push({ name: 'promote-2',
+    ...(await promote(next.result.package, { kind: latest.kind, payload: latest.payload })) });
+  return { ok: true, steps, accepted: latest };
+};
+
+document.getElementById('handoff').onclick = async () =>
+  show(await window.__handoff('document', 'a document that entered the road'));
+
+document.getElementById('enter').onclick = async () => {
+  const r = await promote(CATALOGUE.packages[0].id, null);
   show(r.ok ? r.result : r);
 };
 
 document.getElementById('leave').onclick = async () => {
-  const r = await apply('demote');
-  document.getElementById('readframe').classList.remove('on');
-  document.getElementById('signwrap').style.display = '';
-  drawSign(MANIFEST);            /* redrawn FROM THE MANIFEST, never restored */
-  show(r.ok ? r.result : r);
+  show((await demote()).result ?? 'demoted');
 };
 
 document.getElementById('try-place').onclick = async () =>
@@ -171,6 +228,7 @@ window.__probe = () => ({
   signSource: 'coordinator',      /* there is no fetch in this file at all */
   manifestOwner: 'host',
   signPrimitives: SIGN_PRIMITIVES,
+  packages: CATALOGUE ? CATALOGUE.packages.map((p) => p.id) : [],
   signVisible: document.getElementById('signwrap').style.display !== 'none',
   readPose: document.getElementById('readframe').classList.contains('on'),
   capturedGeneration: CAPTURED_GENERATION,
@@ -189,8 +247,8 @@ window.__apply = apply;
   window.__ROAD_GENERATION = ROAD_GENERATION;   /* for the battery's probes */
   const r = await apply('manifest');
   if (!r.ok) { show(r); return; }
-  MANIFEST = r.result;
-  drawSign(MANIFEST);
+  CATALOGUE = r.result;
+  drawSigns(CATALOGUE);
   await status();
   document.body.dataset.ready = '1';
 })();

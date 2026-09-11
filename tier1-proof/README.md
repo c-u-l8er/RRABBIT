@@ -1,6 +1,7 @@
 # Tier 1 proof
 
-**One road, one pane, one transition.** `../docs/ROAD_SHELL.md` §12.
+**One road, one pane, one transition** — and then **two apps across that boundary**.
+`../docs/ROAD_SHELL.md` §12 and §12.4a.
 
 ```
 published sign  →  read pose  →  LIVE pane  →  leave read pose  →  published sign
@@ -31,13 +32,15 @@ The pieces still run standalone:
 cargo build --release && cargo test --release   # the registry invariants, no renderer needed
 node tools/check-acl.mjs           # the static gate: three lists agree, no capability names a window
 node tools/proof-battery.mjs       # the round trip, containment, the authority boundary
+node tools/handoff-battery.mjs     # two apps, one live pane: routing, acceptance, eviction
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
 node tools/renderer-crash.mjs      # SIGKILL the pane's renderer; read what the host makes of it
 node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
 node tools/sabotage.sh             # break one law at a time; the battery must go red
 ```
 
-`tools/sabotage.sh` breaks one law at a time and requires the battery to go red. It reports
+`tools/sabotage.sh` breaks one law at a time and requires the relevant battery to go red —
+ten of them now, three against the handoff. It reports
 **three** outcomes — falsifier, red-but-not-on-the-named-law, or genuinely green — because the
 first version called a red run green whenever its grep pattern drifted, and it drifted twice.
 
@@ -46,6 +49,27 @@ authority one before any test ran; **nothing static could catch the skipped layo
 the live geometry gate found it, which is the argument for geometry being a gate.
 
 ---
+
+## The second proof — two apps, one live pane
+
+`tools/handoff-battery.mjs`, **21 held · 0 failed**. Two packages in the coordinator's
+catalogue: `notes` (accepts `document`, produces `summary`) and `digest` (accepts `summary`,
+produces **nothing**). Both signs render with **zero** live panes; routing reads the
+declaration and refuses an unroutable kind by name; the ledger stays empty while an app works,
+and the road has *nothing to route* until the coordinator accepts; eviction is how the second
+app stands; `digest` is never granted `offer` and the host refuses it when it tries; each app
+keeps its own state across being evicted for the other; and there is **one live pane at every
+observation**.
+
+`N = 1` was not a blocker here and assuming it would be is worth naming: the budget limits
+*simultaneous* live panes, and two apps, routing, eviction, state and sequential promotion are
+all provable under it.
+
+**A grant derived from a declaration** is the piece worth keeping: `packages::grants_for` reads
+the manifest's `produces` and grants `offer` only where something is produced, with the instance
+capability mirroring it — so what an app may do is a consequence of what it said it was. That
+refusal is defended at three layers, and the sabotage that falsifies it has to dismantle all
+three.
 
 ## What this is not
 

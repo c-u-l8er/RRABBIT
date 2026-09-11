@@ -83,6 +83,12 @@ stage('live battery', 'the round trip, containment, and the authority boundary',
   return fromCounts(run('node', ['tools/proof-battery.mjs']));
 });
 
+stage('handoff battery', 'two apps, one live pane: routing, acceptance, eviction', () => {
+  if (!capability['tauri-driver'] || !capability.WebKitWebDriver || !display)
+    return { status: 'skip', why: 'needs tauri-driver, WebKitWebDriver and a display' };
+  return fromCounts(run('node', ['tools/handoff-battery.mjs']));
+});
+
 stage('geometry contract', 'road 1000x653, pane at the requested rect', () => {
   if (!capability['tauri-driver'] || !display)
     return { status: 'skip', why: 'needs tauri-driver and a display' };
@@ -128,10 +134,23 @@ const dirty = (run('git', ['status', '--porcelain', '--', '.']).stdout || '').tr
 const failed = stages.filter((s) => s.status === 'failed');
 const skipped = stages.filter((s) => s.status === 'skip');
 
+/* A RECEIPT DESCRIBES A REVISION, NOT A WORKING DIRECTORY.
+   The first one was committed, and a receipt that is part of the commit it
+   describes cannot describe it — it was written before the commit existed and
+   permanently records `working tree dirty`. Receipts are build artifacts now:
+   `receipts/` is git-ignored and CI uploads them. What ties a run to code is
+   the COMMIT RECORDED INSIDE, and a run against a dirty tree says so at the
+   top, because it is evidence about no revision at all. */
 const lines = [
   `# tier1-proof — verification receipt`,
   ``,
-  `**${stamp}** · commit \`${commit}\`${dirty ? ' · **working tree dirty**' : ''}`,
+  dirty
+    ? `> **NOT A RECORD OF ANY REVISION.** The working tree was dirty, so this run\n`
+      + `> describes \`${commit}\` plus uncommitted changes. Re-run against a clean tree\n`
+      + `> before citing it.\n`
+    : `Tested revision: \`${(run('git', ['rev-parse', 'HEAD']).stdout || '').trim()}\``,
+  ``,
+  `**${stamp}** · commit \`${commit}\`${dirty ? ' · **working tree dirty**' : ' · clean tree'}`,
   `· ${failed.length ? `**${failed.length} STAGE(S) FAILED**`
       : skipped.length ? `**${skipped.length} STAGE(S) SKIPPED — NOT A FULL VERIFICATION**`
       : 'ALL STAGES HELD'}`,
@@ -165,7 +184,7 @@ const lines = [
 mkdirSync(`${ROOT}/receipts`, { recursive: true });
 const path = `${ROOT}/receipts/VERIFY-${stamp}.md`;
 writeFileSync(path, lines.join('\n'));
-console.log(`\n  receipt: ${path}`);
+console.log(`\n  receipt: ${path}${dirty ? '  \x1b[33m(dirty tree — not a record of any revision)\x1b[0m' : ''}`);
 /* A SKIP IS A GAP, and a headline that reads "all stages held" beside five of
    them is the reassuring lie this file's own header warns about. When anything
    was skipped the summary says so FIRST, and does not use the word that would

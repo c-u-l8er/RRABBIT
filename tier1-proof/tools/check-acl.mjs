@@ -101,8 +101,28 @@ check('no fetch in the road targets a manifest or the package bundle',
 check('the manifest command has no page-side fallback',
   !/apply\('manifest'\)[\s\S]{0,400}?catch[\s\S]{0,200}?fetch\s*\(/.test(road),
   'a failed host manifest falls back to fetching the bundle');
-check('the host is the only reader of the package manifest',
-  /include_str!\("\.\.\/ui\/app\.json"\)/.test(readFileSync(`${ROOT}/src/manifest.rs`, 'utf8')));
+const pkgs = readFileSync(`${ROOT}/src/packages.rs`, 'utf8');
+check('the host is the only reader of the package manifests',
+  /include_str!\("\.\.\/ui\/packages\//.test(pkgs));
+
+/* §5 / §5.1 — the composition laws, checked where they are written. */
+check('the catalogue is readable without starting anything',
+  /pub fn catalogue\(\) -> Result<Vec<Package>, String>/.test(pkgs)
+    && !/Webview|AppHandle|add_child/.test(pkgs),
+  'the package store reaches for a webview');
+check('routing reads DECLARED acceptance, not reported availability',
+  /p\.accepts\.iter\(\)\.any\(\|a\| a == kind\)/.test(pkgs)
+    && !/availab/i.test(pkgs.replace(/^\s*\/\/.*$/gm, '')));
+check('a package that declares no `produces` is never granted `offer`',
+  /if p\.produces\.is_some\(\) \{\s*v\.push\("offer"\);/.test(pkgs));
+check('the ACL permission for offering mirrors the grant',
+  /if pkg\.produces\.is_some\(\) \{[\s\S]{0,120}?allow-pane-offer/.test(main));
+check('an offer is authorized before anything is accepted',
+  (() => { const o = main.slice(main.indexOf('fn pane_offer'));
+           return o.indexOf('authorize') < o.indexOf('coordinator.accept'); })());
+check('acceptance is written by the COORDINATOR, never by the pane',
+  /fn accept\(&self, from: &str, kind: &str, payload: Value\) -> Value/.test(main)
+    && !/fn accept/.test(readFileSync(`${ROOT}/ui/pane.html`, 'utf8')));
 
 /* §6.2 — the pane capability is minted PER INSTANCE at runtime. A static
    capabilities/pane.json cannot be: it names a fixed label, and the whole

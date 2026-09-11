@@ -42,9 +42,11 @@ const BEAT_TIMEOUT: Duration = Duration::from_millis(1_500);
 fn grants_for(surface: &str) -> BTreeSet<String> {
     let v: &[&str] = match surface {
         "main" => &["place", "promote", "demote", "status", "manifest"],
-        // **`pane-<generation>`, and the generation is never reused.** A pane
-        // label is an INSTANCE, not a role: see `Bindings::bind_pane`.
-        s if s.starts_with("pane-") => &["beat", "hello"],
+        // A pane's grants do NOT come from here: they come from its package's
+        // declared manifest, through `bind_pane`. This arm exists so that a
+        // pane label bound by the plain `bind` path — which no production
+        // caller uses — is powerless rather than accidentally privileged.
+        s if s.starts_with("pane-") => &[],
         "cockpit" => &["intent"],
         _ => &[],
     };
@@ -105,11 +107,23 @@ impl Bindings {
     /// command. Replacing a binding **revokes the old generation implicitly**
     /// by advancing to a new one — §6.2 consequence 4.
     pub fn bind(&self, surface: &str) -> Principal {
+        let grants: Vec<&str> = grants_for(surface).iter().map(|s| s.as_str()).collect::<Vec<_>>()
+            .into_iter()
+            .map(|s| Box::leak(s.to_string().into_boxed_str()) as &'static str)
+            .collect();
+        self.bind_with(surface, &grants)
+    }
+
+    /// **Grants are supplied by the host at bind time, from whatever the host
+    /// knows about this surface** — for a pane that is its PACKAGE's declared
+    /// manifest (`packages::grants_for`), so a terminal app that produces
+    /// nothing is never granted `offer`. The request has no say either way.
+    pub fn bind_with(&self, surface: &str, grants: &[&str]) -> Principal {
+        let grants: BTreeSet<String> = grants.iter().map(|s| (*s).to_string()).collect();
         let mut g = self.0.lock().unwrap();
         g.next_id += 1;
         g.next_generation += 1;
         let (id, generation) = (g.next_id, g.next_generation);
-        let grants = grants_for(surface);
         g.by_surface.insert(
             surface.to_string(),
             Binding { id, generation, grants: grants.clone(), last_beat: None, revoked: false },
@@ -164,12 +178,12 @@ impl Bindings {
     /// generation in the label, an old instance resolves its OWN revoked
     /// binding and is refused; there is no argument it could pass to reach
     /// the successor's, because it passes no argument at all.
-    pub fn bind_pane(&self) -> Principal {
+    pub fn bind_pane(&self, grants: &[&str]) -> Principal {
         let label = {
             let g = self.0.lock().unwrap();
             format!("pane-{}", g.next_generation + 1)
         };
-        self.bind(&label)
+        self.bind_with(&label, grants)
     }
 
     /// Every pane instance this registry has ever bound and not revoked.
@@ -345,12 +359,12 @@ mod tests {
     #[test]
     fn an_old_instance_cannot_learn_its_successors_identity() {
         let b = Bindings::default();
-        let first = b.bind_pane();
+        let first = b.bind_pane(&["beat", "hello"]);
         assert_eq!(first.surface, "pane-1");
 
         // The pane is replaced: revoked, then a new instance bound.
         b.revoke(&first.surface);
-        let second = b.bind_pane();
+        let second = b.bind_pane(&["beat", "hello"]);
         assert_eq!(second.surface, "pane-2", "a pane label is never reused");
         assert!(second.generation > first.generation);
 
@@ -413,18 +427,24 @@ mod tests {
         let road = b.bind("main");
         assert!(road.grants.contains(&"place".to_string()));
         assert!(!road.grants.contains(&"intent".to_string()), "the road never holds intent");
-        let pane = b.bind_pane();
+        let pane = b.bind_pane(&["beat", "hello"]);
         assert!(!pane.grants.contains(&"place".to_string()), "a pane cannot place itself");
+        // A terminal package declares no `produces`, so it is never granted
+        // `offer` — the grant is derived from the declaration, not the role.
+        let terminal = b.bind_pane(&["beat", "hello"]);
+        assert!(!terminal.grants.contains(&"offer".to_string()));
+        let producer = b.bind_pane(&["beat", "hello", "offer"]);
+        assert!(producer.grants.contains(&"offer".to_string()));
     }
 
     #[test]
     fn live_panes_sees_exactly_the_unrevoked_instances() {
         let b = Bindings::default();
-        let a = b.bind_pane();
+        let a = b.bind_pane(&["beat"]);
         assert_eq!(b.live_panes(), vec![a.surface.clone()]);
         b.revoke(&a.surface);
         assert!(b.live_panes().is_empty());
-        let c = b.bind_pane();
+        let c = b.bind_pane(&["beat"]);
         assert_eq!(b.live_panes(), vec![c.surface]);
     }
 }

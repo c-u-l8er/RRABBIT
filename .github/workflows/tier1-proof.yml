@@ -42,10 +42,22 @@ jobs:
         run: node tools/check-acl.mjs
       - name: the live battery
         run: xvfb-run -a node tools/proof-battery.mjs
+      - name: the handoff battery
+        run: xvfb-run -a node tools/handoff-battery.mjs
       - name: the geometry contract
         run: xvfb-run -a node tools/geometry-probe.mjs
       - name: a real renderer death
         run: xvfb-run -a node tools/renderer-crash.mjs
+      - name: the consolidated receipt
+        run: xvfb-run -a node tools/verify.mjs
+      # Receipts are build artifacts, not repository content: one committed
+      # alongside the revision it describes was written before that revision
+      # existed and permanently recorded a dirty tree.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tier1-proof-receipts
+          path: tier1-proof/receipts/
 
   macos-compile-only:
     name: macOS — COMPILE AND UNIT TESTS ONLY (proves nothing about geometry)

@@ -26,7 +26,7 @@
 //! effect, on a principal the page cannot supply.
 
 mod layout;
-mod manifest;
+mod packages;
 mod principal;
 
 use principal::Bindings;
@@ -45,10 +45,53 @@ use tauri::{Manager, State};
 /// carrying the successor's generation. `principal.rs`'s
 /// `a_reused_label_would_hand_over_the_successors_generation` demonstrates
 /// exactly that, on a label that is still reusable.
-const PANE_PAGE: &str = "pane.html";
-
 /// How long the pane may stay contained before the read pose is abandoned.
 const POSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// **What the coordinator holds between apps.**
+///
+/// The task in flight, which package is live, and the LEDGER — the record of
+/// what the coordinator has *accepted*. ROAD_SHELL.md §5.1: an app's own
+/// report that it produced something is not a transfer; only the
+/// coordinator's acceptance is, and only the ledger may be read as one.
+#[derive(Default)]
+pub struct Coordinator(std::sync::Mutex<CoordState>);
+
+#[derive(Default)]
+struct CoordState {
+    task: Option<Value>,
+    live_package: Option<String>,
+    ledger: Vec<Value>,
+}
+
+impl Coordinator {
+    fn begin(&self, package: &str, task: Option<Value>) {
+        let mut g = self.0.lock().unwrap();
+        g.live_package = Some(package.to_string());
+        g.task = task;
+    }
+    fn end(&self) {
+        let mut g = self.0.lock().unwrap();
+        g.live_package = None;
+        g.task = None;
+    }
+    fn live_package(&self) -> Option<String> {
+        self.0.lock().unwrap().live_package.clone()
+    }
+    fn task(&self) -> Option<Value> {
+        self.0.lock().unwrap().task.clone()
+    }
+    fn accept(&self, from: &str, kind: &str, payload: Value) -> Value {
+        let mut g = self.0.lock().unwrap();
+        let seq = g.ledger.len() as u64 + 1;
+        let record = json!({ "seq": seq, "from": from, "kind": kind, "payload": payload });
+        g.ledger.push(record.clone());
+        record
+    }
+    fn ledger(&self) -> Vec<Value> {
+        self.0.lock().unwrap().ledger.clone()
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub struct Rect {
@@ -107,8 +150,11 @@ async fn road_promote(
     webview: tauri::Webview,
     app: tauri::AppHandle,
     bindings: State<'_, Bindings>,
+    coordinator: State<'_, Coordinator>,
     generation: u64,
     rect: Rect,
+    package: String,
+    task: Option<Value>,
 ) -> Result<Value, String> {
     let caller = match bindings.authorize(&webview, generation, "promote") {
         Err(r) => return refuse(r),
@@ -142,7 +188,11 @@ async fn road_promote(
     // binding is a surface with no principal, and for the width of that gap
     // it could call a command that would find no binding and refuse for the
     // wrong reason.
-    let pane = bindings.bind_pane();
+    // The package is named from the catalogue the HOST holds; an id that is
+    // not in it is refused. What the page cannot name is the LABEL — that is
+    // still derived, and `tools/check-acl.mjs` asserts no command takes one.
+    let pkg = packages::get(&package)?;
+    let pane = bindings.bind_pane(&packages::grants_for(&pkg));
     let label = pane.surface.clone();
 
     // **The capability is minted for THIS INSTANCE.** A static
@@ -151,19 +201,23 @@ async fn road_promote(
     // tauri's `dynamic-acl` (default-on); the grant is the same three
     // permissions the static file held, aimed at one instance that will never
     // exist again.
-    app.add_capability(
-        tauri::ipc::CapabilityBuilder::new(format!("pane-instance-{}", pane.generation))
-            .webview(label.clone())
-            .permission("allow-pane-beat")
-            .permission("allow-pane-hello")
-            .permission("allow-whoami"),
-    )
+    let mut cap = tauri::ipc::CapabilityBuilder::new(format!("pane-instance-{}", pane.generation))
+        .webview(label.clone())
+        .permission("allow-pane-beat")
+        .permission("allow-pane-hello")
+        .permission("allow-whoami");
+    // The ACL layer mirrors the grant table rather than being generous: a
+    // package that declares no `produces` cannot even reach `pane_offer`.
+    if pkg.produces.is_some() {
+        cap = cap.permission("allow-pane-offer");
+    }
+    app.add_capability(cap)
     .map_err(|e| {
         bindings.revoke(&label);
         format!("PANE_CAPABILITY_FAILED: {e}")
     })?;
 
-    let url = format!("{PANE_PAGE}?gen={}", pane.generation);
+    let url = format!("{}?gen={}&pkg={}", pkg.entry, pane.generation, pkg.id);
     let child = window
         .add_child(
             tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::App(url.into()))
@@ -225,8 +279,10 @@ async fn road_promote(
         return Err(abandon(format!("READ_POSE_REVEAL_FAILED: {e}")));
     }
 
+    coordinator.begin(&pkg.id, task);
     Ok(json!({
         "pose_ms": pose_ms,
+        "package": pkg.id,
         "tier": "live", "pane": pane, "by_principal": caller,
         // What GTK ACTUALLY allocated, not what was asked for. Two rounds of
         // this defect were spent inferring the allocation from the page's
@@ -244,6 +300,7 @@ fn road_demote(
     webview: tauri::Webview,
     app: tauri::AppHandle,
     bindings: State<Bindings>,
+    coordinator: State<Coordinator>,
     generation: u64,
 ) -> Result<Value, String> {
     let caller = match bindings.authorize(&webview, generation, "demote") {
@@ -264,6 +321,10 @@ fn road_demote(
             closed.push(json!({ "label": label, "closed": false, "already_gone": true }));
         }
     }
+    // EVICTION ends the coordinator's hold on the task as well as the pane's
+    // binding. A task that outlived the app it was handed to would be a
+    // handoff nobody is doing.
+    coordinator.end();
     Ok(json!({ "tier": "sign", "closed": closed, "by_principal": caller }))
 }
 
@@ -272,6 +333,7 @@ fn road_status(
     webview: tauri::Webview,
     app: tauri::AppHandle,
     bindings: State<Bindings>,
+    coordinator: State<Coordinator>,
     generation: u64,
 ) -> Result<Value, String> {
     if let Err(r) = bindings.authorize(&webview, generation, "status") {
@@ -294,6 +356,12 @@ fn road_status(
         // synchronous and GTK had not re-allocated yet. An instrument that
         // always answers before the thing it measures is not an instrument.
         "pane_label": pane_label,
+        "live_package": coordinator.live_package(),
+        "task": coordinator.task(),
+        // THE ONLY THING THAT SAYS A HANDOFF HAPPENED. §5.1 — an app's report
+        // that it produced something is not a transfer; the coordinator's
+        // acceptance is, and it lives here.
+        "ledger": coordinator.ledger(),
         "read_pose": pane_label2.and_then(|l| app.get_webview(&l)).map(|w| layout::allocation(&w)),
         "last_refusal": bindings.last_refusal(),
         "refusal_count": bindings.refusal_count(),
@@ -339,10 +407,35 @@ fn road_manifest(
     bindings: State<Bindings>,
     generation: u64,
 ) -> Result<Value, String> {
-    match bindings.authorize(&webview, generation, "manifest") {
-        Err(r) => refuse(r),
-        Ok(_) => manifest::published(),
+    if let Err(r) = bindings.authorize(&webview, generation, "manifest") {
+        return refuse(r);
     }
+    // THE WHOLE CATALOGUE, and nothing is started to produce it. §5: a road
+    // can be laid out and sealed before any app is live, which is only true
+    // if every sign on it is readable with zero panes in existence.
+    let c = packages::catalogue()?;
+    Ok(json!({
+        "packages": c.iter().map(|p| json!({
+            "id": p.id, "accepts": p.accepts, "produces": p.produces, "sign": p.sign,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// **Routing is the coordinator's and reads DECLARED acceptance** — not an
+/// app's reported availability, which has an expiry (§5.1), and not the app's
+/// own opinion. A kind nothing accepts is refused by name.
+#[tauri::command]
+fn road_route(
+    webview: tauri::Webview,
+    bindings: State<Bindings>,
+    generation: u64,
+    kind: String,
+) -> Result<Value, String> {
+    if let Err(r) = bindings.authorize(&webview, generation, "manifest") {
+        return refuse(r);
+    }
+    let p = packages::route(&kind)?;
+    Ok(json!({ "kind": kind, "package": p.id, "produces": p.produces }))
 }
 
 /// **The bootstrap. The page asks who it is; it is never told in advance.**
@@ -387,33 +480,76 @@ fn pane_beat(
     }
 }
 
+/// **The pane offers a result; the COORDINATOR decides it was accepted.**
+///
+/// The pane's return value is an acceptance RECORD, not its own claim: what a
+/// road may render as "transferred" is the ledger entry, and the ledger is
+/// written here. §5.1, and §10.9 — an op that reports success at every layer
+/// and produces nothing is the failure shape that takes longest to find.
+///
+/// The offered kind is checked against the package's DECLARED `produces`, so
+/// an app cannot widen what it hands on past what its manifest says. And a
+/// terminal package never reaches this command at all: it holds no `offer`
+/// grant and its instance capability does not carry the permission.
+#[tauri::command]
+fn pane_offer(
+    webview: tauri::Webview,
+    bindings: State<Bindings>,
+    coordinator: State<Coordinator>,
+    generation: u64,
+    kind: String,
+    payload: Value,
+) -> Result<Value, String> {
+    if let Err(r) = bindings.authorize(&webview, generation, "offer") {
+        return refuse(r);
+    }
+    let id = coordinator.live_package().ok_or("NO_LIVE_PACKAGE: nothing is standing here")?;
+    let pkg = packages::get(&id)?;
+    match pkg.produces.as_deref() {
+        Some(k) if k == kind => Ok(json!({ "accepted": coordinator.accept(&id, &kind, payload) })),
+        Some(k) => Err(format!("OFFER_NOT_DECLARED: {id:?} produces {k:?}, offered {kind:?}")),
+        None => Err(format!("OFFER_NOT_DECLARED: {id:?} declares no produces")),
+    }
+}
+
 /// The pane asking the host who it is. It cannot assert an answer — the host
 /// derives it — which is what makes the readout in the pane trustworthy.
 #[tauri::command]
 fn pane_hello(
     webview: tauri::Webview,
     bindings: State<Bindings>,
+    coordinator: State<Coordinator>,
     generation: u64,
 ) -> Result<Value, String> {
     match bindings.authorize(&webview, generation, "hello") {
         Err(r) => refuse(r),
-        Ok(p) => Ok(json!({ "principal": p })),
+        // The task is HANDED to the pane by the host, not fetched by it: the
+        // pane never names a task and cannot ask for another app's.
+        Ok(p) => {
+            let id = coordinator.live_package();
+            let produces = id.as_deref().and_then(|i| packages::get(i).ok()).and_then(|k| k.produces);
+            Ok(json!({ "principal": p, "package": id, "produces": produces,
+                       "task": coordinator.task() }))
+        }
     }
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(Bindings::default())
+        .manage(Coordinator::default())
         .invoke_handler(tauri::generate_handler![
             road_place,
             road_promote,
             road_demote,
             road_status,
             road_manifest,
+            road_route,
             whoami,
             privileged_intent,
             pane_beat,
             pane_hello,
+            pane_offer,
         ])
         .setup(|app| {
             // The road's binding is minted by the HOST at startup. There is no

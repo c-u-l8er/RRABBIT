@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the pane_hello command without any pre-configured scope."
         },
         {
+          "description": "Enables the pane_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pane-offer",
+          "markdownDescription": "Enables the pane_offer command without any pre-configured scope."
+        },
+        {
           "description": "Enables the privileged_intent command without any pre-configured scope.",
           "type": "string",
           "const": "allow-privileged-intent",
@@ -219,6 +225,12 @@
           "markdownDescription": "Enables the road_promote command without any pre-configured scope."
         },
         {
+          "description": "Enables the road_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-route",
+          "markdownDescription": "Enables the road_route command without any pre-configured scope."
+        },
+        {
           "description": "Enables the road_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-road-status",
@@ -241,6 +253,12 @@
           "type": "string",
           "const": "deny-pane-hello",
           "markdownDescription": "Denies the pane_hello command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pane_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pane-offer",
+          "markdownDescription": "Denies the pane_offer command without any pre-configured scope."
         },
         {
           "description": "Denies the privileged_intent command without any pre-configured scope.",
@@ -271,6 +289,12 @@
           "type": "string",
           "const": "deny-road-promote",
           "markdownDescription": "Denies the road_promote command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-route",
+          "markdownDescription": "Denies the road_route command without any pre-configured scope."
         },
         {
           "description": "Denies the road_status command without any pre-configured scope.",

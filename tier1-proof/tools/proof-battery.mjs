@@ -155,7 +155,8 @@ async function run() {
   let st = await status();
   const roadBefore = await geom();
   check('the sign is drawn from the COORDINATOR\'s manifest — no pane has ever existed',
-    p.signSource === 'coordinator' && p.manifestOwner === 'host' && p.signPrimitives === 6,
+    p.signSource === 'coordinator' && p.manifestOwner === 'host'
+      && p.packages.length >= 1 && p.signPrimitives === p.packages.length * 6,
     JSON.stringify(p));
   check('the sign is visible and no pane webview exists',
     p.signVisible === true && S.pane === null && st.present === false,
@@ -198,7 +199,8 @@ async function run() {
      its rectangle. `visible` folds in opacity, and `sensitive` is input.   */
   const samples = [];
   await script(`window.__promoting = window.__apply('promote',
-    { rect: (() => { const f = document.getElementById('readframe');
+    { package: window.__probe().packages[0], task: null,
+      rect: (() => { const f = document.getElementById('readframe');
                      f.classList.add('on');
                      const r = f.getBoundingClientRect();
                      return { x: r.x, y: r.y, width: r.width, height: r.height }; })() })
@@ -206,6 +208,7 @@ async function run() {
   const wantRect = await script("const f = document.getElementById('readframe').getBoundingClientRect();\n"
     + 'return { w: Math.round(f.width), h: Math.round(f.height) };');
   const deadline = Date.now() + 15_000;
+  const startedSampling = Date.now();
   while (Date.now() < deadline) {
     const st0 = await status();
     if (st0 && st0.read_pose) {
@@ -216,12 +219,35 @@ async function run() {
         h: st0.read_pose.alloc && st0.read_pose.alloc.h,
       });
     }
-    if (await script('return window.__promoted !== undefined;')) break;
+    /* Do not stop the moment `promote` resolves: keep going until something
+       was actually seen, or a grace period says nothing ever will be. A loop
+       that exits before its first observation hands the check below an empty
+       list, and an empty list satisfies "none escaped". */
+    const done = await script('return window.__promoted !== undefined;');
+    if (done && (samples.length > 0 || Date.now() - startedSampling > 1500)) break;
   }
   const promoted = await script('return window.__promoted;');
+  const contained = samples.filter((x) => !x.visible && !x.sensitive);
   const escaped = samples.filter((x) =>
     (x.visible || x.sensitive) && !(near(x.w, wantRect.w) && near(x.h, wantRect.h)));
-  check(`the pane is never visible or interactive outside its rectangle (${samples.length} samples)`,
+
+  /* ANTI-VACUITY, AND IT IS NOT CEREMONY. `escaped.length === 0` is TRUE of an
+     empty list, so the containment check passed over a build that revealed the
+     pane immediately — sabotage S7 — simply because the run ended before
+     anything was sampled. A containment assertion that can pass having
+     observed nothing is not a containment assertion. This one requires that
+     the transition was seen, and seen CONTAINED at least once. */
+  check(`the transition was actually observed (${samples.length} samples, `
+    + `${contained.length} with the pane contained)`,
+    /* The threshold is "at least one sample, at least one of them CONTAINED",
+       not an arbitrary count. A healthy run yields 2 samples here — each one
+       costs two WebDriver round trips against a ~2.7 s containment window —
+       and 3 was a number I picked rather than measured. What must be true is
+       that the pane was SEEN held back, which no build that reveals early can
+       satisfy. */
+    samples.length >= 1 && contained.length >= 1,
+    `promote said ${JSON.stringify(promoted).slice(0, 160)}`);
+  check('the pane is never visible or interactive outside its rectangle',
     promoted && promoted.ok === true && escaped.length === 0,
     escaped.length ? `escaped in ${escaped.length}: ${JSON.stringify(escaped.slice(0, 3))}`
                    : `promote said ${JSON.stringify(promoted).slice(0, 200)}`);
@@ -243,7 +269,8 @@ async function run() {
     S.seen.filter((v) => v.window === 'main').length === S.count && S.count === 2,
     JSON.stringify(S.seen));
   const second = await script(
-    `return window.__apply('promote', { rect: { x: 300, y: 20, width: 520, height: 260 } }).then(r => r);`);
+    `return window.__apply('promote', { package: window.__probe().packages[0], task: null,
+       rect: { x: 300, y: 20, width: 520, height: 260 } }).then(r => r);`);
   check('a second promote is refused — the live budget is N = 1 (§4.1)',
     second.ok === false && /TIER_ALREADY_LIVE/.test(second.why), second.why);
 
@@ -341,7 +368,8 @@ async function run() {
     S.pane === null && st.present === false && st.liveness === 'gone',
     JSON.stringify({ pane: S.pane, present: st.present, liveness: st.liveness }));
   check('the sign is back, drawn from the manifest — not a retained last frame',
-    p.signVisible === true && p.signSource === 'coordinator' && p.signPrimitives === 6,
+    p.signVisible === true && p.signSource === 'coordinator'
+      && p.signPrimitives === p.packages.length * 6,
     JSON.stringify(p));
 
   /* ── 5 + 7 ─ re-promote: state survives, old generation is dead ─────── */

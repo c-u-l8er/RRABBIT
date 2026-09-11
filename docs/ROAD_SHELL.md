@@ -224,6 +224,12 @@ yesterday's capacity.
 
 Rules that follow:
 
+**Measured 2026-09-11 (§12.4a):** the split holds under a real handoff. The ledger is empty
+while an app is working, the road refuses to route *"nothing has been ACCEPTED — there is no
+transfer to route"*, and what the app receives back from `pane_offer` is the coordinator's
+record rather than its own success. Sabotage S10 — let an offer report success without the
+ledger being written — reddens it.
+
 - **Reported availability carries a freshness stamp and is stale by default.** A sign with no
   fresh report shows the declared capability and says the availability is unknown — it does not
   show the last number it heard. *Unknown* and *zero* are different signs.
@@ -932,6 +938,43 @@ open until it is made deliberately.
 3. The same nine assertions on a Mac, plus §11's six-row measurement table, **before** anything
    is built on top of the Mac result.
 
+### 12.4a The second proof — TWO APPS, ONE LIVE PANE, built 2026-09-11
+
+**`tier1-proof/tools/handoff-battery.mjs` — 21 held · 0 failed.**
+
+The first proof answered whether a pane can stand on a road at all. This one asks whether the
+rules **compose across an app boundary**, which is where they are first able to contradict each
+other. Two packages in the coordinator's catalogue: `notes` (accepts `document`, produces
+`summary`) and `digest` (accepts `summary`, produces **nothing**).
+
+**`N = 1` was not a blocker for this, and assuming it would have been is worth naming.** The
+budget limits *simultaneous* live panes; two apps, routing, eviction, state and sequential
+promotion are all provable under it. Only simultaneous residency needs §13 #6. Likewise §5's
+claim is strongest with **zero** live panes, not one.
+
+What it establishes:
+
+| | |
+|---|---|
+| **both signs render with zero live panes** | the catalogue is the coordinator's; nothing started to draw a road |
+| **routing reads the DECLARATION** | `document`→notes, `summary`→digest, and an unroutable kind is refused `NO_ROUTE` **by name**, not dropped |
+| **an app's report is not a transfer** | the ledger is empty until the coordinator accepts, and the road has *nothing to route* until then |
+| **acceptance is a RECORD** | what the app gets back is the coordinator's ledger entry, not its own claim |
+| **eviction is how the second app stands** | evict → route the accepted kind → promote the next, a genuinely different instance |
+| **authority does not cross the boundary** | `digest` declares no `produces`, is never granted `offer`, and is refused by the host when it tries |
+| **state is each app's own** | `notes` keeps its state across being evicted *for another app*, and the two cannot read each other's |
+| **one live pane at every observation** | 5 observations across the run, never two |
+
+**A grant derived from a declaration is the part worth keeping.** `packages::grants_for` reads
+the manifest's `produces` and grants `offer` only where something is produced, and the instance
+capability mirrors it. So "what this app may do" is a consequence of what it *said it was*,
+checked by the host — not a role handed out by the shell.
+
+**The terminal refusal is defended at three layers, and the sabotage that falsifies it has to
+dismantle all three** — the grant table, the instance capability, and the declaration check in
+`pane_offer`. A sabotage needing three edits is evidence the layers are not one layer written
+three times.
+
 ### 12.5 What would falsify the whole approach
 
 **A consumer that needs a special case at the seam.** That is `OP_VOCABULARY_DRAFT.md` §9's
@@ -1156,6 +1199,22 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   tools with `--version`, which `tauri-driver` does not answer, and skipped every stage that
   mattered while reporting *all stages held · 5 skipped*. **A capability probe that errs toward
   SKIP is the worst kind — the run goes green having tested nothing.**
+- **measured** — the rules **compose across an app boundary**: `handoff-battery`, 21 held · 0
+  failed. Two packages, routing by declaration, an unroutable kind refused by name, acceptance
+  as the only transfer, eviction as the mechanism rather than an optimisation, a terminal
+  package refused when it tries to hand work on, each app's state surviving its own eviction,
+  and **one live pane at every observation**.
+- **corrected** — `N > 1` is not needed for a second app. The budget limits *simultaneous* live
+  panes; two apps, routing, eviction, state and sequential promotion are all provable under
+  `N = 1`, and §5's zero-pane claim is stronger still. Only simultaneous residency needs §13 #6.
+- **found** — a grant derived from a package's **declaration** (`produces` → `offer`) makes
+  authority a consequence of what an app said it was, not a role the shell hands out. Its
+  refusal is defended at three layers and the sabotage that falsifies it must dismantle all
+  three.
+- **corrected** — receipts are **build artifacts, not repository content**. One committed
+  alongside the revision it describes was written before that revision existed and permanently
+  recorded `working tree dirty`; a receipt now names the tested revision and says loudly when
+  the tree was not clean.
 - **stated as a limit** — macOS is an **explicitly unverified target** and its runtime check is a
   **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
   prints, on every run, that it has validated no geometry, no containment and no input — a green

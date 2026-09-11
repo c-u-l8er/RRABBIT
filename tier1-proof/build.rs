@@ -19,10 +19,12 @@ fn main() {
             "road_demote",
             "road_status",
             "road_manifest",
+            "road_route",
             "whoami",
             "privileged_intent",
             "pane_beat",
             "pane_hello",
+            "pane_offer",
         ]),
     ))
     .expect("failed to run tauri-build");

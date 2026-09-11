@@ -10,22 +10,27 @@
 # §10.7): the artifact is not the source.
 set -u
 cd "$(dirname "$0")/.."
+# **EVERY SOURCE FILE, not the ones the sweep happened to touch when this was
+# written.** S8 and S9 edit `packages.rs`, which was not in the backup list, so
+# two sabotages survived the sweep and sat in the tree afterwards — the static
+# gate caught them, nothing else would have. A restore list that has to be kept
+# in step with the sabotages will fall out of step; copy the directory.
 BK=$(mktemp -d)
-cp src/principal.rs src/main.rs "$BK/"
+cp -a src "$BK/src"
 restore() {
-  cp "$BK/principal.rs" "$BK/main.rs" src/
+  cp -a "$BK/src/." src/
   cargo build --release >/dev/null 2>&1
 }
 trap restore EXIT
 
-run() {  # $1 = label, $2 = text that MUST appear in a FAILED line
+run() {  # $1 = label, $2 = text that MUST appear in a FAILED line, $3 = battery (default proof)
   if ! cargo build --release >/dev/null 2>&1; then
     echo "  DOES NOT COMPILE  $1"
     echo "      (a sabotage the type system refuses is hardening, not coverage —"
     echo "       the law still needs a falsifier that CAN be written)"
     return
   fi
-  out=$(timeout 300 node tools/proof-battery.mjs 2>&1)
+  out=$(timeout 300 node "tools/${3:-proof}-battery.mjs" 2>&1)
   # THREE OUTCOMES, NOT TWO. The first version printed "the battery stayed
   # green over a broken law" whenever its grep missed — and it missed twice,
   # on sabotages that HAD reddened the battery, just not on the line the
@@ -139,6 +144,64 @@ new = '        if true || ((got.0 - want.0).abs() <= 2 && (got.1 - want.1).abs()
 assert old in s, 'S7 anchor missing'
 open('src/main.rs', 'w').write(s.replace(old, new, 1))
 PYX
-run "S7 revealed before the pose" "never visible or interactive outside its rectangle"
+run "S7 revealed before the pose" "transition was actually observed"
+restore
+echo
+
+# ── the handoff laws (§5 / §5.1), falsified against handoff-battery ────────
+
+# S8 — let a terminal package hand work on. THIS TAKES THREE EDITS, and that
+# is the finding rather than an inconvenience: the refusal is defended at the
+# grant table, at the instance capability, and at the declaration check in
+# `pane_offer`. Removing any one leaves the other two refusing. A sabotage
+# that has to dismantle three layers is evidence the layers are not the same
+# layer written three times.
+echo
+echo "  S8 · let a package that produces nothing offer anyway (breaks §5.1, 3 layers)"
+python3 - <<'PYX'
+g = open('src/packages.rs').read()
+old = 'if p.produces.is_some() {\n        v.push("offer");\n    }'
+assert old in g, 'S8 grant anchor missing'
+open('src/packages.rs', 'w').write(g.replace(old, 'v.push("offer");', 1))
+m = open('src/main.rs').read()
+old2 = '    if pkg.produces.is_some() {\n        cap = cap.permission("allow-pane-offer");\n    }'
+assert old2 in m, 'S8 acl anchor missing'
+m = m.replace(old2, '    cap = cap.permission("allow-pane-offer");', 1)
+old3 = '        None => Err(format!("OFFER_NOT_DECLARED: {id:?} declares no produces")),'
+assert old3 in m, 'S8 declaration anchor missing'
+m = m.replace(old3, '        None => Ok(json!({ "accepted": coordinator.accept(&id, &kind, payload) })),', 1)
+open('src/main.rs', 'w').write(m)
+PYX
+run "S8 terminal package may offer" "REFUSED when it offers" handoff
+restore
+
+# S9 — route by position instead of by declaration.
+echo
+echo "  S9 · route to the first package regardless of what it accepts (breaks §5)"
+python3 - <<'PYX'
+s = open('src/packages.rs').read()
+old = '.find(|p| p.accepts.iter().any(|a| a == kind))'
+assert old in s, 'S9 anchor missing'
+open('src/packages.rs', 'w').write(s.replace(old, '.find(|_p| true)', 1))
+PYX
+run "S9 routing ignores the declaration" "refused BY NAME" handoff
+restore
+
+# S10 — let an offer report success without the coordinator recording it. The
+# §5.1 law in its purest form: an app's report is not a transfer.
+echo
+echo "  S10 · accept without writing the ledger (breaks §5.1: a report is not a transfer)"
+python3 - <<'PYX'
+s = open('src/main.rs').read()
+old = """        let seq = g.ledger.len() as u64 + 1;
+        let record = json!({ "seq": seq, "from": from, "kind": kind, "payload": payload });
+        g.ledger.push(record.clone());
+        record"""
+new = """        let seq = g.ledger.len() as u64 + 1;
+        json!({ "seq": seq, "from": from, "kind": kind, "payload": payload })"""
+assert old in s, 'S10 anchor missing'
+open('src/main.rs', 'w').write(s.replace(old, new, 1))
+PYX
+run "S10 acceptance is not recorded" "ledger records it" handoff
 restore
 echo

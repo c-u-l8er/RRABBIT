@@ -10,6 +10,7 @@
     "allow-road-demote",
     "allow-road-status",
     "allow-road-manifest",
+    "allow-road-route",
     "allow-privileged-intent",
     "allow-whoami"
   ]
