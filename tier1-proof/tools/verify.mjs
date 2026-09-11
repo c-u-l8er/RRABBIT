@@ -190,8 +190,13 @@ console.log(`\n  receipt: ${path}${dirty ? '  \x1b[33m(dirty tree — not a reco
    was skipped the summary says so FIRST, and does not use the word that would
    let a reader stop reading there. */
 const heldN = stages.filter((x) => x.status === 'held').length;
-console.log('\n  ' + (failed.length ? `\x1b[31m${failed.length} FAILED\x1b[0m · ` : '')
-  + (skipped.length
+/* "1 FAILED · all 8 stages held" — the summary contradicted itself, because a
+   failure and a skip were treated as independent and only the skip branch
+   could displace the word "all". A failure displaces it too. */
+console.log('\n  ' + (failed.length
+    ? `\x1b[31m${failed.length} FAILED\x1b[0m · ${heldN} held`
+      + (skipped.length ? ` · ${skipped.length} skipped` : '')
+    : skipped.length
       ? `\x1b[33m${heldN} held · ${skipped.length} SKIPPED — this is not a full verification\x1b[0m`
       : `\x1b[1mall ${heldN} stages held\x1b[0m`) + '\n');
 process.exit(failed.length ? 1 : 0);

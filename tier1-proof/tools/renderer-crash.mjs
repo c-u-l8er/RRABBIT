@@ -126,7 +126,8 @@ try {
       if (n === 17) {
         const f = document.getElementById('readframe'); f.classList.add('on');
         const b = f.getBoundingClientRect();
-        window.__apply('promote', { rect: { x: b.x, y: b.y, width: b.width, height: b.height } })
+        window.__apply('promote', { package: window.__probe().packages[0], task: null,
+                                    rect: { x: b.x, y: b.y, width: b.width, height: b.height } })
           .then(r => push({ event: 'promote', ok: r.ok, why: r.why,
                             label: r.ok ? r.result.pane.surface : null }));
         return;
