@@ -637,6 +637,42 @@ real values. The only thing that never happened was the layout. `async fn` is th
 **Any host-side "wait until the platform has done something" must be async.** That is a rule
 about the road shell, not about this harness.
 
+#### 10.6.5 The pane's on-screen POSITION, measured from outside the process
+
+Size was asserted from the start and position was not, because neither instrument can answer it:
+the battery reads the pane's own `innerWidth`, which says nothing about where the pane sits, and
+the host's allocation reports x/y as `0,0` because a WebKitWebView has its own GdkWindow and its
+allocation is relative to that. So the question was left open and named as open.
+
+`tier1-proof/tools/pose-screenshot.mjs` answers it in pixels:
+
+```
+requested   522 × 262 at (315, 93) CSS   ·   device pixel ratio 2
+expected    1044 × 524 at (630, 186) device px
+measured    1044x524+630+186
+delta       x 0 · y 0 · w 0 · h 0
+```
+
+**A difference of two captures is not the measurement, and trying it first is what showed why.**
+Clicking `read` also hides the sign and rewrites the status block, so the changed region came
+back `1915x1386` — essentially the whole window. **The pane has to identify itself:** it paints
+one colour that appears nowhere else on the road, over its whole viewport, and the bounding box
+of that colour in a capture of the *window* is the rectangle, independent of what either page
+chose to draw. `docs/tier1-read-pose-probe.png` is that frame;
+`docs/tier1-read-pose.png` is what a person sees. In both, the road's amber centre line resumes
+on either side of the pane — an independent check on the left and right edges.
+
+**Two capture-path caveats, because the picture is only as good as how it was taken.** This box
+is GNOME on Wayland: there is no `grim` (wlroots only) and GNOME's own capture is a portal that
+wants a human, so the app is launched with `GDK_BACKEND=x11` and captured through XWayland. The
+`GtkOverlay` layout being measured is backend-independent — it is the same `get-child-position`
+either way — but **the capture path is not the shipping one**. And `import -window root` fails
+outright here ("missing an image filename"), as does the `-window <title>` form; the window id
+from `_NET_CLIENT_LIST` plus a `WM_NAME` match is what works.
+
+**This probe does not run in CI** — it needs a real display, an X server and ImageMagick — so it
+is a bench instrument, not a gate.
+
 **The same probe is the macOS test.** On NSView subviews the prediction is the parent stays
 1000 × 653 and the child is 522 × 262. One command, and §11 stops being a hypothesis on this
 axis. Until it is run, it has not been run.
@@ -1043,9 +1079,20 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
 - **found** — the authority suite stayed 23/23 green through that, because it asserts nothing
   about geometry. That is the separation working: a platform defect must not be able to redden
   an authority battery, and it did not.
+- **measured, from outside the process** — the pane's on-screen POSITION, which was previously
+  named as unverified: `1044x524+630+186` against an expected `1044 × 524 at (630, 186)`,
+  **delta 0 on all four**. A two-capture difference is NOT the measurement — clicking `read`
+  also hides the sign and rewrites the status block, so the changed region came back
+  `1915x1386`. **The pane identifies itself** by painting a colour that appears nowhere else,
+  and the bounding box of that colour is the rectangle. Pictures in `docs/tier1-read-pose.png`
+  and `docs/tier1-read-pose-probe.png`.
+- **stated as a limit** — that capture goes through **XWayland** (`GDK_BACKEND=x11`), because
+  this box is GNOME/Wayland with no `grim` and a portal that wants a human. The layout measured
+  is backend-independent; the capture path is not the shipping one. `import -window root` and
+  `-window <title>` both fail here — the window id from `_NET_CLIENT_LIST` is what works. The
+  probe needs a display and ImageMagick, so it is a bench instrument and **not a gate**.
 - **not measured** — an actual renderer crash (only controlled teardown), source unavailability
-  (there is no dev server), the pane's on-screen POSITION (size is asserted; position is carried
-  by `get-child-position` and not independently verified), and **anything at all on macOS**.
+  (there is no dev server), and **anything at all on macOS**.
 - **stated as a limit** — macOS is an **explicitly unverified target** and its runtime check is a
   **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
   prints, on every run, that it has validated no geometry, no containment and no input — a green

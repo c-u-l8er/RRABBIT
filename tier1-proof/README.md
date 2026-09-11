@@ -21,6 +21,7 @@ that rectangle. The host holds it contained ~2.7 s, then reveals it in one step.
 cargo build --release && cargo test --release \
   && node tools/check-acl.mjs && node tools/proof-battery.mjs
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
+node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
 ```
 
 `tools/sabotage.sh` breaks one law at a time and requires the battery to go red. It reports
@@ -110,7 +111,15 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
    Every instrument answered; only the layout never happened. `async fn` is the fix.
 9. **Contained means opacity 0 + insensitive, not hidden.** A GTK widget that has never been
    shown is never laid out, so hiding it means waiting for an allocation that cannot arrive.
-10. **`whoami` takes no echoed generation**, so a reusable label leaks: an instance that
+10. **A difference of two captures is not a position measurement.** Clicking `read` also hides
+   the sign and rewrites the status block, so the changed region came back `1915x1386` —
+   essentially the whole window. The pane has to **identify itself**: it paints a colour that
+   appears nowhere else, and the bounding box of that colour is the rectangle. (Capture caveats:
+   this box is GNOME/Wayland with no `grim`, so the app is launched `GDK_BACKEND=x11` and read
+   through XWayland — the layout is backend-independent, the capture path is not the shipping
+   one. `import -window root` and `-window <title>` both fail here; the window id from
+   `_NET_CLIENT_LIST` is what works.)
+11. **`whoami` takes no echoed generation**, so a reusable label leaks: an instance that
    outlived its `close()` could resolve the name to the *successor's* binding and stop being
    old. A pane label is `pane-<generation>`, never reused, with its capability minted per
    instance at runtime — a static capability file cannot express that.
@@ -120,8 +129,11 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
 - **Source availability** (kill the dev server). There is no dev server here — the UI is baked
   in — so the condition cannot arise. Unproven.
 - **An actual renderer crash.** Only controlled teardown was exercised. Unproven.
-- **The pane's on-screen POSITION.** Size is asserted; position is carried by
-  `get-child-position` and is not independently verified.
+- ~~The pane's on-screen position.~~ **MEASURED** — `tools/pose-screenshot.mjs`:
+  `1044x524+630+186` against an expected 1044 × 524 at (630, 186), **delta 0 on all four**.
+  It is a bench instrument, not a gate: it needs a real display, an X server and ImageMagick.
+  Pictures in `../docs/tier1-read-pose.png` (what a person sees) and
+  `../docs/tier1-read-pose-probe.png` (the self-identifying frame the measurement reads).
 - **Anything on macOS.** Nothing here has been run on a Mac. macOS is an **explicitly
   unverified target**, and its runtime check is a **release gate, not a development blocker**.
   CI compiles and unit-tests on `macos-14` and prints on every run that it validated no
