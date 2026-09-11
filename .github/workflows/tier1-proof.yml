@@ -44,6 +44,8 @@ jobs:
         run: xvfb-run -a node tools/proof-battery.mjs
       - name: the geometry contract
         run: xvfb-run -a node tools/geometry-probe.mjs
+      - name: a real renderer death
+        run: xvfb-run -a node tools/renderer-crash.mjs
 
   macos-compile-only:
     name: macOS — COMPILE AND UNIT TESTS ONLY (proves nothing about geometry)

@@ -495,6 +495,52 @@ one sentence and state no delivery semantics at all.
 and the enum is `#[non_exhaustive]`, so this is *"there is no termination event today"*, not
 *"there can never be one."* Re-check it on a version bump instead of inheriting this sentence.
 
+#### 10.1.1 A real renderer death, measured — and §10.1 holds exactly as written
+
+`tier1-proof/tools/renderer-crash.mjs`, **12 held · 0 failed**. §12.2 only ever exercised a
+*controlled* teardown and said so; this kills the pane's renderer outright.
+
+**The pane has its own renderer.** Under WebKitGTK each webview gets a `WebKitWebProcess` child
+of the application: the road alone has one, a promote adds a second. The pane's is identified by
+the difference between the set before the promote and the set after — no guessing, and the
+road's own renderer is never touched. **That isolation is a Tier 1 result in itself:** had the
+two shared a process, a pane crash would take the shell down.
+
+The timeline, from `SIGKILL` (the beat interval is 400 ms, the timeout 1500 ms):
+
+```
++0 … +1200ms   live            the last beat's grace
++1602 … +4027  unresponsive    the clock noticed; it may not say more
++4431          demote          the road acts on a pane it cannot reach
++4834, +5238   gone / absent   NOW it is gone, by a positive fact
++5752          promote         a new instance
++6047 …        live            the replacement, beating
+```
+
+- **The application survives**, the road's renderer is untouched, and the road keeps answering
+  throughout.
+- **`unresponsive`, never `gone`** for as long as the dead pane is left alone. A clock cannot
+  pronounce death, and a crash is indistinguishable from a stall by the clock alone — which is
+  the whole of §10.1 and is exactly what a design must not paper over.
+- **`present` stays true the entire time.** Tauri still holds the webview; there is no destroyed
+  event to hear. The webview is a live object with nothing behind it.
+- **WebKitGTK does not respawn it.** Nothing recovers the pane except the host.
+- **Recovery works**: demote a pane whose renderer is dead, then promote a fresh instance.
+
+**Two things the probe had to be built around.**
+
+**A renderer crash DELETES THE WEBDRIVER SESSION** — the next command returns `invalid session
+id: session deleted because of page crash or hang`. The crash cannot be watched through the
+channel that set it up, and the first version of the probe died at exactly that line. So the
+road records the timeline into its own `localStorage` and a *later* session reads it back; and
+because WebDriver is gone, **the road also drives its own recovery**, being the only thing left
+that can still reach the host. Nothing was added to the product to make that work.
+
+**Both of the probe's own bugs were assertion WINDOWS**, the same class as the geometry check
+sampled before layout had settled: counting the demote's own correct `gone` as a violation of
+the rule it obeys, and reading the renderer count at the *end*, where the replacement pane's
+renderer looks exactly like the dead one coming back.
+
 **What follows for the design:**
 
 - **Generation + acknowledgement is the mechanism.** A bind arriving while a presentation is
@@ -1091,8 +1137,17 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   is backend-independent; the capture path is not the shipping one. `import -window root` and
   `-window <title>` both fail here — the window id from `_NET_CLIENT_LIST` is what works. The
   probe needs a display and ImageMagick, so it is a bench instrument and **not a gate**.
-- **not measured** — an actual renderer crash (only controlled teardown), source unavailability
-  (there is no dev server), and **anything at all on macOS**.
+- **measured** — **an actual renderer death**, `SIGKILL` to the pane's own `WebKitWebProcess`:
+  §10.1 holds exactly as written. `unresponsive` and never `gone` while the dead pane is left
+  alone, `present` true throughout, the road untouched and still answering, WebKitGTK does not
+  respawn it, and demote-then-promote recovers into a new instance. §10.1.1 has the timeline.
+- **found** — a renderer crash **deletes the WebDriver session**, so the crash cannot be observed
+  through the channel that set it up. The road records to its own storage and drives its own
+  recovery; a later session reads it back.
+- **found, a third time** — both of that probe's bugs were assertion WINDOWS. A window that
+  extends past a deliberate act counts that act as a violation of the rule it obeys.
+- **not measured** — source unavailability (there is no dev server), and **anything at all on
+  macOS**.
 - **stated as a limit** — macOS is an **explicitly unverified target** and its runtime check is a
   **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
   prints, on every run, that it has validated no geometry, no containment and no input — a green

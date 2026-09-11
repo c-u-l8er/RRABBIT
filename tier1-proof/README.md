@@ -22,6 +22,7 @@ cargo build --release && cargo test --release \
   && node tools/check-acl.mjs && node tools/proof-battery.mjs
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
 node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
+node tools/renderer-crash.mjs      # SIGKILL the pane's renderer and read what the host makes of it
 ```
 
 `tools/sabotage.sh` breaks one law at a time and requires the battery to go red. It reports
@@ -119,7 +120,14 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
    through XWayland — the layout is backend-independent, the capture path is not the shipping
    one. `import -window root` and `-window <title>` both fail here; the window id from
    `_NET_CLIENT_LIST` is what works.)
-11. **`whoami` takes no echoed generation**, so a reusable label leaks: an instance that
+11. **A renderer crash deletes the WebDriver session** — `invalid session id: session deleted
+   because of page crash or hang`. The crash cannot be watched through the channel that set it
+   up, so the road records the timeline into its own `localStorage`, a later session reads it
+   back, and the road drives its own recovery because nothing else can still reach the host.
+12. **Each webview gets its own `WebKitWebProcess`.** The road's and the pane's are separate —
+   which is why a pane crash does not take the shell down, and is worth knowing before assuming
+   it.
+13. **`whoami` takes no echoed generation**, so a reusable label leaks: an instance that
    outlived its `close()` could resolve the name to the *successor's* binding and stop being
    old. A pane label is `pane-<generation>`, never reused, with its capability minted per
    instance at runtime — a static capability file cannot express that.
@@ -128,7 +136,10 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
 
 - **Source availability** (kill the dev server). There is no dev server here — the UI is baked
   in — so the condition cannot arise. Unproven.
-- **An actual renderer crash.** Only controlled teardown was exercised. Unproven.
+- ~~An actual renderer crash.~~ **MEASURED** — `tools/renderer-crash.mjs`, 12 held · 0 failed.
+  `SIGKILL` to the pane's own `WebKitWebProcess`: `unresponsive` and never `gone` while the dead
+  pane is left alone, `present` true throughout, the road untouched and still answering,
+  WebKitGTK does not respawn it, and demote-then-promote recovers into a new instance.
 - ~~The pane's on-screen position.~~ **MEASURED** — `tools/pose-screenshot.mjs`:
   `1044x524+630+186` against an expected 1044 × 524 at (630, 186), **delta 0 on all four**.
   It is a bench instrument, not a gate: it needs a real display, an X server and ImageMagick.
