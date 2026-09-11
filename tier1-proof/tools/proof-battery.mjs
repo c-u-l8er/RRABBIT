@@ -99,7 +99,18 @@ async function surfaces() {
     if (l) seen.push({ handle: h, window: l[0], webview: l[1] });
   }
   const by = Object.fromEntries(seen.map((v) => [v.webview, v.handle]));
-  return { road: by.main ?? null, pane: by.pane ?? null, count: hs.length, seen };
+  /* THE PANE LABEL IS `pane-<generation>` AND IS NEVER REUSED, so it is found
+     by shape rather than by name. A fixed `by.pane` would have gone red the
+     moment the label became instance-scoped, for a reason unrelated to what
+     it was testing. ROAD_SHELL.md §6.2. */
+  const paneEntry = seen.find((v) => /^pane-\d+$/.test(String(v.webview)));
+  return {
+    road: by.main ?? null,
+    pane: paneEntry ? paneEntry.handle : null,
+    paneLabel: paneEntry ? paneEntry.webview : null,
+    count: hs.length,
+    seen,
+  };
 }
 
 const findEl = async (css) =>
@@ -176,12 +187,56 @@ async function run() {
 
   /* ── 2 ─ promote ────────────────────────────────────────────────────── */
   console.log('\n  \x1b[1m2 · read promotes exactly one pane to live\x1b[0m');
-  await click('#enter');
+
+  /* ── CONTAINMENT, SAMPLED THROUGH THE WHOLE TRANSITION ────────────────
+     `promote` is started WITHOUT awaiting it, and the road is polled while
+     it runs. Eventual geometry is not containment: before this, the pane was
+     created box-packed at full window size and stayed that way ~2.8 s — an
+     untrusted surface covering the road and taking input over all of it,
+     while every post-settle assertion passed. §10.6.3.
+     The rule sampled here: at no moment is the pane BOTH visible and outside
+     its rectangle. `visible` folds in opacity, and `sensitive` is input.   */
+  const samples = [];
+  await script(`window.__promoting = window.__apply('promote',
+    { rect: (() => { const f = document.getElementById('readframe');
+                     f.classList.add('on');
+                     const r = f.getBoundingClientRect();
+                     return { x: r.x, y: r.y, width: r.width, height: r.height }; })() })
+    .then(r => (window.__promoted = r));`);
+  const wantRect = await script("const f = document.getElementById('readframe').getBoundingClientRect();\n"
+    + 'return { w: Math.round(f.width), h: Math.round(f.height) };');
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const st0 = await status();
+    if (st0 && st0.read_pose) {
+      samples.push({
+        visible: st0.read_pose.visible,
+        sensitive: st0.read_pose.sensitive,
+        w: st0.read_pose.alloc && st0.read_pose.alloc.w,
+        h: st0.read_pose.alloc && st0.read_pose.alloc.h,
+      });
+    }
+    if (await script('return window.__promoted !== undefined;')) break;
+  }
+  const promoted = await script('return window.__promoted;');
+  const escaped = samples.filter((x) =>
+    (x.visible || x.sensitive) && !(near(x.w, wantRect.w) && near(x.h, wantRect.h)));
+  check(`the pane is never visible or interactive outside its rectangle (${samples.length} samples)`,
+    promoted && promoted.ok === true && escaped.length === 0,
+    escaped.length ? `escaped in ${escaped.length}: ${JSON.stringify(escaped.slice(0, 3))}`
+                   : `promote said ${JSON.stringify(promoted).slice(0, 200)}`);
+  if (promoted && promoted.ok) {
+    note(`the host held the pane contained for ${promoted.result.pose_ms} ms, then revealed it`);
+  }
+
   S = await waitFor('the pane webview to exist', async () => {
     const s = await surfaces(); return s.pane ? s : null;
   });
+  const firstPaneLabel = S.paneLabel;
   await focus(S.road);
   st = await status();
+  check('the pane label is instance-scoped, not a reusable name',
+    /^pane-\d+$/.test(String(firstPaneLabel)), String(firstPaneLabel));
   check('the child webview exists and the road reports the live tier',
     S.pane !== null && st.tier === 'live' && st.present === true, JSON.stringify(st).slice(0, 200));
   check('the pane is a child of the ROAD window, not a second window',
@@ -304,6 +359,19 @@ async function run() {
     JSON.stringify({ counter: pp.counter, note: pp.note }));
   check('the generation advanced — this is a NEW binding',
     pp.generation > paneGen, `was ${paneGen}, now ${pp.generation}`);
+  /* THE SUCCESSOR IS A DIFFERENT INSTANCE, NOT THE SAME NAME REBOUND.
+     `whoami` takes no echoed generation — it is what a caller uses to LEARN
+     one — so under a reusable label an instance that outlived its `close()`
+     could call it, resolve the name to whichever binding now holds it, and
+     come back carrying the successor's generation. It would stop being old.
+     With the generation in the label there is no such name to resolve.
+     The deterministic version of this, including the revoked-instance
+     refusal, is `src/principal.rs`'s unit tests: a renderer that survives its
+     own close cannot be summoned on demand (§10.1), so the live battery
+     asserts the structure and the registry asserts the behaviour. */
+  check('the replacement pane is a NEW instance label, not the old name rebound',
+    S.paneLabel !== firstPaneLabel && /^pane-\d+$/.test(String(S.paneLabel)),
+    `was ${firstPaneLabel}, now ${S.paneLabel}`);
 
   await focus(S.road);
   st = await status();

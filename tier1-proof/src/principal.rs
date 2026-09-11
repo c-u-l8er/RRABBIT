@@ -42,7 +42,9 @@ const BEAT_TIMEOUT: Duration = Duration::from_millis(1_500);
 fn grants_for(surface: &str) -> BTreeSet<String> {
     let v: &[&str] = match surface {
         "main" => &["place", "promote", "demote", "status", "manifest"],
-        "pane" => &["beat", "hello"],
+        // **`pane-<generation>`, and the generation is never reused.** A pane
+        // label is an INSTANCE, not a role: see `Bindings::bind_pane`.
+        s if s.starts_with("pane-") => &["beat", "hello"],
         "cockpit" => &["intent"],
         _ => &[],
     };
@@ -134,13 +136,53 @@ impl Bindings {
     /// it. Takes the injected webview for the same reason `authorize` does:
     /// there must be no string a caller could substitute.
     pub fn resolve(&self, webview: &tauri::Webview) -> Option<Principal> {
+        self.resolve_label(webview.label())
+    }
+
+    /// The label form is **private**, and that is the whole arrangement: the
+    /// public surface takes a `Webview` so no caller can substitute a string,
+    /// while the invariants stay unit-testable without a renderer. The tests
+    /// at the bottom of this file are the only other caller.
+    fn resolve_label(&self, label: &str) -> Option<Principal> {
         let g = self.0.lock().unwrap();
-        g.by_surface.get(webview.label()).filter(|b| !b.revoked).map(|b| Principal {
+        g.by_surface.get(label).filter(|b| !b.revoked).map(|b| Principal {
             binding: b.id,
-            surface: webview.label().to_string(),
+            surface: label.to_string(),
             generation: b.generation,
             grants: b.grants.iter().cloned().collect(),
         })
+    }
+
+    /// **The pane label IS the instance.** `pane-<generation>`, and
+    /// generations only ever advance, so a label is never reused.
+    ///
+    /// Without this, `whoami` is a hole in generation invalidation: it takes
+    /// no echoed generation — it is what a caller uses to LEARN one — so an
+    /// instance that outlived its `close()` could call it, resolve the label
+    /// `pane` to whatever binding currently holds that name, and come back
+    /// carrying the SUCCESSOR's generation. It would stop being old. With the
+    /// generation in the label, an old instance resolves its OWN revoked
+    /// binding and is refused; there is no argument it could pass to reach
+    /// the successor's, because it passes no argument at all.
+    pub fn bind_pane(&self) -> Principal {
+        let label = {
+            let g = self.0.lock().unwrap();
+            format!("pane-{}", g.next_generation + 1)
+        };
+        self.bind(&label)
+    }
+
+    /// Every pane instance this registry has ever bound and not revoked.
+    /// `promote` refuses while any is live: the live budget is N = 1, and a
+    /// surviving predecessor is exactly the condition `bind_pane` defends
+    /// against.
+    pub fn live_panes(&self) -> Vec<String> {
+        let g = self.0.lock().unwrap();
+        g.by_surface
+            .iter()
+            .filter(|(l, b)| l.starts_with("pane-") && !b.revoked)
+            .map(|(l, _)| l.clone())
+            .collect()
     }
 
     pub fn generation_of(&self, surface: &str) -> Option<u64> {
@@ -173,8 +215,15 @@ impl Bindings {
         echoed_generation: u64,
         grant: &str,
     ) -> Result<Principal, Refusal> {
-        let surface = webview.label();
-        let generation = echoed_generation;
+        self.authorize_label(webview.label(), echoed_generation, grant)
+    }
+
+    fn authorize_label(
+        &self,
+        surface: &str,
+        generation: u64,
+        grant: &str,
+    ) -> Result<Principal, Refusal> {
         let mut g = self.0.lock().unwrap();
         let refuse = |g: &mut Inner, r: Refusal| -> Result<Principal, Refusal> {
             g.refusals.push((surface.to_string(), r.clone()));
@@ -280,5 +329,102 @@ impl Bindings {
 
     pub fn refusal_count(&self) -> usize {
         self.0.lock().unwrap().refusals.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The `whoami` revocation invariant, tested where it lives.**
+    ///
+    /// A renderer that outlives its `close()` cannot be summoned on demand —
+    /// §10.1 says the host cannot even detect one — so the live battery can
+    /// only assert this structurally. The registry owns the invariant, so the
+    /// registry is where it is exercised deterministically.
+    #[test]
+    fn an_old_instance_cannot_learn_its_successors_identity() {
+        let b = Bindings::default();
+        let first = b.bind_pane();
+        assert_eq!(first.surface, "pane-1");
+
+        // The pane is replaced: revoked, then a new instance bound.
+        b.revoke(&first.surface);
+        let second = b.bind_pane();
+        assert_eq!(second.surface, "pane-2", "a pane label is never reused");
+        assert!(second.generation > first.generation);
+
+        // `whoami` from the OLD instance. It passes no argument at all, so
+        // the only thing that can save us is the label being the instance.
+        assert!(
+            b.resolve_label(&first.surface).is_none(),
+            "a revoked instance resolved a principal — it can now learn a live generation"
+        );
+
+        // And it cannot reach the successor's binding by any means available
+        // to it: it has no argument to aim, and its own label is dead.
+        for grant in ["beat", "hello"] {
+            let refusal = b
+                .authorize_label(&first.surface, first.generation, grant)
+                .expect_err("a revoked instance was authorized");
+            assert_eq!(refusal.code, "PRINCIPAL_REVOKED");
+            let refusal = b
+                .authorize_label(&first.surface, second.generation, grant)
+                .expect_err("a revoked instance was authorized with the successor's generation");
+            assert_eq!(
+                refusal.code, "PRINCIPAL_REVOKED",
+                "revocation must outrank staleness: the caller is not late, its authority is gone"
+            );
+        }
+
+        // The successor is unaffected.
+        assert!(b.resolve_label(&second.surface).is_some());
+        assert!(b.authorize_label(&second.surface, second.generation, "beat").is_ok());
+    }
+
+    /// The same hole, with the label made reusable — the shape this defends
+    /// against, asserted so that the defence is not merely asserted.
+    /// The same hole with a REUSED label, so the defence is demonstrated and
+    /// not merely asserted. `main` is used because it carries grants under
+    /// this table — the point is about the label being reusable, and any
+    /// reusable label leaks the same way.
+    #[test]
+    fn a_reused_label_would_hand_over_the_successors_generation() {
+        let b = Bindings::default();
+        let first = b.bind("main");
+        b.revoke("main");
+        let second = b.bind("main"); // rebound under the SAME name
+        assert_ne!(first.generation, second.generation);
+
+        let leaked = b.resolve_label("main").expect("the reused label still resolves");
+        assert_eq!(
+            leaked.generation, second.generation,
+            "THE HOLE: an old instance calling whoami learns the SUCCESSOR's generation"
+        );
+        assert!(
+            b.authorize_label("main", leaked.generation, "place").is_ok(),
+            "and having learned it, the old instance acts with it"
+        );
+    }
+
+    #[test]
+    fn a_grant_is_never_taken_from_the_request() {
+        let b = Bindings::default();
+        let road = b.bind("main");
+        assert!(road.grants.contains(&"place".to_string()));
+        assert!(!road.grants.contains(&"intent".to_string()), "the road never holds intent");
+        let pane = b.bind_pane();
+        assert!(!pane.grants.contains(&"place".to_string()), "a pane cannot place itself");
+    }
+
+    #[test]
+    fn live_panes_sees_exactly_the_unrevoked_instances() {
+        let b = Bindings::default();
+        let a = b.bind_pane();
+        assert_eq!(b.live_panes(), vec![a.surface.clone()]);
+        b.revoke(&a.surface);
+        assert!(b.live_panes().is_empty());
+        let c = b.bind_pane();
+        assert_eq!(b.live_panes(), vec![c.surface]);
     }
 }

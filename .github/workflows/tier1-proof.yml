@@ -1,0 +1,60 @@
+# The Tier 1 proof, on both targets it claims to have an opinion about.
+#
+# **The macOS job COMPILES AND UNIT-TESTS ONLY, and that limit is the point of
+# saying so here.** It catches platform compilation problems — the `cfg`-gated
+# `layout.rs` branch, a tauri API that diverges, a dependency that does not
+# build — and it CANNOT validate the thing the Mac is actually needed for:
+# WKWebView geometry, the read pose, containment, or input reaching a pane.
+# Those need a real display and a real webview. ROAD_SHELL.md §11 stays a
+# hypothesis until `tools/geometry-probe.mjs` is run on a Mac against a real
+# screen, and a green tick here must never be read as having done that.
+name: tier1-proof
+
+on:
+  push:
+    paths: ['tier1-proof/**', '.github/workflows/tier1-proof.yml']
+  pull_request:
+    paths: ['tier1-proof/**', '.github/workflows/tier1-proof.yml']
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: tier1-proof
+
+jobs:
+  linux:
+    name: linux — full battery
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev webkit2gtk-driver xvfb
+      - run: cargo install tauri-driver --locked
+      - run: cargo build --release
+      - run: cargo test --release
+      - name: the static ACL gate
+        run: node tools/check-acl.mjs
+      - name: the live battery
+        run: xvfb-run -a node tools/proof-battery.mjs
+      - name: the geometry contract
+        run: xvfb-run -a node tools/geometry-probe.mjs
+
+  macos-compile-only:
+    name: macOS — COMPILE AND UNIT TESTS ONLY (proves nothing about geometry)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test --release
+      - name: say what this job did not do
+        run: |
+          echo "::warning::This job compiled and unit-tested on macOS. It did NOT run the"
+          echo "::warning::geometry contract, the read pose, containment, or any input test."
+          echo "::warning::ROAD_SHELL.md §11 remains an unverified hypothesis on this target."

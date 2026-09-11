@@ -33,11 +33,22 @@ use principal::Bindings;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
-/// The pane's label. A CONSTANT, not a parameter — no command in this file
+/// **A pane's label is `pane-<generation>` and is never reused.** It is
+/// derived by the host in `Bindings::bind_pane`; no command in this file
 /// takes a webview label from the page, so there is nothing to aim at another
-/// surface. Same discipline as the cockpit's `TERMINAL_LABEL`.
-const PANE: &str = "pane";
+/// surface.
+///
+/// It is not a constant any more, and the reason is `whoami`. That command
+/// takes no echoed generation — it is what a caller uses to LEARN one — so
+/// under a reusable label an instance that outlived its `close()` could call
+/// it, resolve the name to whichever binding now holds it, and come back
+/// carrying the successor's generation. `principal.rs`'s
+/// `a_reused_label_would_hand_over_the_successors_generation` demonstrates
+/// exactly that, on a label that is still reusable.
 const PANE_PAGE: &str = "pane.html";
+
+/// How long the pane may stay contained before the read pose is abandoned.
+const POSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(serde::Deserialize)]
 pub struct Rect {
@@ -76,11 +87,26 @@ fn road_place(
 /// binds it in the same breath. The page never learns a secret and never
 /// supplies one — it is told the new generation only so it can carry it back
 /// for the staleness check.
+/// **`async`, and that is load-bearing rather than stylistic.**
+///
+/// A synchronous `#[tauri::command]` runs on the MAIN THREAD. This command
+/// waits for GTK to allocate the pane, and on the main thread that wait
+/// blocks the very layout pass it is waiting for: measured, the overlay sat
+/// at GTK's never-allocated sentinel `(-1,-1,1,1)` inside a box that was
+/// already 1000x653, for the full five-second deadline, every time.
+/// `queue_resize` on the container did not help and could not — nothing was
+/// going to run it.
+///
+/// The symptom is maximally misleading: `place` and `allocation` both
+/// SUCCEED, because `with_webview` executes inline when it is already on the
+/// main thread. So every instrument answers, and the only thing that never
+/// happens is the layout. `super/cockpit` reached the same conclusion from
+/// the other side — its `browser_surface` is `async` too.
 #[tauri::command]
-fn road_promote(
+async fn road_promote(
     webview: tauri::Webview,
     app: tauri::AppHandle,
-    bindings: State<Bindings>,
+    bindings: State<'_, Bindings>,
     generation: u64,
     rect: Rect,
 ) -> Result<Value, String> {
@@ -88,8 +114,15 @@ fn road_promote(
         Err(r) => return refuse(r),
         Ok(p) => p,
     };
-    if app.get_webview(PANE).is_some() {
-        return Err("TIER_ALREADY_LIVE: the live budget is N = 1 (ROAD_SHELL.md §4.1)".into());
+    // N = 1, measured against the REGISTRY rather than one known label: a
+    // predecessor that outlived its close is exactly the condition an
+    // instance-scoped binding defends against, so it must also be the
+    // condition that refuses a promote.
+    let live = bindings.live_panes();
+    if !live.is_empty() || live.iter().any(|l| app.get_webview(l).is_some()) {
+        return Err(format!(
+            "TIER_ALREADY_LIVE: the live budget is N = 1 and {live:?} still hold bindings              (ROAD_SHELL.md §4.1)"
+        ));
     }
     let window = app.get_window("main").ok_or("no road window")?;
     let size = window.inner_size().map_err(|e| e.to_string())?;
@@ -105,34 +138,95 @@ fn road_promote(
         return Err("BAD_READ_RECT: the read pose does not fit the window".into());
     }
 
-    // BIND FIRST, then create. A webview that exists without a binding is a
-    // surface with no principal, and for the width of that gap it could call
-    // a command that would find no binding and refuse for the wrong reason.
-    let pane = bindings.bind(PANE);
+    // BIND FIRST, then grant, then create. A webview that exists without a
+    // binding is a surface with no principal, and for the width of that gap
+    // it could call a command that would find no binding and refuse for the
+    // wrong reason.
+    let pane = bindings.bind_pane();
+    let label = pane.surface.clone();
+
+    // **The capability is minted for THIS INSTANCE.** A static
+    // `capabilities/pane.json` cannot be, because it names a fixed label and
+    // the whole point is that the label is never reused. `add_capability` is
+    // tauri's `dynamic-acl` (default-on); the grant is the same three
+    // permissions the static file held, aimed at one instance that will never
+    // exist again.
+    app.add_capability(
+        tauri::ipc::CapabilityBuilder::new(format!("pane-instance-{}", pane.generation))
+            .webview(label.clone())
+            .permission("allow-pane-beat")
+            .permission("allow-pane-hello")
+            .permission("allow-whoami"),
+    )
+    .map_err(|e| {
+        bindings.revoke(&label);
+        format!("PANE_CAPABILITY_FAILED: {e}")
+    })?;
+
     let url = format!("{PANE_PAGE}?gen={}", pane.generation);
     let child = window
         .add_child(
-            tauri::webview::WebviewBuilder::new(PANE, tauri::WebviewUrl::App(url.into()))
+            tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::App(url.into()))
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny),
             tauri::LogicalPosition::new(rect.x, rect.y),
             tauri::LogicalSize::new(rect.width, rect.height),
         )
         .map_err(|e| {
-            bindings.revoke(PANE);
+            bindings.revoke(&label);
             e.to_string()
         })?;
 
+    let abandon = |e: String| -> String {
+        bindings.revoke(&label);
+        // The type is named rather than left to never-type fallback, which
+        // rustc now warns about: `close()` is best-effort here BECAUSE
+        // revocation already happened and does not depend on it (§6.2 #4).
+        let _: tauri::Result<()> = child.close();
+        e
+    };
+
     // **The read pose is not optional and not cosmetic.** Without this the
     // child takes the whole window and the ROAD collapses to one pixel —
-    // measured, ROAD_SHELL.md §10.6. A promote that leaves the road with no
-    // surface has not entered the read pose, so a layout failure UNDOES the
-    // promote rather than being reported beside it.
+    // measured, ROAD_SHELL.md §10.6. `place` leaves the pane laid out but at
+    // opacity 0 and insensitive, so it is neither visible nor interactive
+    // while it is the wrong size.
     if let Err(e) = layout::place(&child, &rect) {
-        bindings.revoke(PANE);
-        let _ = child.close();
-        return Err(format!("READ_POSE_FAILED: {e}"));
+        return Err(abandon(format!("READ_POSE_FAILED: {e}")));
     }
+
+    // **Contained until correct, then revealed atomically.** Measured before
+    // this loop existed: the pane was created box-packed at full window size
+    // and stayed that way ~2.8 s — eventual geometry right, containment
+    // wrong, an untrusted surface covering the road and taking input over all
+    // of it. §10.6.3. A pose that never arrives ABANDONS the promote; it is
+    // never shown late and never shown wrong.
+    let started = std::time::Instant::now();
+    let want = (rect.width.round() as i64, rect.height.round() as i64);
+    loop {
+        let a = layout::allocation(&child);
+        let got = (
+            a.pointer("/allocated/w").and_then(|v| v.as_i64()).unwrap_or(-1),
+            a.pointer("/allocated/h").and_then(|v| v.as_i64()).unwrap_or(-1),
+        );
+        if (got.0 - want.0).abs() <= 2 && (got.1 - want.1).abs() <= 2 {
+            break;
+        }
+        if started.elapsed() > POSE_DEADLINE {
+            return Err(abandon(format!(
+                "READ_POSE_NOT_REACHED: wanted {want:?}, last allocation {got:?} after {:?}; \
+                 widget says {a}",
+                started.elapsed()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pose_ms = started.elapsed().as_millis() as u64;
+    if let Err(e) = layout::reveal(&child) {
+        return Err(abandon(format!("READ_POSE_REVEAL_FAILED: {e}")));
+    }
+
     Ok(json!({
+        "pose_ms": pose_ms,
         "tier": "live", "pane": pane, "by_principal": caller,
         // What GTK ACTUALLY allocated, not what was asked for. Two rounds of
         // this defect were spent inferring the allocation from the page's
@@ -156,11 +250,20 @@ fn road_demote(
         Err(r) => return refuse(r),
         Ok(p) => p,
     };
-    bindings.revoke(PANE);
-    let closed = match app.get_webview(PANE) {
-        Some(w) => w.close().is_ok(),
-        None => false,
-    };
+    // **Revoke first, destroy second, and revoke whether or not the close
+    // succeeds.** §6.2 #4 is about the binding, not the pixels: a renderer
+    // that outlives its close must already be powerless by the time it could
+    // notice. The host cannot detect that renderer at all (§10.1), which is
+    // why the ordering is the defence rather than the close.
+    let mut closed = vec![];
+    for label in bindings.live_panes() {
+        bindings.revoke(&label);
+        if let Some(w) = app.get_webview(&label) {
+            closed.push(json!({ "label": label, "closed": w.close().is_ok() }));
+        } else {
+            closed.push(json!({ "label": label, "closed": false, "already_gone": true }));
+        }
+    }
     Ok(json!({ "tier": "sign", "closed": closed, "by_principal": caller }))
 }
 
@@ -176,17 +279,22 @@ fn road_status(
     }
     // The POSITIVE FACT. `liveness` may only say `gone` on this, never on a
     // clock — §10.1.
-    let present = app.get_webview(PANE).is_some();
+    let pane_label = bindings.live_panes().into_iter().next();
+    let pane_label2 = pane_label.clone();
+    let pane_label3 = pane_label.clone();
+    let pane_label4 = pane_label.clone();
+    let present = pane_label.as_deref().is_some_and(|l| app.get_webview(l).is_some());
     Ok(json!({
         "tier": if present { "live" } else { "sign" },
         "present": present,
-        "liveness": bindings.liveness(PANE, present),
-        "pane_generation": bindings.generation_of(PANE),
+        "liveness": bindings.liveness(pane_label3.as_deref().unwrap_or("pane-none"), present),
+        "pane_generation": pane_label4.as_deref().and_then(|l| bindings.generation_of(l)),
         // The platform's own account of the read pose. Read HERE and not in
         // `promote`, where it reported 1x1 at (-1,-1) every time: the call is
         // synchronous and GTK had not re-allocated yet. An instrument that
         // always answers before the thing it measures is not an instrument.
-        "read_pose": app.get_webview(PANE).map(|w| layout::allocation(&w)),
+        "pane_label": pane_label,
+        "read_pose": pane_label2.and_then(|l| app.get_webview(&l)).map(|w| layout::allocation(&w)),
         "last_refusal": bindings.last_refusal(),
         "refusal_count": bindings.refusal_count(),
         // Everything the host holds, so the battery can assert what is absent.

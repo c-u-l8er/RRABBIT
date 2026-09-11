@@ -244,10 +244,16 @@ nothing about it works for an app that is not installed, not started, or not tru
 describe itself.
 
 **The package or the coordinator owns the manifest.** The road asks the host, the host holds the
-package, and no pane need ever have existed. In `tier1-proof/` the CSP's `connect-src` is back to
-`ipc:` only and the gate asserts two things statically: **the road page contains no `fetch` at
-all**, and the CSP does not permit it to fetch its own origin. Both would have gone green under
-the convenient fix.
+package, and no pane need ever have existed.
+
+**The durable law is narrower than "the road may not fetch."** A first version of the gate
+banned `fetch` from the road outright, and that is broader than the architecture: a road may
+legitimately need unrelated network access later, and a gate that forbids it would be retired
+the first time it got in the way — taking the real assertion with it. What must hold is that
+**manifest discovery goes through the host-owned package path and cannot silently fall back to a
+page fetch**. `tier1-proof` asserts exactly that: the sign comes from the host command, no fetch
+in the road names a manifest or bundle path, there is no `catch`-and-fetch fallback behind it,
+and the host is the only reader of the package manifest.
 
 So an **entrance sign** is a declared accept-clause and an **exit ramp** is a declared handoff:
 both render from the coordinator's manifest, not from a running process, and a road can be laid
@@ -347,6 +353,33 @@ label the page chose. Taking the injected webview puts the rule in the type syst
 consequence: the sabotage that fed `by` to `authorize` as the surface **no longer compiles**.
 That is the hardening working, and it is also why that sabotage had to be rewritten as a
 short-circuit *before* the check — a law with no writable falsifier is untested.
+
+#### 6.2.0a `whoami` is the hole generation invalidation has, and the label is the fix
+
+`whoami` takes **no echoed generation** — it is what a caller uses to *learn* one. Under a
+reusable label that is a leak: an instance that outlived its `close()` calls it, resolves the
+name to whichever binding now holds it, and comes back carrying the **successor's** generation.
+It stops being old.
+
+So **a pane's label is its instance**: `pane-<generation>`, and generations only advance, so a
+label is never reused. An old instance resolves its own revoked binding and is refused; there is
+no argument it could pass to reach the successor's, because it passes no argument at all. Four
+rules, and the harness holds all four:
+
+1. **Rebinding destroys the previous instance** — and revocation happens *first*, so a renderer
+   that outlives its close is already powerless before it could notice.
+2. **`whoami` resolves an instance-specific binding**, not a reusable label.
+3. **The replacement is bound, and its capability minted, before it exists** — the capability is
+   built per instance with `CapabilityBuilder` at runtime (`dynamic-acl`), because a static
+   `capabilities/pane.json` can only name a fixed label.
+4. **The previous instance can call nothing**, `whoami` included.
+
+A renderer that survives its own close cannot be summoned on demand (§10.1), so the live battery
+asserts the **structure** — the successor is a new instance label — and the registry's unit
+tests assert the **behaviour** deterministically, including that a revoked instance offered the
+successor's generation is refused with `PRINCIPAL_REVOKED` rather than staleness. One of those
+tests demonstrates the hole itself on a still-reusable label, so the defence is not merely
+asserted.
 
 **Identity is pulled, not pushed.** The first build injected the road's generation with
 `Webview::eval` at startup, which **races the page's own first script**: the road issued its
@@ -561,6 +594,49 @@ moment before GTK re-allocates. It survived only because the pane assertion fail
 **A geometry assertion made before layout has settled is not a geometry assertion**; both are
 now measured after the pane settles, and S5 reddens both.
 
+#### 10.6.3 Eventual geometry is not containment
+
+The asynchronous pose was first reported as a timing note. **It is a containment defect.** For
+those ~2.8 s an untrusted pane covered the entire road *and took input over all of it*, while
+every post-settle assertion passed. A gate that only checks the end state cannot see this at
+all.
+
+**The rule: a pane is neither visible nor interactive until its allocation is the read pose,
+and then it becomes both at once.** In `tier1-proof` that is opacity 0 plus insensitive —
+**not** hidden, because a GTK widget that has never been shown is never laid out, so hiding it
+would mean waiting for an allocation that can never arrive. `layout::reveal` is the only thing
+that undoes either, and it does both together.
+
+**A pose that never arrives abandons the promote.** The pane is never shown late and never
+shown wrong; a promote that cannot reach the pose closes the child and revokes its binding.
+
+Measured after the change: **73 samples across the transition, none of them visible or
+interactive outside the rectangle**; the host held the pane contained for **2709 ms** and then
+revealed it; and the post-reveal pose settles in **7 ms** rather than 2782, because by then it
+is already correct.
+
+**The test samples from creation through settling**, not at the end — `promote` is started
+without being awaited and the host is polled while it runs. Two sabotages target this (S5, S7)
+and both redden it.
+
+#### 10.6.4 A synchronous Tauri command runs on the main thread
+
+The containment loop did not work at first, and the reason is worth more than the fix.
+
+A synchronous `#[tauri::command]` runs on the **main thread**. A command that waits for GTK to
+allocate is therefore blocking the layout pass it is waiting for: measured, the overlay sat at
+GTK's never-allocated sentinel `(-1,-1,1,1)` inside a box that was already 1000 × 653, for the
+full five-second deadline, every time. `queue_resize` on the container did not help and could
+not — nothing was going to run it.
+
+**The symptom is maximally misleading: every instrument answers.** `with_webview` executes
+inline when it is already on the main thread, so `place` succeeded and `allocation` returned
+real values. The only thing that never happened was the layout. `async fn` is the fix, and
+`super/cockpit`'s `browser_surface` is `async` for the same reason from the other side.
+
+**Any host-side "wait until the platform has done something" must be async.** That is a rule
+about the road shell, not about this harness.
+
 **The same probe is the macOS test.** On NSView subviews the prediction is the parent stays
 1000 × 653 and the child is 522 × 262. One command, and §11 stops being a hypothesis on this
 axis. Until it is run, it has not been run.
@@ -586,9 +662,23 @@ A pane that reports `live` is worth exactly nothing until something reads the re
 
 ## 11. macOS
 
-Tier 1 is what makes this section short. **It is a hypothesis with a test list, not a
-finding.** The first draft said "macOS is the easier side"; one deleted workaround does not
-establish that, and the section is written as a claim to be falsified.
+**macOS is an EXPLICITLY UNVERIFIED TARGET.** There is no Mac here, nothing in this section has
+been run on one, and development continues on Linux without waiting. The first draft said
+"macOS is the easier side"; one deleted workaround does not establish that, and the section is
+written as a claim to be falsified rather than a plan.
+
+**The Mac runtime check is a RELEASE GATE, not a development blocker.** Nothing downstream waits
+on it; a release that claims macOS support does. `tier1-proof/tools/geometry-probe.mjs` is that
+gate in one command, and it is deliberately portable so the machine can be borrowed or hosted —
+any Apple Silicon Mac that runs the chosen minimum macOS version settles it, and a hosted
+interactive Mac settles it before anyone buys one.
+
+**CI compiles on macOS and that is ALL it proves.** `tier1-proof/.github/workflows/` runs
+`cargo build` + `cargo test` on `macos-14`, which catches platform compilation problems — the
+`cfg`-gated `layout.rs` branch, a diverging tauri API, a dependency that does not build. It
+**cannot** validate WKWebView geometry, the read pose, containment, or input reaching a pane:
+those need a real display and a real webview. The job prints that limit as a warning on every
+run, because a green tick that reads as "macOS works" is worse than no job.
 
 **The hypothesis:** *Tier 1 ports to macOS with no new mechanism, and the Linux-specific
 positioning workaround is removed rather than replaced.*
@@ -604,6 +694,12 @@ positioning workaround is removed rather than replaced.*
   (#13415).
 - Signing and notarization are a documented path.
 
+**The geometry contract, stated so it is portable.** On Linux, with the overlay: parent stays
+**1000 × 653**, child is **522 × 262** at the requested rect, and **no sample is visible or
+interactive outside that rectangle at any point in the transition**. The macOS prediction is the
+same three, reached without the overlay because a child webview is an ordinary NSView subview.
+Either the numbers come back or they do not.
+
 **What must be measured before the hypothesis is accepted** — none of these can be argued from
 Linux, and each has been a real source of divergence in WKWebView:
 
@@ -615,6 +711,8 @@ Linux, and each has been a real source of divergence in WKWebView:
 | **display scaling** | backing-scale and the `scale_factor` the rect maths in `preview.rs` already depends on |
 | **storage** | see the caveat below |
 | **recovery** | §10.1's generation + heartbeat, against a *real* WKWebView termination |
+| **containment** | §10.6.3 — whether a child NSView is ever composited before its frame is set |
+| **threading** | §10.6.4 — whether a sync command blocks layout there too |
 
 **Storage — a correction to the first draft.** `dataStoreIdentifier` on `WebviewBuilder` is
 **macOS 14+ and iOS 17+, and unsupported on Windows, Linux and Android.** It initialises a
@@ -639,8 +737,8 @@ and iPadOS has no free window placement. One road, one pane, or don't.
 
 ## 12. The one narrow proof — BUILT AND GREEN, 2026-09-10
 
-**`RRABBIT/tier1-proof/` — 25 held · 0 failed, static gate 15 held · 0 failed, and all five
-sabotages are falsifiers.**
+**`RRABBIT/tier1-proof/` — 28 held · 0 failed live, 18 held · 0 failed static, 4 registry unit
+tests, and seven sabotages — every one a falsifier.**
 
 **The first report of this said 23 · 0 with geometry listed as "not measured", and that was the
 wrong shape.** Geometry is half the central promise — a road that collapses to one pixel when a
@@ -683,13 +781,20 @@ over a screen showing nothing, and this transition has exactly that shape.
 | 9b | the **host** refuses a privileged op from the road **even when the request claims `by: 'cockpit'`** | `by` reached a decision, or our JavaScript declined instead of the host refusing |
 | 9c | after re-binding, a **captured old-generation** request is rejected | §6.2 #4 — a revoked binding still acts |
 
-### 12.1a The gate is five sabotages now, and one of them is why geometry is a gate
+### 12.1a Seven sabotages, and the accident that happened twice
 
 A botched edit injected **two** sabotages into the harness by accident — an authority bypass and
 a skipped layout call. **The static gate caught the authority one before any test ran.** Nothing
-static could catch the other; only the live geometry assertion found it, and it was found only
-because geometry had just been promoted from a note to a gate. That is the argument for the
-promotion, made by accident and kept.
+static could catch the other; only the live geometry assertion found it. Then **the identical
+accident happened a second time**, and again geometry was the only thing that noticed. Twice is
+not a coincidence and it is the argument for the promotion, made by accident and kept.
+
+**S5's law moved, and the sweep is what said so.** It used to break *"the road collapses to one
+pixel"*; once the pane is contained until its allocation is correct, skipping the layout means
+the pose never arrives and the promote is **abandoned**, so the road never sees a collapsed
+surface at all. The reporter called it *red, but not on the named law*, which is exactly what
+that outcome is for — the sabotage still bites, on a different assertion, and the law it was
+named for is now unreachable from outside.
 
 ### 12.2 The sabotage each assertion owes
 
@@ -871,8 +976,8 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   it, and how many `live` panes a Mac tolerates. All three are first-week measurements and none
   of them can be argued from here. **The reported cap is not promoted to the principal Mac risk
   until this scene is measured.**
-- **measured** — §12's round trip is **built and green**: `RRABBIT/tier1-proof/`, **25 held · 0
-  failed**, static gate **15 held · 0 failed**, and **all five sabotages are falsifiers**. Sign
+- **measured** — §12's round trip is **built and green**: `RRABBIT/tier1-proof/`, **28 held · 0
+  failed** live, static gate **18 held · 0 failed**, 4 registry unit tests, seven sabotages, every one a falsifier. Sign
   published by the coordinator (not sampled, not fetched by the app), one live pane at the
   requested rect with the road intact, real clicks and keys into it, app state surviving
   destroy+recreate with the host holding no copy, and every stale generation refused by the host
@@ -880,6 +985,30 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
 - **corrected** — the first report called that green while geometry was failing. **Geometry is
   half the central promise, so it is an acceptance gate, not a diagnostic.** A road that
   collapses to one pixel has not entered the read pose whatever the authority suite says.
+- **corrected, again** — the asynchronous pose was reported as a timing note and it is a
+  **containment defect**: for ~2.8 s an untrusted pane covered the whole road and took input
+  over all of it while every post-settle assertion passed. **Eventual geometry is not
+  containment.** A pane is now neither visible nor interactive until its allocation is the read
+  pose, and then both at once; a pose that never arrives abandons the promote. Measured: 73
+  samples across the transition, none outside the rectangle; 2709 ms contained; 7 ms to settle
+  after reveal, because by then it is already correct.
+- **found** — contained means opacity 0 plus insensitive, **not hidden**: a GTK widget that has
+  never been shown is never laid out, so hiding it means waiting for an allocation that cannot
+  arrive.
+- **found** — **a synchronous `#[tauri::command]` runs on the main thread**, so a command that
+  waits for the platform blocks the very work it waits for. Measured: the overlay sat at GTK's
+  never-allocated sentinel for the full deadline while `place` and `allocation` both *succeeded*
+  — `with_webview` runs inline when already on the main thread, so every instrument answered and
+  only the layout never happened. Any host-side wait must be `async`.
+- **found** — **`whoami` is the hole generation invalidation has.** It takes no echoed
+  generation, so under a reusable label an instance that outlived its close could call it and
+  come back carrying the successor's. A pane's label is now its instance, `pane-<generation>`,
+  with the capability minted per instance at runtime; a static capability file cannot express
+  this because it names a fixed label.
+- **corrected** — banning `fetch` from the road outright was **broader than the law** and would
+  have been retired the first time a road needed unrelated network access, taking the real
+  assertion with it. What is asserted now: manifest discovery goes through the host-owned
+  package path and cannot silently fall back to a page fetch.
 - **measured** — §10.6 is **CLOSED on Linux**: road 1000 × 653, pane 522 × 262. It took two GTK
   facts, both of which the cockpit's port does not need — `set_size_request` is a minimum a
   WebKitWebView's natural size exceeds (685 × 560), and margins are subtracted a second time
@@ -915,5 +1044,9 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   about geometry. That is the separation working: a platform defect must not be able to redden
   an authority battery, and it did not.
 - **not measured** — an actual renderer crash (only controlled teardown), source unavailability
-  (there is no dev server), and **anything at all on macOS**. `tier1-proof/tools/geometry-probe.mjs`
-  is the macOS contract in one command: parent 1000 × 653, child 522 × 262.
+  (there is no dev server), the pane's on-screen POSITION (size is asserted; position is carried
+  by `get-child-position` and not independently verified), and **anything at all on macOS**.
+- **stated as a limit** — macOS is an **explicitly unverified target** and its runtime check is a
+  **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
+  prints, on every run, that it has validated no geometry, no containment and no input — a green
+  tick that reads as "macOS works" would be worse than no job.

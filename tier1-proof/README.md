@@ -9,13 +9,18 @@ published sign  →  read pose  →  LIVE pane  →  leave read pose  →  publi
                           stale messages rejected
 ```
 
-**Result, 2026-09-10: 25 held · 0 failed, all five sabotages are falsifiers.**
-Static gate: 15 held · 0 failed. Geometry is an **acceptance gate**, not a note:
-road 1000 × 653, pane 522 × 262 at the requested rect.
+**Result, 2026-09-10: 28 held · 0 failed live, 18 held · 0 failed static, 4 registry
+unit tests, seven sabotages — every one a falsifier.**
+
+Geometry is an **acceptance gate**, not a note — road 1000 × 653, pane 522 × 262 at
+the requested rect — and so is **containment**: across 73 samples taken from the
+pane's creation through its settling, it is never visible or interactive outside
+that rectangle. The host holds it contained ~2.7 s, then reveals it in one step.
 
 ```bash
-cargo build --release && node tools/check-acl.mjs && node tools/proof-battery.mjs
-node tools/geometry-probe.mjs      # the platform measurement, kept out of the suite
+cargo build --release && cargo test --release \
+  && node tools/check-acl.mjs && node tools/proof-battery.mjs
+node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
 ```
 
 `tools/sabotage.sh` breaks one law at a time and requires the battery to go red. It reports
@@ -98,10 +103,27 @@ tools/sabotage.sh     four broken laws; each must turn the battery red
 7. **A `str.replace` that matches nothing still prints success.** Two edits reported themselves
    done and changed nothing, and one was then stated as fact. Every replacement asserts its
    anchor; the static gate is what caught the false one.
+8. **A synchronous `#[tauri::command]` runs on the main thread.** A command that waits for GTK
+   to allocate blocks the layout pass it is waiting for — the overlay sat at GTK's
+   never-allocated sentinel `(-1,-1,1,1)` for the full deadline, every time, while `place` and
+   `allocation` both *succeeded* (`with_webview` runs inline when already on the main thread).
+   Every instrument answered; only the layout never happened. `async fn` is the fix.
+9. **Contained means opacity 0 + insensitive, not hidden.** A GTK widget that has never been
+   shown is never laid out, so hiding it means waiting for an allocation that cannot arrive.
+10. **`whoami` takes no echoed generation**, so a reusable label leaks: an instance that
+   outlived its `close()` could resolve the name to the *successor's* binding and stop being
+   old. A pane label is `pane-<generation>`, never reused, with its capability minted per
+   instance at runtime — a static capability file cannot express that.
 
 ## Not exercised, named rather than implied
 
 - **Source availability** (kill the dev server). There is no dev server here — the UI is baked
   in — so the condition cannot arise. Unproven.
 - **An actual renderer crash.** Only controlled teardown was exercised. Unproven.
-- **Anything on macOS.** Nothing in this harness has been run on a Mac.
+- **The pane's on-screen POSITION.** Size is asserted; position is carried by
+  `get-child-position` and is not independently verified.
+- **Anything on macOS.** Nothing here has been run on a Mac. macOS is an **explicitly
+  unverified target**, and its runtime check is a **release gate, not a development blocker**.
+  CI compiles and unit-tests on `macos-14` and prints on every run that it validated no
+  geometry, no containment and no input — `tools/geometry-probe.mjs` is the real gate, in one
+  command, on any Apple Silicon Mac (borrowed or hosted will do).

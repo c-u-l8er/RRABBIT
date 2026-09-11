@@ -82,16 +82,39 @@ check('no command takes a webview label from the page',
 check('no command takes a grants argument',
   cmds.every(([, , args]) => !/\bgrants?\s*:/.test(args)));
 
-/* §5 — manifest discovery is the coordinator's, so the road fetches nothing. */
+/* §5 — MANIFEST DISCOVERY GOES THROUGH THE HOST-OWNED PACKAGE PATH AND
+   CANNOT SILENTLY FALL BACK TO A PAGE FETCH.
+
+   The first version of this banned `fetch` from the road outright, which is
+   BROADER THAN THE LAW: a road may legitimately need unrelated network access
+   later, and a gate that forbids it would be retired the first time it got in
+   the way — taking the real assertion with it. What is durable is that the
+   sign comes from the coordinator and that there is no fallback path to the
+   app's own bundle. */
 const road = readFileSync(`${ROOT}/ui/index.html`, 'utf8');
-check('the road page contains no `fetch` at all — the sign comes from the host',
-  !/\bfetch\s*\(/.test(road));
-check('the CSP does not permit the road to fetch its own origin',
-  /* [^;"] and not [^"] — the first version ran past the semicolon into
-     `img-src 'self'` and reported a permissive connect-src that was not there.
-     A gate that is wrong in the SAFE direction still has to be fixed: it would
-     have gone green the day connect-src really did allow 'self'. */
-  !/connect-src[^;"]*'self'/.test(readFileSync(`${ROOT}/tauri.conf.json`, 'utf8')));
+check('the road obtains its sign through the host manifest command',
+  /road_manifest/.test(main) && /apply\('manifest'\)/.test(road));
+check('no fetch in the road targets a manifest or the package bundle',
+  ![...road.matchAll(/\bfetch\s*\(([^)]*)\)/g)]
+    .some(([, arg]) => /manifest|app\.json|\.rune|\.bend/i.test(arg)),
+  'a page fetch names a manifest path');
+check('the manifest command has no page-side fallback',
+  !/apply\('manifest'\)[\s\S]{0,400}?catch[\s\S]{0,200}?fetch\s*\(/.test(road),
+  'a failed host manifest falls back to fetching the bundle');
+check('the host is the only reader of the package manifest',
+  /include_str!\("\.\.\/ui\/app\.json"\)/.test(readFileSync(`${ROOT}/src/manifest.rs`, 'utf8')));
+
+/* §6.2 — the pane capability is minted PER INSTANCE at runtime. A static
+   capabilities/pane.json cannot be: it names a fixed label, and the whole
+   point is that a pane label is never reused. */
+check('there is no static capability naming a fixed pane label',
+  !readdirSync(`${ROOT}/capabilities`).some((f) => /pane/i.test(f)));
+check('the pane capability is built per instance from the binding',
+  /CapabilityBuilder::new\(format!\("pane-instance-\{\}"/.test(main)
+    && /\.webview\(label\.clone\(\)\)/.test(main));
+check('the pane label carries its generation and is never a constant',
+  /format!\("pane-\{\}", g\.next_generation \+ 1\)/.test(principal)
+    && !/const PANE: &str/.test(main));
 
 /* §6.2.1 — a privileged command must be checked before any effect. */
 const intent = main.slice(main.indexOf('fn privileged_intent'));

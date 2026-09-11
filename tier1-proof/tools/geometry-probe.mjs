@@ -73,15 +73,39 @@ try {
   console.log(`\n  requested read rect   x=${rect.x} y=${rect.y} ${rect.w} x ${rect.h}`);
   console.log(`  road BEFORE promote   ${JSON.stringify(await geom())}`);
 
-  const el = await wd('POST', `/session/${session}/element`,
-    { using: 'css selector', value: '#enter' });
-  await wd('POST', `/session/${session}/element/${Object.values(el)[0]}/click`, {});
-  await sleep(1500);
-  const shown = await sc("return document.getElementById('status').textContent;");
-  try {
-    const r = JSON.parse(shown);
-    console.log(`  host says allocated   ${JSON.stringify(r.allocated)}`);
-  } catch { console.log(`  host says             ${shown.slice(0, 160)}`); }
+  /* Promote is started WITHOUT awaiting, and the host is polled while it
+     runs — a pane that fails to reach its pose is torn down, so anything
+     read after the fact reads an empty road. */
+  await sc(`window.__promoting = window.__apply('promote',
+    { rect: (() => { const f = document.getElementById('readframe');
+                     f.classList.add('on');
+                     const r = f.getBoundingClientRect();
+                     return { x: r.x, y: r.y, width: r.width, height: r.height }; })() })
+    .then(r => (window.__promoted = r));`);
+  const readStatus = () => sc(
+    `return window.__TAURI__.core.invoke('road_status',
+       { generation: window.__ROAD_GENERATION }).then(r => r, e => ({ refused: String(e) }));`);
+  const seenPoses = [];
+  for (let i = 0; i < 60; i++) {
+    const st = await readStatus();
+    if (st && st.read_pose) seenPoses.push(st.read_pose);
+    if (await sc('return window.__promoted !== undefined;')) break;
+    await sleep(150);
+  }
+  const last = seenPoses[seenPoses.length - 1];
+  if (last) {
+    console.log(`  host: allocation      ${JSON.stringify(last.alloc)}`);
+    console.log(`  host: allocated_w/h   ${JSON.stringify(last.allocated)}`);
+    console.log(`  host: size_request    ${JSON.stringify(last.size_request)}`);
+    console.log(`  host: realized/mapped ${last.realized}/${last.mapped}  visible ${last.visible}`);
+    console.log(`  host: parent          ${JSON.stringify(last.parent)}`);
+  } else {
+    console.log('  host: no read_pose sample was taken');
+  }
+  const pr = await sc('return window.__promoted;');
+  console.log(`  promote ok            ${pr && pr.ok}`);
+  if (pr && pr.why) console.log(`  promote why           ${pr.why}`);
+  await sleep(500);
 
   let verdict = 'UNKNOWN';
   for (const h of await handles()) {

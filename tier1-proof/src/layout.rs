@@ -107,7 +107,15 @@ pub fn place(view: &tauri::Webview, r: &Rect) -> Result<(), String> {
                     // on the overlay is what actually gives it the window.
                     road.set_size_request(1, 1);
                     road.show();
-                    overlay.show();
+                    overlay.show_all();
+                    // **Ask for the layout explicitly.** Packing a new child
+                    // into a realized box did NOT produce a size-allocate on
+                    // its own here: measured, the overlay sat at GTK's
+                    // never-allocated sentinel (-1,-1,1,1) inside a box that
+                    // was 1000x653, for as long as anything waited. The
+                    // container is what has to re-run, not the pane.
+                    container.queue_resize();
+                    overlay.queue_resize();
                     overlay
                 };
                 // Geometry BEFORE attachment: `get-child-position` runs during
@@ -131,8 +139,19 @@ pub fn place(view: &tauri::Webview, r: &Rect) -> Result<(), String> {
             }
             READ_POSE.with(|p| p.set((x, y, width, height)));
             widget.set_size_request(width, height);
+            // **CONTAINED, NOT HIDDEN.** A `gtk::Widget` that has never been
+            // shown is not laid out at all, so hiding it would mean waiting
+            // for an allocation that can never arrive. Opacity 0 plus
+            // insensitive is laid out, invisible, and takes no input — which
+            // is the actual requirement. `reveal` is the only thing that
+            // undoes either, and it does both at once.
+            widget.set_opacity(0.0);
+            widget.set_sensitive(false);
             widget.show();
             widget.queue_resize();
+            if let Some(p) = widget.parent() {
+                p.queue_resize();
+            }
             Ok(())
         })()
         .map_err(str::to_owned);
@@ -152,6 +171,35 @@ pub fn place(view: &tauri::Webview, r: &Rect) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Make the pane visible and interactive, in one step, once its allocation is
+/// the read pose. **The only place either is undone.**
+///
+/// Measured before this existed: the pane was created box-packed at full
+/// window size and stayed that way for ~2.8 s before GTK re-allocated it. The
+/// eventual geometry was right and the containment was not — an untrusted
+/// pane covered the whole road, and took input over all of it, for most of
+/// three seconds. ROAD_SHELL.md §10.6.3.
+#[cfg(target_os = "linux")]
+pub fn reveal(view: &tauri::Webview) -> Result<(), String> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    view.with_webview(move |platform| {
+        use gtk::prelude::*;
+        let w: gtk::Widget = platform.inner().clone().upcast();
+        w.set_opacity(1.0);
+        w.set_sensitive(true);
+        let _ = send.send(());
+    })
+    .map_err(|e| e.to_string())?;
+    receive
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| "the pane could not be revealed".to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reveal(view: &tauri::Webview) -> Result<(), String> {
+    view.show().map_err(|e| e.to_string())
+}
+
 /// What the platform ACTUALLY gave the pane. An instrument, not a control.
 ///
 /// Two rounds of the read-pose defect were spent inferring the allocation from
@@ -166,11 +214,39 @@ pub fn allocation(view: &tauri::Webview) -> serde_json::Value {
         let w: gtk::Widget = platform.inner().clone().upcast();
         let a = w.allocation();
         let (rw, rh) = w.size_request();
+        // The chain from the pane up to the toplevel, with each step's type,
+        // allocation and child count. Two rounds were spent reasoning about a
+        // hierarchy nobody had looked at.
+        let mut chain = vec![];
+        let mut node = Some(w.clone());
+        while let Some(n) = node {
+            let a = n.allocation();
+            let kids = n.clone().downcast::<gtk::Container>().ok().map(|c| c.children().len());
+            chain.push(serde_json::json!({
+                "type": n.type_().name().to_string(),
+                "w": a.width(), "h": a.height(), "x": a.x(), "y": a.y(),
+                "children": kids,
+                "hexpand": n.hexpands(), "vexpand": n.vexpands(),
+                "name": n.widget_name().to_string(),
+            }));
+            node = n.parent();
+        }
+        let parent_alloc = serde_json::Value::Array(chain);
         let _ = send.send(serde_json::json!({
             "alloc": { "x": a.x(), "y": a.y(), "w": a.width(), "h": a.height() },
             "size_request": { "w": rw, "h": rh },
             "margins": { "start": w.margin_start(), "top": w.margin_top() },
             "scale_factor": w.scale_factor(),
+            // Containment is a function of BOTH, and a sample that reports
+            // only geometry cannot answer "was it ever visible outside its
+            // rectangle?" — which is the question §10.6.3 exists for.
+            "opacity": w.opacity(),
+            "sensitive": w.is_sensitive(),
+            "visible": w.is_visible() && w.opacity() > 0.0,
+            "allocated": { "w": w.allocated_width(), "h": w.allocated_height() },
+            "realized": w.is_realized(),
+            "mapped": w.is_mapped(),
+            "parent": parent_alloc,
         }));
     });
     receive
