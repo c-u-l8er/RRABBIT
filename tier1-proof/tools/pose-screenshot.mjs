@@ -110,11 +110,10 @@ try {
   };
   await sc("document.getElementById('readframe').classList.remove('on'); return true;");
   const aligned = await sc(`const a=document.getElementById('sign-notes').getBoundingClientRect();
-    const b=document.getElementById('sign-digest').getBoundingClientRect();
     const r=document.getElementById('road').getBoundingClientRect();
-    return a.right<r.x+r.width/2 && b.left>r.x+r.width/2
-      && Math.abs(a.y-b.y)<1 && Math.abs(a.height-b.height)<1;`);
-  if (!aligned) throw new Error('roadside windows are not aligned on opposite sides');
+    return a.right<r.x+r.width/2 && a.width>0 && a.height>0
+      && getComputedStyle(document.getElementById('sign-digest')).visibility==='hidden';`);
+  if (!aligned) throw new Error('current lane window is misplaced or another lane captures clicks');
   await sleep(150);
   capture(OUT.replace(/\.png$/, '-road.png'));
 

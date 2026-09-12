@@ -1005,7 +1005,11 @@ arrival. The projected sign and native read frame were measured coincident at
 destroys the pane and returns to the saved lane position. This is the shared
 Tauri surface's visual controller, not a replacement for the m2 compositor.
 The m2 operation adapter remains the independent seam proof described above.
-Multi-lane ramps, the full cockpit, and Super task routing remain unfinished.
+The subsequent two-lane pass adds Documents/Notes and Summaries/Digest with paved
+connecting ramps. Camera and pavement use the same curve; an accepted handoff
+travels to the destination lane before promotion. These are fixed presentation
+lanes, not Super runtime work lanes. The full cockpit and Super task routing
+remain unfinished; simultaneous native residency remains N=1.
 
 ### 12.5 What would falsify the whole approach
 
@@ -1287,3 +1291,9 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
   **release gate, not a development blocker**. CI compiles and unit-tests on `macos-14` and
   prints, on every run, that it has validated no geometry, no containment and no input — a green
   tick that reads as "macOS works" would be worse than no job.
+- **measured 2026-09-12** — two fixed presentation lanes retain N=1. The integrated
+  Super battery holds 30 checks, accepted handoff 24. The destination sign agrees
+  with its read frame; the standalone native fullscreen rectangle has zero offset
+  at 1920×1080 / 1×. These runs used an isolated Mutter/XWayland display and
+  software rendering because the locked physical desktop stopped animation frames.
+  No hardware frame-rate, Super runtime-lane routing or macOS claim follows.

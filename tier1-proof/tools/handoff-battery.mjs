@@ -169,6 +169,8 @@ try {
     h2.ok === true && h2.steps.map((x) => x.name).join(',') === 'evict,route,promote-2',
     JSON.stringify(h2.steps?.map((x) => `${x.name}:${x.ok}`) ?? h2));
   if (!h2.ok) throw new Error(`handoff refused: ${JSON.stringify(h2)}`);
+  check('accepted handoff travels to the destination lane before reading',
+    await script("return window.__roadScene.snapshot().lane==='summaries'&&window.__roadScene.snapshot().phase==='reading';"));
   S = await observe('second app live');
   check('the second pane is a DIFFERENT INSTANCE, not the first rebound',
     S.paneLabel !== firstLabel && /^pane-\d+$/.test(String(S.paneLabel)),

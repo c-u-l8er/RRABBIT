@@ -8,7 +8,20 @@ a Three.js scene using the existing 0.160.1 dependency. `m2/road-geometry.js`
 now supplies the shared T&R field of view, dash spacing, entrance location,
 and roadside coordinates. Scroll or use Up/Down to drive. Entrance travels
 through the gantry into the app section; Exit traverses the end gantry. Home
-returns to the start, and End drives to the exit. This is one lane.
+returns to the start, and End drives to the exit.
+
+**Two-lane pass, 2026-09-12.** Documents hosts Notes; Summaries hosts Digest.
+The lane sign follows a paved connecting ramp through exit and entrance gantries.
+The camera follows the same curve as the pavement. Accepted handoff continuation
+travels to the destination lane before opening its pane. Leaving returns to that
+lane's saved read-entry position. Lane changes keep N=1 and introduce no new host
+commands or authority. These fixed presentation lanes are not Super runtime lanes.
+
+Measured on an isolated 1920×1080 Mutter/XWayland display with software rendering:
+Super integration 30/30; accepted handoff 24/24; static ACL 24/24 (Super 41/41).
+The native fullscreen pane measured 1382×670 at (269,205), with zero offset from
+the requested rect. This is not a physical-display performance measurement.
+The user's locked desktop paused animation frames; no unlock was attempted.
 
 Selecting an app flies along its front normal into a square read pose. The
 published sign stretches to the read-frame aspect during arrival; its world
@@ -35,8 +48,8 @@ opens `cd-road` in the same application process, with a separate capability.
 The **Super (CD)** roadside sign returns to the trusted cockpit. The standalone
 binary still hosts only Notes/Digest and correctly hides that sign. This is not
 an embedded cockpit pane or a manager of arbitrary installed desktop apps.
-Entrance/exit here navigate this single lane and fullscreen state; multi-lane
-ramps and the complete m2 cockpit remain unimplemented. The approach/return
+Entrance/exit here navigate the current lane and fullscreen state; the complete
+m2 cockpit remains unimplemented. The approach/return
 camera motion described above is now implemented.
 
 See `../../super/docs/app/ROAD_SURFACE.md` for the integrated build and native
