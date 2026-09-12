@@ -8,7 +8,7 @@
 # in target/release and the next run silently measures it — that happened, and
 # cost a confused re-run. Same class as the baked-UI trap (ROAD_SHELL.md
 # §10.7): the artifact is not the source.
-set -u
+set -eu
 cd "$(dirname "$0")/.."
 # **EVERY SOURCE FILE, not the ones the sweep happened to touch when this was
 # written.** S8 and S9 edit `packages.rs`, which was not in the backup list, so
@@ -18,32 +18,45 @@ cd "$(dirname "$0")/.."
 BK=$(mktemp -d)
 cp -a src "$BK/src"
 restore() {
-  cp -a "$BK/src/." src/
-  cargo build --release >/dev/null 2>&1
+  # Do NOT restore timestamps. Cargo otherwise calls the last sabotaged
+  # binary fresh even though the restored source contains different bytes.
+  cp -R "$BK/src/." src/
+  cargo build --release >/dev/null 2>&1 || return 1
 }
-trap restore EXIT
+finish() {
+  result=$?
+  trap - EXIT
+  restore || result=1
+  exit "$result"
+}
+trap finish EXIT
+bad=0
 
 run() {  # $1 = label, $2 = text that MUST appear in a FAILED line, $3 = battery (default proof)
   if ! cargo build --release >/dev/null 2>&1; then
     echo "  DOES NOT COMPILE  $1"
     echo "      (a sabotage the type system refuses is hardening, not coverage —"
     echo "       the law still needs a falsifier that CAN be written)"
-    return
+    bad=$((bad + 1))
+    return 0
   fi
-  out=$(timeout 300 node "tools/${3:-proof}-battery.mjs" 2>&1)
+  code=0
+  out=$(timeout 300 node "tools/${3:-proof}-battery.mjs" 2>&1) || code=$?
   # THREE OUTCOMES, NOT TWO. The first version printed "the battery stayed
   # green over a broken law" whenever its grep missed — and it missed twice,
   # on sabotages that HAD reddened the battery, just not on the line the
   # pattern named. A sweep that reports a red run as green is worse than no
   # sweep: it retires a law that is in fact tested, and it did.
-  if echo "$out" | grep -q "FAILED.*$2"; then
+  if [ "$code" -eq 1 ] && echo "$out" | grep -q "FAILED.*$2"; then
     echo "  IS A FALSIFIER    $1"
     echo "$out" | grep "FAILED" | sed 's/^/      /'
   elif echo "$out" | grep -q "FAILED"; then
+    bad=$((bad + 1))
     echo "  RED, BUT NOT ON THE NAMED LAW    $1"
     echo "      expected a FAILED line matching: $2"
     echo "$out" | grep "FAILED" | sed 's/^/      /'
   else
+    bad=$((bad + 1))
     echo "  NOT A FALSIFIER   $1  — the battery stayed green over a broken law"
     echo "$out" | tail -2 | sed 's/^/      /'
   fi
@@ -205,3 +218,7 @@ PYX
 run "S10 acceptance is not recorded" "ledger records it" handoff
 restore
 echo
+if [ "$bad" -ne 0 ]; then exit 1; fi
+# Verify the RESTORED executable, not only the mutated ones. This would have
+# caught the timestamp-preserving restore that left S10 in the release binary.
+node tools/handoff-battery.mjs

@@ -12,8 +12,8 @@
      · eviction under N = 1 is how the second app stands, not an optimisation
      · authority does not leak across the boundary: a package that declares no
        `produces` is refused when it tries to hand work on
-     · each app's own state survives its own eviction, and neither can read
-       the other's
+     · each app's own state survives its own eviction using package-specific
+       keys; the shared origin is NOT a confidentiality boundary
 
    `N = 1` is NOT a limit on this test. It limits SIMULTANEOUS live panes;
    two apps, routing, eviction, state and sequential promotion are all
@@ -132,6 +132,7 @@ try {
     await sleep(250);
   }
   let pp = await script('return window.__paneProbe();');
+  const notesState = { counter: pp.counter, note: pp.note };
   check('the pane is the routed package and was HANDED its task',
     pp.package === 'notes' && pp.task && pp.task.kind === 'document'
       && /entered the road/.test(String(pp.task.payload)), JSON.stringify(pp.task));
@@ -166,7 +167,8 @@ try {
   const h2 = await script('return window.__handoffNext();');
   check('evict, route the accepted kind, promote the next package',
     h2.ok === true && h2.steps.map((x) => x.name).join(',') === 'evict,route,promote-2',
-    JSON.stringify(h2.steps.map((x) => `${x.name}:${x.ok}`)));
+    JSON.stringify(h2.steps?.map((x) => `${x.name}:${x.ok}`) ?? h2));
+  if (!h2.ok) throw new Error(`handoff refused: ${JSON.stringify(h2)}`);
   S = await observe('second app live');
   check('the second pane is a DIFFERENT INSTANCE, not the first rebound',
     S.paneLabel !== firstLabel && /^pane-\d+$/.test(String(S.paneLabel)),
@@ -220,11 +222,28 @@ try {
   }
   const pp4 = await script('return window.__paneProbe();');
   check('it kept its OWN state across being evicted for another app',
-    pp4.package === 'notes' && pp4.counter !== digestCount,
-    `notes ${pp4.counter} · digest ${digestCount} — a shared counter would make these equal`);
-  check('and it cannot see the other app\'s state',
+    pp4.package === 'notes' && pp4.counter === notesState.counter && pp4.note === notesState.note,
+    `expected ${JSON.stringify(notesState)}; got ${JSON.stringify({ counter: pp4.counter, note: pp4.note })}`);
+  check('its storage key names are scoped to its package (not storage isolation)',
     JSON.stringify(pp4.storageKeys) === JSON.stringify(['tier1-proof.notes.counter', 'tier1-proof.notes.note']),
     JSON.stringify(pp4.storageKeys));
+
+  await focus(S.road);
+  await script("return window.__apply('demote');");
+  const digestBack = await script(`return window.__apply('promote', {
+    rect: (() => { const b = document.getElementById('readframe').getBoundingClientRect();
+      return {x:b.x, y:b.y, width:b.width, height:b.height}; })(), package: 'digest', task: null });`);
+  check('the second app can also be promoted again', digestBack.ok === true, JSON.stringify(digestBack));
+  S = await observe('second app restored');
+  await focus(S.pane);
+  for (let i = 0; i < 60; i++) {
+    if (await script("return document.body.dataset.ready === '1';")) break;
+    await sleep(250);
+  }
+  const digestRestored = await script('return window.__paneProbe();');
+  check('the second app restores the exact counter saved before eviction',
+    digestRestored.package === 'digest' && digestRestored.counter === digestCount,
+    `expected ${digestCount}, got ${digestRestored.counter}`);
 
   /* ── 8 ─ N = 1, at every observation ────────────────────────────────── */
   console.log('\n  \x1b[1m8 · one live pane, at every point in the run\x1b[0m');

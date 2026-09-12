@@ -38,6 +38,8 @@ jobs:
       - run: cargo install tauri-driver --locked
       - run: cargo build --release
       - run: cargo test --release
+      - name: verifier reporting regression tests
+        run: node --test tools/verification-result.test.mjs
       - name: the static ACL gate
         run: node tools/check-acl.mjs
       - name: the live battery

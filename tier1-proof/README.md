@@ -10,8 +10,12 @@ published sign  →  read pose  →  LIVE pane  →  leave read pose  →  publi
                           stale messages rejected
 ```
 
-**Result, 2026-09-10: 28 held · 0 failed live, 18 held · 0 failed static, 4 registry
-unit tests, seven sabotages — every one a falsifier.**
+**Checkpoint repaired 2026-09-12.** The clean-tree receipt for `43c8b60` failed its
+handoff stage. The final sabotage executable had survived restoration because its
+source timestamps were restored too, so Cargo considered that executable fresh.
+The sweep now restores with fresh timestamps, propagates failures, and runs the
+handoff battery against the restored executable. Cite the dated receipt for the
+tested revision and counts; this header is not a substitute for a complete run.
 
 Geometry is an **acceptance gate**, not a note — road 1000 × 653, pane 522 × 262 at
 the requested rect — and so is **containment**: across 73 samples taken from the
@@ -36,7 +40,8 @@ node tools/handoff-battery.mjs     # two apps, one live pane: routing, acceptanc
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
 node tools/renderer-crash.mjs      # SIGKILL the pane's renderer; read what the host makes of it
 node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
-node tools/sabotage.sh             # break one law at a time; the battery must go red
+bash tools/sabotage.sh             # break one law at a time; the battery must go red
+node --test tools/verification-result.test.mjs # reporting, process exits, sweep completeness
 ```
 
 `tools/sabotage.sh` breaks one law at a time and requires the relevant battery to go red —
@@ -52,14 +57,16 @@ the live geometry gate found it, which is the argument for geometry being a gate
 
 ## The second proof — two apps, one live pane
 
-`tools/handoff-battery.mjs`, **21 held · 0 failed**. Two packages in the coordinator's
+`tools/handoff-battery.mjs`. Two packages in the coordinator's
 catalogue: `notes` (accepts `document`, produces `summary`) and `digest` (accepts `summary`,
 produces **nothing**). Both signs render with **zero** live panes; routing reads the
 declaration and refuses an unroutable kind by name; the ledger stays empty while an app works,
 and the road has *nothing to route* until the coordinator accepts; eviction is how the second
 app stands; `digest` is never granted `offer` and the host refuses it when it tries; each app
-keeps its own state across being evicted for the other; and there is **one live pane at every
-observation**.
+keeps its exact state across being evicted for the other; and there is **at most one live pane
+at every observation**. These sample apps share an origin and use package-prefixed storage
+keys. That prevents accidental key collisions; it does not prevent one app reading another's
+storage. The earlier claim of cross-app storage confidentiality is retracted.
 
 `N = 1` was not a blocker here and assuming it would be is worth naming: the budget limits
 *simultaneous* live panes, and two apps, routing, eviction, state and sequential promotion are

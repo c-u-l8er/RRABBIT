@@ -1,6 +1,7 @@
 # The road as a window manager — Tier 1
 
-**Status: `spec`. Nothing here is built. Nothing here is ratified.**
+**Status: `spec`; standalone Linux Tier 1 and two-app handoff proofs implemented.
+The road-shell product is not implemented. Six decisions remain open in §13.**
 **The scope ruling in §1 is Travis's, 2026-09-10. Everything downstream of it is a proposal.**
 
 Author: Claude, 2026-09-10. Companion to `PAPER_ROADS.md` (the pane), `OP_VOCABULARY_DRAFT.md`
@@ -962,8 +963,8 @@ What it establishes:
 | **acceptance is a RECORD** | what the app gets back is the coordinator's ledger entry, not its own claim |
 | **eviction is how the second app stands** | evict → route the accepted kind → promote the next, a genuinely different instance |
 | **authority does not cross the boundary** | `digest` declares no `produces`, is never granted `offer`, and is refused by the host when it tries |
-| **state is each app's own** | `notes` keeps its state across being evicted *for another app*, and the two cannot read each other's |
-| **one live pane at every observation** | 5 observations across the run, never two |
+| **state survives eviction** | both apps restore their exact state using package-prefixed keys; the shared origin does not isolate their storage |
+| **at most one live pane at every observation** | sampled across the handoff and both restorations |
 
 **A grant derived from a declaration is the part worth keeping.** `packages::grants_for` reads
 the manifest's `produces` and grants `offer` only where something is produced, and the instance
@@ -1040,6 +1041,23 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
 ---
 
 ## DOCTRINE
+
+- **corrected 2026-09-12** — the final clean-tree `43c8b60` receipt failed the handoff
+  stage. `cp -a` restored old source timestamps, so even a subsequent Cargo build
+  reused the S10 executable that accepted without recording the ledger. Restore now
+  refreshes timestamps and verifies the restored executable with the handoff battery.
+- **corrected 2026-09-12** — the geometry probe omitted `package` after the catalogue
+  change and called an empty road "parent intact". It now requires successful
+  promotion, exactly one child of the requested size, unchanged parent dimensions,
+  and a successful process exit. Process failure also overrides success-looking
+  output in the consolidated verifier; all ten distinct sabotages must complete.
+- **corrected 2026-09-12** — package-prefixed storage keys do not prove confidentiality
+  on a shared origin. The handoff test now checks exact state preservation for both
+  apps and makes no cross-app storage secrecy claim. No new storage threat model
+  or external-origin ruling is implied.
+- **found 2026-09-12** — the pane can bootstrap before its read pose is revealed.
+  Publish the coordinator's package and task before creating the child; clear them
+  if creation or placement fails. Waiting until reveal races `pane_hello`.
 
 - **measured** — the Tauri host, the multi-webview primitive, the external-URL child webview
   with a navigation policy, and the per-webview ACL gate all exist in `super/cockpit/` today.

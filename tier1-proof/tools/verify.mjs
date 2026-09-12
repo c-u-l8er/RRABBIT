@@ -1,7 +1,6 @@
 /* verify — every instrument this harness has, in one command, with a receipt.
    ────────────────────────────────────────────────────────────────────────
-   There are six of them now and no single entry point, which is how a suite
-   starts being run in pieces and reported from memory. Each stage below
+   Each stage below
    states what it proves; each SKIP states why, because a skipped stage that
    looks like a pass is worse than a red one.
 
@@ -15,13 +14,23 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { summarize, successfulProcess, sweepResult } from './verification-result.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SWEEP = process.argv.includes('--sweep');
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const run = (cmd, args, opts = {}) =>
-  spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 2_400_000,
+const logs = `${ROOT}/receipts/logs-${stamp}`;
+mkdirSync(logs, { recursive: true });
+let logNumber = 0;
+const run = (cmd, args, opts = {}) => {
+  const r = spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 2_400_000,
+    maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, CARGO_TARGET_DIR: `${ROOT}/target` }, ...opts });
+  writeFileSync(`${logs}/${String(++logNumber).padStart(2, '0')}.log`,
+    `${JSON.stringify([cmd, ...args])}\nexit=${r.status} signal=${r.signal ?? '-'} error=${r.error ?? '-'}\n`
+    + `${r.stdout ?? ''}\n${r.stderr ?? ''}`);
+  return r;
+};
 
 /* PRESENCE, not `--version`. The first version asked each binary for a
    version string and skipped every stage that mattered: `tauri-driver` does
@@ -40,7 +49,10 @@ const capability = {
 };
 
 const stages = [];
+const revisionBefore = (run('git', ['rev-parse', 'HEAD']).stdout || '').trim();
+const dirtyBefore = (run('git', ['status', '--porcelain', '--', '.']).stdout || '').trim();
 const stage = (name, proves, fn) => {
+  console.log(`  running  ${name}`);
   const t0 = Date.now();
   const r = fn();
   stages.push({ name, proves, ms: Date.now() - t0, ...r });
@@ -67,6 +79,12 @@ stage('build', 'the harness compiles', () => {
                         : { status: 'failed', why: (r.stderr || '').slice(-300) };
 });
 
+stage('verifier unit tests', 'failures, skips, process exits and incomplete sweeps cannot pass', () => {
+  const r = run('node', ['--test', 'tools/verification-result.test.mjs']);
+  return successfulProcess(r) ? { status: 'held', result: 'reporting regression tests passed' }
+    : { status: 'failed', why: `${r.stdout || ''}\n${r.stderr || ''}`.slice(-1000) };
+});
+
 stage('registry unit tests', 'the whoami/revocation invariants, deterministically', () => {
   const r = run('cargo', ['test', '--release']);
   const m = /test result: ok\. (\d+) passed/.exec(r.stdout || '');
@@ -90,49 +108,47 @@ stage('handoff battery', 'two apps, one live pane: routing, acceptance, eviction
 });
 
 stage('geometry contract', 'road 1000x653, pane at the requested rect', () => {
-  if (!capability['tauri-driver'] || !display)
+  if (!capability['tauri-driver'] || !capability.WebKitWebDriver || !display)
     return { status: 'skip', why: 'needs tauri-driver and a display' };
   const r = run('node', ['tools/geometry-probe.mjs']);
   const v = /verdict: (.+)/.exec(r.stdout || '');
-  return v && /parent intact/.test(v[1]) ? { status: 'held', result: v[1].trim() }
+  return successfulProcess(r) && v && /parent intact; child matches requested size/.test(v[1]) ? { status: 'held', result: v[1].trim() }
     : { status: 'failed', why: (v ? v[1] : (r.stdout || '')).slice(-200) };
 });
 
 stage('renderer death', 'unresponsive never gone; the road survives; recovery', () => {
-  if (!capability['tauri-driver'] || !display)
+  if (!capability['tauri-driver'] || !capability.WebKitWebDriver || !display)
     return { status: 'skip', why: 'needs tauri-driver and a display' };
   return fromCounts(run('node', ['tools/renderer-crash.mjs']));
 });
 
 stage('on-screen position', 'WHERE the pane is, in pixels', () => {
-  if (!capability.import || !capability.magick || !capability.xprop || !display)
+  if (!capability.import || !capability.magick || !capability.xprop
+      || !capability['tauri-driver'] || !capability.WebKitWebDriver || !process.env.DISPLAY)
     return { status: 'skip', why: 'needs ImageMagick (import + magick), xprop and an X display' };
   const r = run('node', ['tools/pose-screenshot.mjs', `${ROOT}/receipts/read-pose-${stamp}.png`]);
   const v = /"verdict": "([^"]+)"/.exec(r.stdout || '');
   const g = /"raw_trim_geometry": "([^"]+)"/.exec(r.stdout || '');
-  return v && /IS AT THE REQUESTED RECT/.test(v[1])
+  return successfulProcess(r) && v && /IS AT THE REQUESTED RECT/.test(v[1])
     ? { status: 'held', result: g ? g[1] : v[1] }
     : { status: 'failed', why: (v ? v[1] : (r.stdout || '')).slice(-200) };
 });
 
 stage('sabotage sweep', 'every law has a falsifier that can be written', () => {
   if (!SWEEP) return { status: 'skip', why: 'not requested — pass --sweep (~20 min)' };
-  if (!display) return { status: 'skip', why: 'needs a display' };
+  if (!display || !capability['tauri-driver'] || !capability.WebKitWebDriver)
+    return { status: 'skip', why: 'needs tauri-driver, WebKitWebDriver and a display' };
   const r = run('bash', ['tools/sabotage.sh']);
-  const out = (r.stdout || '') + (r.stderr || '');
-  const fal = (out.match(/IS A FALSIFIER/g) || []).length;
-  const not = (out.match(/NOT A FALSIFIER/g) || []).length;
-  const off = (out.match(/RED, BUT NOT ON THE NAMED LAW/g) || []).length;
-  return not === 0 && off === 0 && fal > 0
-    ? { status: 'held', result: `${fal}/${fal} falsifiers` }
-    : { status: 'failed', why: `${fal} falsifiers, ${off} off-law, ${not} not falsifiers` };
+  return sweepResult(r);
 });
 
 /* ── the receipt ──────────────────────────────────────────────────────── */
 const commit = (run('git', ['rev-parse', '--short', 'HEAD']).stdout || '').trim();
-const dirty = (run('git', ['status', '--porcelain', '--', '.']).stdout || '').trim();
-const failed = stages.filter((s) => s.status === 'failed');
+const dirty = dirtyBefore || (run('git', ['status', '--porcelain', '--', '.']).stdout || '').trim()
+  || (revisionBefore !== (run('git', ['rev-parse', 'HEAD']).stdout || '').trim()
+    ? 'revision changed during verification' : '');
 const skipped = stages.filter((s) => s.status === 'skip');
+const summary = summarize(stages);
 
 /* A RECEIPT DESCRIBES A REVISION, NOT A WORKING DIRECTORY.
    The first one was committed, and a receipt that is part of the commit it
@@ -151,14 +167,14 @@ const lines = [
     : `Tested revision: \`${(run('git', ['rev-parse', 'HEAD']).stdout || '').trim()}\``,
   ``,
   `**${stamp}** · commit \`${commit}\`${dirty ? ' · **working tree dirty**' : ' · clean tree'}`,
-  `· ${failed.length ? `**${failed.length} STAGE(S) FAILED**`
-      : skipped.length ? `**${skipped.length} STAGE(S) SKIPPED — NOT A FULL VERIFICATION**`
-      : 'ALL STAGES HELD'}`,
+  `· **${summary.headline}**`,
   ``,
   `| stage | proves | result | ms |`,
   `|---|---|---|---|`,
   ...stages.map((s) => `| ${s.name} | ${s.proves} | ${s.status === 'skip'
-    ? `**SKIP** — ${s.why}` : (s.result ?? s.why)} | ${s.ms} |`),
+    ? `**SKIP** — ${s.why}` : `${s.status === 'failed' ? '**FAILED** — ' : ''}${s.result ?? s.why}`} | ${s.ms} |`),
+  ``,
+  `Full command output: [logs](logs-${stamp}/).`,
   ``,
   `## Host`,
   ``,
@@ -189,14 +205,8 @@ console.log(`\n  receipt: ${path}${dirty ? '  \x1b[33m(dirty tree — not a reco
    them is the reassuring lie this file's own header warns about. When anything
    was skipped the summary says so FIRST, and does not use the word that would
    let a reader stop reading there. */
-const heldN = stages.filter((x) => x.status === 'held').length;
 /* "1 FAILED · all 8 stages held" — the summary contradicted itself, because a
    failure and a skip were treated as independent and only the skip branch
    could displace the word "all". A failure displaces it too. */
-console.log('\n  ' + (failed.length
-    ? `\x1b[31m${failed.length} FAILED\x1b[0m · ${heldN} held`
-      + (skipped.length ? ` · ${skipped.length} skipped` : '')
-    : skipped.length
-      ? `\x1b[33m${heldN} held · ${skipped.length} SKIPPED — this is not a full verification\x1b[0m`
-      : `\x1b[1mall ${heldN} stages held\x1b[0m`) + '\n');
-process.exit(failed.length ? 1 : 0);
+console.log(`\n  ${summary.headline}\n`);
+process.exit(summary.exitCode);

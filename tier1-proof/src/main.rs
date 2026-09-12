@@ -217,6 +217,9 @@ async fn road_promote(
         format!("PANE_CAPABILITY_FAILED: {e}")
     })?;
 
+    // Publish the task before creating a page that immediately calls hello.
+    // Waiting until reveal races bootstrap and can hand it a null task.
+    coordinator.begin(&pkg.id, task);
     let url = format!("{}?gen={}&pkg={}", pkg.entry, pane.generation, pkg.id);
     let child = window
         .add_child(
@@ -227,11 +230,13 @@ async fn road_promote(
         )
         .map_err(|e| {
             bindings.revoke(&label);
+            coordinator.end();
             e.to_string()
         })?;
 
     let abandon = |e: String| -> String {
         bindings.revoke(&label);
+        coordinator.end();
         // The type is named rather than left to never-type fallback, which
         // rustc now warns about: `close()` is best-effort here BECAUSE
         // revocation already happened and does not depend on it (§6.2 #4).
@@ -279,7 +284,6 @@ async fn road_promote(
         return Err(abandon(format!("READ_POSE_REVEAL_FAILED: {e}")));
     }
 
-    coordinator.begin(&pkg.id, task);
     Ok(json!({
         "pose_ms": pose_ms,
         "package": pkg.id,

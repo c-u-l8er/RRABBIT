@@ -1,8 +1,8 @@
 /* geometry-probe — what `add_child` actually does to the parent.
    ────────────────────────────────────────────────────────────────────────
-   The battery asserts nothing about geometry, and ROAD_SHELL.md §12 lists the
-   on-screen read pose as NOT MEASURED. This is the measurement, kept separate
-   so that a platform defect can never quietly redden the authority suite.
+   Requires a successful promotion, an unchanged parent viewport, and exactly
+   one pane of the requested size. Failure exits nonzero. An empty road is
+   not a successful geometry result.
 
    MEASURED ON LINUX, 2026-09-10 (WebKitGTK, dpr 2):
 
@@ -15,8 +15,7 @@
    cockpit." That undersells it: the child takes the WHOLE window and the
    parent collapses. The road does not merely sit behind the pane — it stops
    having a surface. This is why super/cockpit's GTK-overlay workaround in
-   `src/preview.rs` exists, and that workaround is deliberately NOT ported
-   here, so the raw platform behaviour stays visible.
+   `src/preview.rs` exists. The harness now carries its own overlay repair.
 
    THE macOS PREDICTION, which this same probe falsifies or confirms in one
    command: on NSView subviews the parent should stay 1000 x 653 and the child
@@ -48,6 +47,7 @@ const driver = spawn('tauri-driver',
    '--native-driver', process.env.WEBKIT_WEBDRIVER ?? '/usr/bin/WebKitWebDriver'],
   { stdio: ['ignore', 'inherit', 'inherit'], detached: true });
 let session = null;
+let passed = false;
 const stop = () => { try { process.kill(-driver.pid, 'SIGKILL'); } catch {} };
 process.on('exit', stop);
 
@@ -71,7 +71,8 @@ try {
     + 'const r = f.getBoundingClientRect();\n'
     + 'return { x: r.x, y: r.y, w: r.width, h: r.height };');
   console.log(`\n  requested read rect   x=${rect.x} y=${rect.y} ${rect.w} x ${rect.h}`);
-  console.log(`  road BEFORE promote   ${JSON.stringify(await geom())}`);
+  const before = await geom();
+  console.log(`  road BEFORE promote   ${JSON.stringify(before)}`);
 
   /* Promote is started WITHOUT awaiting, and the host is polled while it
      runs — a pane that fails to reach its pose is torn down, so anything
@@ -80,7 +81,8 @@ try {
     { rect: (() => { const f = document.getElementById('readframe');
                      f.classList.add('on');
                      const r = f.getBoundingClientRect();
-                     return { x: r.x, y: r.y, width: r.width, height: r.height }; })() })
+                     return { x: r.x, y: r.y, width: r.width, height: r.height }; })(),
+      package: 'notes', task: null })
     .then(r => (window.__promoted = r));`);
   const readStatus = () => sc(
     `return window.__TAURI__.core.invoke('road_status',
@@ -107,15 +109,23 @@ try {
   if (pr && pr.why) console.log(`  promote why           ${pr.why}`);
   await sleep(500);
 
-  let verdict = 'UNKNOWN';
+  const measured = [];
   for (const h of await handles()) {
     await focus(h);
     const label = await sc('const m = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.metadata;\n'
       + 'return m && m.currentWebview && m.currentWebview.label;');
     const g = await geom();
     console.log(`  ${String(label).padEnd(5)} AFTER promote   ${JSON.stringify(g)}`);
-    if (label === 'main') verdict = g.h < 40 ? 'PARENT SQUASHED (the GtkBox defect)' : 'parent intact';
+    measured.push({ label, ...g });
   }
+  const road = measured.find(v => v.label === 'main');
+  const panes = measured.filter(v => /^pane-\d+$/.test(v.label));
+  const near = (a, b) => Number.isFinite(a) && Math.abs(a - b) <= 2;
+  passed = pr?.ok === true && measured.length === 2 && panes.length === 1
+    && near(road?.w, before.w) && near(road?.h, before.h)
+    && near(panes[0].w, rect.w) && near(panes[0].h, rect.h);
+  const verdict = passed ? 'parent intact; child matches requested size'
+    : 'FAILED: promotion, parent size, or child size did not satisfy the contract';
   console.log(`\n  verdict: ${verdict}\n`);
 } catch (e) {
   console.log(`  probe failed: ${e.message}`);
@@ -123,3 +133,4 @@ try {
   try { if (session) await fetch(`${BASE}/session/${session}`, { method: 'DELETE' }); } catch {}
   stop();
 }
+process.exit(passed ? 0 : 1);
