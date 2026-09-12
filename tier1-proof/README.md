@@ -3,6 +3,22 @@
 **One road, one pane, one transition** — and then **two apps across that boundary**.
 `../docs/ROAD_SHELL.md` §12 and §12.4a.
 
+**3D travel pass, 2026-09-12.** The previous 2D projection has been replaced by
+a Three.js scene using the existing 0.160.1 dependency. `m2/road-geometry.js`
+now supplies the shared T&R field of view, dash spacing, entrance location,
+and roadside coordinates. Scroll or use Up/Down to drive. Entrance travels
+through the gantry into the app section; Exit traverses the end gantry. Home
+returns to the start, and End drives to the exit. This is one lane.
+
+Selecting an app flies along its front normal into a square read pose. The
+published sign stretches to the read-frame aspect during arrival; its world
+projection and the native frame must coincide. Only then does promotion call
+the host. Leaving destroys the pane before flying back to the saved lane
+position. During motion, app-entry controls wait; an additional entry is
+refused rather than racing another native pane. Keyboard focus highlights
+the corresponding 3D sign. The renderer draws on changes/motion, not an idle
+continuous loop. WebGL is required; initialization failure is surfaced.
+
 **Road-only pass, 2026-09-12.** The default interface fills the client area with
 the road and signs. Full screen (or F11 while the road has keyboard focus) uses
 native window fullscreen; the Exit lane sign leaves fullscreen and returns to
@@ -20,7 +36,8 @@ The **Super (CD)** roadside sign returns to the trusted cockpit. The standalone
 binary still hosts only Notes/Digest and correctly hides that sign. This is not
 an embedded cockpit pane or a manager of arbitrary installed desktop apps.
 Entrance/exit here navigate this single lane and fullscreen state; multi-lane
-ramps and the complete m2 camera/cockpit remain unimplemented.
+ramps and the complete m2 cockpit remain unimplemented. The approach/return
+camera motion described above is now implemented.
 
 See `../../super/docs/app/ROAD_SURFACE.md` for the integrated build and native
 test. Super's `main` retains cockpit authority; `cd-road` receives only road
@@ -45,9 +62,9 @@ with a forward-facing perspective road, opposing published app signs on the same
 depth, bounded scroll travel, and clickable/keyboard-accessible signs. Entering
 opens a centered, axis-aligned native pane. Leaving restores the signs. Resizing
 returns to the road so a native pane cannot remain at obsolete CSS coordinates.
-This standalone canvas/DOM renderer follows T&R's road direction and opposed
-window convention; it is not the m2 compositor, animated camera approach, full
-cockpit, or a working exit-ramp implementation. The exit sign is a visual marker.
+That initial canvas/DOM renderer followed T&R's road direction and opposed
+window convention. It has now been superseded by the 3D travel pass above.
+The full cockpit and multi-lane exit ramps are still not implemented.
 The screenshot probe now checks opposing sign alignment and enters through the
 Notes sign, saving both the road and read pose.
 

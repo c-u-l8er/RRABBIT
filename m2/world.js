@@ -17,6 +17,8 @@
 // -- the split moved code, it did not rewrite it.
 
 import { root as workspaceRoot, rampsOf } from './workspaces.js'
+import { ENTER_Z, GATE_GAP, DASH_PITCH, DASH_LEN, DASH_0_Z, ENTER_VIEW } from './road-geometry.js'
+export { ENTER_Z, GATE_GAP, DASH_PITCH, DASH_LEN, DASH_0_Z, ENTER_VIEW }
 
 export const ACC = 0xf2c14e
 export const COOL = 0x2de2e6
@@ -65,8 +67,6 @@ export const BG = 0x03040a
 // GATE_GAP is that run. At the wheel's 0.6 units per delta and a 120-unit notch
 // it is about twelve notches of empty road, which is long enough to feel like
 // arriving somewhere and short enough not to be a chore.
-export const ENTER_Z = -180
-export const GATE_GAP = 900
 export const SCENE_ID = 'road'
 
 // Where a window stands: on its dash, like everything else on this road.
@@ -89,11 +89,8 @@ export const windowZ = (dash) => dashZ(dash)
 // has one window on it or twelve, so a ramp built at dash 7 does not move when
 // the road around it changes. If this ever grew a term for the window layout,
 // every ramp on every road would slide the next time a window opened.
-export const DASH_PITCH = 180
-export const DASH_LEN = 96
 // Just in front of where you park at the head of the road, so dash 0 is the first
 // thing under the bonnet rather than something behind you.
-export const DASH_0_Z = 200
 export const dashZ = (i) => DASH_0_Z - i * DASH_PITCH
 // Which dash is nearest a given z -- for the panel that has to say where a ramp
 // is in words. NOT used to place anything (see the note in windowZ's neighbour
@@ -361,7 +358,6 @@ export const GANTRY_VIEW = 440
 // 760 with the margin. At that distance the frustum top is y=526 against a board
 // top of 328 (BEAM_Y + 12 + BOARD_H), so the whole structure -- feet, uprights,
 // beam and board -- stands clear of both the frame edge and the hood.
-export const ENTER_VIEW = 760
 
 // The same distance as a roadZ bound: camera z is 260 + roadZ, and we want
 // (camera z - ENTER_Z) === ENTER_VIEW. Named here rather than computed at the

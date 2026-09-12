@@ -12,6 +12,9 @@
 //! `invoke` the command and be refused by the host's principal check rather
 //! than bounced one layer earlier.
 fn main() {
+    println!("cargo:rerun-if-changed=../m2/road-geometry.js");
+    std::fs::copy("../m2/road-geometry.js", "ui/road-geometry.js")
+        .expect("package shared T&R road geometry");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "road_place",

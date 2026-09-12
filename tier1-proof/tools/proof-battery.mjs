@@ -374,6 +374,8 @@ async function run() {
 
   /* ── 5 + 7 ─ re-promote: state survives, old generation is dead ─────── */
   console.log('\n  \x1b[1m5 · state survives the round trip, and the shell holds no copy\x1b[0m');
+  await waitFor('the return flight to finish', async () =>
+    (await script("return window.__roadScene.snapshot().phase;")) === 'driving');
   await click('#enter');
   S = await waitFor('the pane to come back', async () => {
     const s = await surfaces(); return s.pane ? s : null;

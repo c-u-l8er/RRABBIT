@@ -998,9 +998,14 @@ identity refusal, successful-only recording, program use, and replay of the reco
 plan. Because that plan omits unread, read supersedes an existing pane before
 promotion, preserving both the paper semantics and N=1. No op names are added.
 
-**Remaining integration:** published app signs in the three.js scene, camera arrival
-to native read-rectangle mapping, and the user-facing enter/exit flow. The adapter
-is a proof of the shared seam, not a claim those visual interactions are built.
+**Updated 2026-09-12:** the shared Tauri road now has a Three.js scene, published
+sign textures, entrance/exit gantries, forward travel and front-normal camera
+arrival. The projected sign and native read frame were measured coincident at
+2× fullscreen scale, with no native pane present during approach. Leaving
+destroys the pane and returns to the saved lane position. This is the shared
+Tauri surface's visual controller, not a replacement for the m2 compositor.
+The m2 operation adapter remains the independent seam proof described above.
+Multi-lane ramps, the full cockpit, and Super task routing remain unfinished.
 
 ### 12.5 What would falsify the whole approach
 
@@ -1067,6 +1072,14 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
 ---
 
 ## DOCTRINE
+
+- **found 2026-09-12** — the native-app road can use the same 58-degree field
+  of view, dash grid, entrance coordinates and roadside offsets as T&R through
+  `m2/road-geometry.js`. Plane-normal arrival and the final native rectangle
+  coincide: measured 3686×1786 device pixels at (718,548), with zero offset on
+  a 2560×1440 logical fullscreen viewport at 2×. The app is not created during
+  the approach. The Super driving integration passed 22 checks, standalone
+  lifecycle 29, and accepted handoff 23. No frame-rate or macOS claim follows.
 
 - **found 2026-09-12** — Super can consume the same road runtime as a library and
   open `cd-road` with its own capability while the cockpit stays `main`. The road

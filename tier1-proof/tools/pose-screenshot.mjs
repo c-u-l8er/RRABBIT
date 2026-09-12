@@ -79,9 +79,8 @@ try {
     if (!await sc("return !document.getElementById('service-panel').open && document.getElementById('road').clientHeight === innerHeight;"))
       throw new Error('the default view is not a road-only viewport');
     await click('#entrance');
-    await sleep(200);
-    // Return to the initial dash for the paired-window geometry contract.
-    await sc('travel=0; paintRoad(); return true;');
+    await waitFor("const c=window.__roadScene.snapshot(); return c.phase==='driving' && c.position[2]<c.entranceZ;",
+      'the entrance control did not travel through the gantry');
   }
 
   const want = await sc("const f = document.getElementById('readframe');\n"
@@ -126,11 +125,20 @@ try {
   const el = await wd('POST', `/session/${session}/element`,
     { using: 'css selector', value: '#sign-notes' });
   await wd('POST', `/session/${session}/element/${Object.values(el)[0]}/click`, {});
+  const approach = await sc(`return window.__apply('status').then(r => ({
+    phase:window.__roadScene.snapshot().phase, present:r.result?.present }));`);
+  if (approach.phase !== 'approaching' || approach.present)
+    throw new Error('the camera approach was not observed before native pane creation');
   await sleep(3000);
 
   const st = await sc(`return window.__TAURI__.core.invoke('road_status',
     { generation: window.__ROAD_GENERATION }).then(r => r, () => null);`);
   if (!st || !st.present) throw new Error('no pane is live after the click');
+  const projection = await sc('return window.__roadScene.snapshot();');
+  if (projection.phase !== 'reading' || !projection.readRect ||
+      Math.abs(projection.readRect.x-want.x)>2 || Math.abs(projection.readRect.y-want.y)>2 ||
+      Math.abs(projection.readRect.width-want.w)>2 || Math.abs(projection.readRect.height-want.h)>2)
+    throw new Error('the 3D sign did not arrive at the native read rectangle');
 
   /* A PICTURE OF WHAT A PERSON SEES, taken first and left alone. */
   capture(OUT);
@@ -202,6 +210,7 @@ try {
   if (immersive) {
     await wd('POST', `/session/${session}/window`, {handle:mainHandle});
     await click('#leave'); await sleep(400);
+    await waitFor("return window.__roadScene.snapshot().phase === 'driving';", 'the camera did not return to the lane');
     await click('#services');
     await waitFor("return document.getElementById('service-panel').open;",
       'the services sign did not open diagnostics');

@@ -70,9 +70,7 @@ const MAX_W = 900
 // resize is worth having on a pane at all.
 const PX_PER_UNIT = PX_W / W
 const sizeOf = (p) => ({ w: p.w ?? W, h: p.h ?? H })
-const ROAD_Y = -30
-const STAND_X = 190
-const STAND_Y = 34
+import { ROAD_Y, STAND_X, STAND_Y } from './road-geometry.js'
 
 const keyOf = (district, side, dash) => `${district}:${side > 0 ? 'r' : 'l'}:${dash}`
 

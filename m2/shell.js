@@ -48,6 +48,7 @@
 //    The Wayland output is the window ledger; the road is a view of it.
 
 import * as THREE from 'three'
+import { ROAD_FOV } from './road-geometry.js'
 import { createAppLauncher, createCompositorSession, initWasm } from '@gfld/compositor'
 import { createRack } from './tubes.js'
 import { createDash, GEARS } from './dash.js'
@@ -700,7 +701,7 @@ function buildWorld(canvas) {
   scene.background = new THREE.Color(BG)
   scene.fog = new THREE.Fog(BG, 1400, 4200)
 
-  camera = new THREE.PerspectiveCamera(58, 16 / 9, 1, 6000)
+  camera = new THREE.PerspectiveCamera(ROAD_FOV, 16 / 9, 1, 6000)
   camera.position.set(0, 105, 260)
 
   scene.add(new THREE.AmbientLight(0xffffff, 1.2))
