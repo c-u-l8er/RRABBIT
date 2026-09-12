@@ -41,7 +41,7 @@ const BEAT_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// facts and only the first one is the boundary under test.
 fn grants_for(surface: &str) -> BTreeSet<String> {
     let v: &[&str] = match surface {
-        "main" => &["place", "promote", "demote", "status", "manifest", "fullscreen"],
+        crate::ROAD_LABEL => &["place", "promote", "demote", "status", "manifest", "fullscreen", "cockpit"],
         // A pane's grants do NOT come from here: they come from its package's
         // declared manifest, through `bind_pane`. This arm exists so that a
         // pane label bound by the plain `bind` path — which no production
@@ -405,18 +405,18 @@ mod tests {
     #[test]
     fn a_reused_label_would_hand_over_the_successors_generation() {
         let b = Bindings::default();
-        let first = b.bind("main");
-        b.revoke("main");
-        let second = b.bind("main"); // rebound under the SAME name
+        let first = b.bind(crate::ROAD_LABEL);
+        b.revoke(crate::ROAD_LABEL);
+        let second = b.bind(crate::ROAD_LABEL); // rebound under the SAME name
         assert_ne!(first.generation, second.generation);
 
-        let leaked = b.resolve_label("main").expect("the reused label still resolves");
+        let leaked = b.resolve_label(crate::ROAD_LABEL).expect("the reused label still resolves");
         assert_eq!(
             leaked.generation, second.generation,
             "THE HOLE: an old instance calling whoami learns the SUCCESSOR's generation"
         );
         assert!(
-            b.authorize_label("main", leaked.generation, "place").is_ok(),
+            b.authorize_label(crate::ROAD_LABEL, leaked.generation, "place").is_ok(),
             "and having learned it, the old instance acts with it"
         );
     }
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn a_grant_is_never_taken_from_the_request() {
         let b = Bindings::default();
-        let road = b.bind("main");
+        let road = b.bind(crate::ROAD_LABEL);
         assert!(road.grants.contains(&"place".to_string()));
         assert!(!road.grants.contains(&"intent".to_string()), "the road never holds intent");
         let pane = b.bind_pane(&["beat", "hello"]);

@@ -16,6 +16,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "road_place",
             "road_fullscreen",
+            "road_cockpit",
             "road_promote",
             "road_demote",
             "road_status",

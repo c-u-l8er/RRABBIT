@@ -10,9 +10,12 @@ fell into, with the section of the spec that records it.
 
 > **`ROAD_SHELL.md` is a PROPOSED SPECIFICATION; DECISIONS PENDING.** It describes the road
 > hosting web applications as live child webviews inside a Tauri window (Tier 1, ruled
-> 2026-09-10). **Standalone Linux proofs are built; the road-shell product is not. Six
+> 2026-09-10). **Standalone Linux proofs and an initial Super road surface are built;
+> the full road-shell product is not. Six
 > [TRAVIS] decisions remain open (§13).** The proof includes native app handoff and the
 > actual road operation seam; see `tier1-proof/README.md` for verification commands.
+> Super's **T&R road** button opens the shared runtime under a separate capability;
+> its cockpit remains `main`. See `super/docs/app/ROAD_SURFACE.md` for that integration.
 > The existing compositor stack below remains independent of that proof.
 
 ---

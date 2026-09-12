@@ -17,7 +17,9 @@
 //! **Why it is standalone rather than a branch of `super/cockpit`.** §13 #1 —
 //! whether the road becomes `main` and demotes the cockpit — is unruled.
 //! Re-rooting the cockpit to run this proof would answer it by accident, which
-//! is the front-door inheritance §6 warns about.
+//! is the front-door inheritance §6 warns about. The `super-integration` library
+//! now opens a separate `cd-road` surface inside Super instead. Its cockpit
+//! remains `main`, with a disjoint capability; the runtime below is shared.
 //!
 //! **The two seams (§6.2.1).** `apply(op)` in the road's page is the VOCABULARY
 //! seam: closed table, validation, logging, refusal feedback. It enforces
@@ -32,6 +34,30 @@ mod principal;
 use principal::Bindings;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
+
+#[cfg(not(feature = "super-integration"))]
+pub const ROAD_LABEL: &str = "main";
+#[cfg(feature = "super-integration")]
+pub const ROAD_LABEL: &str = "cd-road";
+
+pub const COMMANDS: &[&str] = &[
+    "road_place", "road_fullscreen", "road_promote", "road_demote", "road_status",
+    "road_manifest", "road_route", "whoami", "privileged_intent", "pane_beat",
+    "pane_hello", "pane_offer", "road_cockpit",
+];
+
+#[tauri::command]
+fn road_cockpit(webview: tauri::Webview, app: tauri::AppHandle,
+    bindings: State<Bindings>, generation: u64) -> Result<Value, String> {
+    bindings.authorize(&webview, generation, "cockpit").map_err(|r| r.to_string())?;
+    if ROAD_LABEL == "main" { return Err("SUPER_NOT_CONNECTED".into()); }
+    let cockpit = app.get_webview_window("main").ok_or("SUPER_NOT_AVAILABLE")?;
+    webview.window().set_fullscreen(false).map_err(|e| e.to_string())?;
+    cockpit.show().map_err(|e| e.to_string())?;
+    cockpit.unminimize().map_err(|e| e.to_string())?;
+    cockpit.set_focus().map_err(|e| e.to_string())?;
+    Ok(json!({ "cockpit": "main" }))
+}
 
 /// **A pane's label is `pane-<generation>` and is never reused.** It is
 /// derived by the host in `Bindings::bind_pane`; no command in this file
@@ -185,7 +211,7 @@ async fn road_promote(
             "TIER_ALREADY_LIVE: the live budget is N = 1 and {live:?} still hold bindings              (ROAD_SHELL.md §4.1)"
         ));
     }
-    let window = app.get_window("main").ok_or("no road window")?;
+    let window = app.get_window(ROAD_LABEL).ok_or("no road window")?;
     let size = window.inner_size().map_err(|e| e.to_string())?;
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     if ![rect.x, rect.y, rect.width, rect.height].iter().all(|n| n.is_finite())
@@ -235,7 +261,8 @@ async fn road_promote(
     // Publish the task before creating a page that immediately calls hello.
     // Waiting until reveal races bootstrap and can hand it a null task.
     coordinator.begin(&pkg.id, task);
-    let url = format!("{}?gen={}&pkg={}", pkg.entry, pane.generation, pkg.id);
+    let prefix = if ROAD_LABEL == "main" { "" } else { "road/" };
+    let url = format!("{prefix}{}?gen={}&pkg={}", pkg.entry, pane.generation, pkg.id);
     let child = window
         .add_child(
             tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::App(url.into()))
@@ -553,13 +580,11 @@ fn pane_hello(
     }
 }
 
-fn main() {
-    tauri::Builder::default()
-        .manage(Bindings::default())
-        .manage(Coordinator::default())
-        .invoke_handler(tauri::generate_handler![
+pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
             road_place,
             road_fullscreen,
+            road_cockpit,
             road_promote,
             road_demote,
             road_status,
@@ -570,12 +595,61 @@ fn main() {
             pane_beat,
             pane_hello,
             pane_offer,
-        ])
+        ]
+}
+
+/// Install one coordinator in the owning application, not a second process.
+pub fn install(app: &tauri::AppHandle) {
+    app.manage(Bindings::default());
+    app.manage(Coordinator::default());
+}
+
+/// The cockpit remains `main`; the road has a distinct window AND webview.
+#[cfg(feature = "super-integration")]
+pub fn open(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(ROAD_LABEL) {
+        w.show().map_err(|e| e.to_string())?;
+        w.unminimize().map_err(|e| e.to_string())?;
+        return w.set_focus().map_err(|e| e.to_string());
+    }
+    shutdown(app);
+    let generation = app.state::<Bindings>().bind(ROAD_LABEL).generation;
+    let window = tauri::WebviewWindowBuilder::new(app, ROAD_LABEL,
+        tauri::WebviewUrl::App("road/index.html".into()))
+        .title("Super (CD) — road").inner_size(1180.,820.)
+        .on_navigation(|url| url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost"))
+        .build().map_err(|e| e.to_string())?;
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed)
+            && handle.state::<Bindings>().generation_of(ROAD_LABEL) == Some(generation) {
+            shutdown(&handle);
+        }
+    });
+    Ok(())
+}
+
+pub fn shutdown(app: &tauri::AppHandle) {
+    let bindings = app.state::<Bindings>();
+    for label in bindings.live_panes() {
+        bindings.revoke(&label);
+        if let Some(w) = app.get_webview(&label) { let _ = w.close(); }
+    }
+    bindings.revoke(ROAD_LABEL);
+    app.state::<Coordinator>().end();
+}
+
+#[allow(dead_code)]
+fn main() {
+    tauri::Builder::default()
+        .manage(Bindings::default())
+        .manage(Coordinator::default())
+        .invoke_handler(handler())
         .setup(|app| {
             // The road's binding is minted by the HOST at startup. There is no
             // command that could have produced it, and the page is not told:
             // it calls `whoami`. See that command for why pushing raced.
-            app.state::<Bindings>().bind("main");
+            app.state::<Bindings>().bind(ROAD_LABEL);
             Ok(())
         })
         .run(tauri::generate_context!())

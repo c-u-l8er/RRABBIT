@@ -37,6 +37,7 @@
   #leave { right:3%; top:48%; }
   #fullscreen { bottom:9%; left:3%; }
   #services { bottom:9%; right:3%; }
+  #cockpit { top:4%; right:3%; }
   #exit { bottom:9%; left:50%; transform:translateX(-50%); }
   #road.reading #enter, #road.reading #handoff, #road.reading #next { visibility:hidden; }
   #road.reading #leave { top:auto; bottom:9%; right:21%; width:130px; }
@@ -73,13 +74,14 @@
   <button class="sign" id="next">→ DIGEST<small>Continue accepted handoff</small></button>
   <button class="sign" id="fullscreen">FULL SCREEN<small>F11 · toggle desktop view</small></button>
   <button class="sign" id="services">SERVICES ↗<small>Status · diagnostics · Super</small></button>
+  <button class="sign" id="cockpit" hidden>SUPER (CD) ↗<small>Return to cockpit</small></button>
   <button class="sign" id="exit">EXIT LANE ↓<small>Return to desktop</small></button>
   <div id="notice" role="status">Scroll to travel · select an app sign to enter</div>
 </div>
 
 <dialog id="service-panel">
 <h2>Road services</h2>
-<p>Super (CD) is not connected to this standalone road yet. Notes and Digest are the two packaged test apps.</p>
+<p id="integration-status">Super (CD) is not connected to this standalone road yet. Notes and Digest are the two packaged test apps.</p>
 <button id="close-services">Return to road</button>
 <div class="bar">
   <button id="try-place">allowed op (place)</button>
@@ -105,6 +107,7 @@ const gen = () => ROAD_GENERATION;
    described as a boundary. `by` is recorded here and travels no further than
    the log — the host never reads it.                                        */
 const TABLE = {
+  cockpit: { args: [], host: 'road_cockpit' },
   fullscreen: { args: [], host: 'road_fullscreen' },
   place:   { args: ['dash', 'side'], host: 'road_place' },
   promote: { args: ['rect', 'package'], host: 'road_promote' },
@@ -260,6 +263,10 @@ document.getElementById('fullscreen').onclick = async () => {
   const r = await apply('fullscreen');
   if (r.ok) await setFullscreen(!r.result.fullscreen); else show(r);
 };
+document.getElementById('cockpit').onclick = async () => {
+  const r = await demote(); if (!r.ok) { show(r); return; }
+  show(await apply('cockpit'));
+};
 document.getElementById('entrance').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
   travel=120; paintRoad(); notice('Inside the lane · Notes left · Digest right');
@@ -400,6 +407,11 @@ window.__apply = apply;
 (async () => {
   const me = await invoke('whoami');
   ROAD_GENERATION = me.principal.generation;
+  if (me.principal.surface === 'cd-road') {
+    document.getElementById('cockpit').hidden = false;
+    document.getElementById('integration-status').textContent =
+      'Connected to Super (CD). The road and cockpit run in the same application. The cockpit retains runtime controls; this lane hosts Notes and Digest.';
+  }
   window.__ROAD_GENERATION = ROAD_GENERATION;   /* for the battery's probes */
   const r = await apply('manifest');
   if (!r.ok) { show(r); return; }

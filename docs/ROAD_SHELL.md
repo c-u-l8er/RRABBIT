@@ -1,7 +1,8 @@
 # The road as a window manager — Tier 1
 
 **Status: `spec`; standalone Linux Tier 1 and two-app handoff proofs implemented.
-The road-shell product is not implemented. Six decisions remain open in §13.**
+An initial road surface is integrated into Super in a separate window; the full
+road-shell product is not implemented. Six decisions remain open in §13.**
 **The scope ruling in §1 is Travis's, 2026-09-10. Everything downstream of it is a proposal.**
 
 Author: Claude, 2026-09-10. Companion to `PAPER_ROADS.md` (the pane), `OP_VOCABULARY_DRAFT.md`
@@ -1066,6 +1067,17 @@ Three outcomes now: falsifier, red-but-not-on-the-named-law, or genuinely green.
 ---
 
 ## DOCTRINE
+
+- **found 2026-09-12** — Super can consume the same road runtime as a library and
+  open `cd-road` with its own capability while the cockpit stays `main`. The road
+  return sign focuses the cockpit; it does not inherit or forward cockpit intents.
+  This integrates a surface without deciding §13 #1. The native integration battery
+  passed 17 assertions including denied cockpit commands, native fullscreen,
+  app-pane entry, return, close/reopen, and stale-generation refusal.
+- **corrected 2026-09-12** — WebKitDriver's close-window endpoint closes a browsing
+  context, not reliably the native Tauri window. The Super integration lifecycle
+  probe now sends `_NET_CLOSE_WINDOW` to its own test window and waits for removal.
+  Destruction cleanup is bound to the generation captured when that window was made.
 
 - **corrected 2026-09-12** — the final clean-tree `43c8b60` receipt failed the handoff
   stage. `cp -a` restored old source timestamps, so even a subsequent Cargo build

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "The Tier 1 road-shell proof: one pane, one transition, one authority boundary. See ../docs/ROAD_SHELL.md §12."
 
+[lib]
+path = "src/lib.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -16,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [features]
+super-integration = []
 custom-protocol = ["tauri/custom-protocol"]
 
 # The GTK overlay in `src/layout.rs`. Linux only, and required rather than

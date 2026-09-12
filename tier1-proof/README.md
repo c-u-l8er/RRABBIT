@@ -13,11 +13,19 @@ buttons are absent from the normal view. Display changes leave a live pane first
 The fullscreen command is restricted to the road's host-derived principal and
 its webview capability; panes receive no display-control grant.
 
-**Super (CD) is not integrated.** Its separate `super/cockpit` frontend still owns
-its own host and command surface. This is the standalone Notes/Digest host, not
-an embedded Super cockpit or a manager of arbitrary installed desktop apps.
+**Super (CD) integration added 2026-09-12.** Super now consumes this runtime as a
+Rust library and packages this frontend at build time. Its **T&R road** button
+opens `cd-road` in the same application process, with a separate capability.
+The **Super (CD)** roadside sign returns to the trusted cockpit. The standalone
+binary still hosts only Notes/Digest and correctly hides that sign. This is not
+an embedded cockpit pane or a manager of arbitrary installed desktop apps.
 Entrance/exit here navigate this single lane and fullscreen state; multi-lane
 ramps and the complete m2 camera/cockpit remain unimplemented.
+
+See `../../super/docs/app/ROAD_SURFACE.md` for the integrated build and native
+test. Super's `main` retains cockpit authority; `cd-road` receives only road
+commands. Closing and reopening the native road window mints a new binding.
+The destruction callback checks the captured generation before cleanup.
 
 ```bash
 PROOF_FULLSCREEN=1 node tools/pose-screenshot.mjs /tmp/road-fullscreen.png

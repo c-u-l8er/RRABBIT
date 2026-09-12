@@ -201,6 +201,12 @@
           "markdownDescription": "Enables the privileged_intent command without any pre-configured scope."
         },
         {
+          "description": "Enables the road_cockpit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-cockpit",
+          "markdownDescription": "Enables the road_cockpit command without any pre-configured scope."
+        },
+        {
           "description": "Enables the road_demote command without any pre-configured scope.",
           "type": "string",
           "const": "allow-road-demote",
@@ -271,6 +277,12 @@
           "type": "string",
           "const": "deny-privileged-intent",
           "markdownDescription": "Denies the privileged_intent command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_cockpit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-cockpit",
+          "markdownDescription": "Denies the road_cockpit command without any pre-configured scope."
         },
         {
           "description": "Denies the road_demote command without any pre-configured scope.",
