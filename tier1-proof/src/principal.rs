@@ -41,7 +41,7 @@ const BEAT_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// facts and only the first one is the boundary under test.
 fn grants_for(surface: &str) -> BTreeSet<String> {
     let v: &[&str] = match surface {
-        "main" => &["place", "promote", "demote", "status", "manifest"],
+        "main" => &["place", "promote", "demote", "status", "manifest", "fullscreen"],
         // A pane's grants do NOT come from here: they come from its package's
         // declared manifest, through `bind_pane`. This arm exists so that a
         // pane label bound by the plain `bind` path — which no production

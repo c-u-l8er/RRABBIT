@@ -58,6 +58,31 @@ try {
   session = c.sessionId ?? c.capabilities?.sessionId;
   const sc = (js) => wd('POST', `/session/${session}/execute/sync`, { script: js, args: [] });
   await sleep(2500);
+  const mainHandle = await wd('GET', `/session/${session}/window`);
+  const click = async (selector) => {
+    const el = await wd('POST', `/session/${session}/element`, { using:'css selector', value:selector });
+    await wd('POST', `/session/${session}/element/${Object.values(el)[0]}/click`, {});
+  };
+  const waitFor = async (script, failure) => {
+    for (let i=0; i<40; i++) {
+      if (await sc(script)) return;
+      await sleep(100);
+    }
+    throw new Error(failure);
+  };
+  const immersive = process.env.PROOF_FULLSCREEN === '1';
+  if (immersive) {
+    await click('#fullscreen');
+    await sleep(1800);
+    if (!await sc("return window.__apply('fullscreen').then(r => r.ok && r.result.fullscreen);"))
+      throw new Error('the fullscreen sign did not enter native fullscreen');
+    if (!await sc("return !document.getElementById('service-panel').open && document.getElementById('road').clientHeight === innerHeight;"))
+      throw new Error('the default view is not a road-only viewport');
+    await click('#entrance');
+    await sleep(200);
+    // Return to the initial dash for the paired-window geometry contract.
+    await sc('travel=0; paintRoad(); return true;');
+  }
 
   const want = await sc("const f = document.getElementById('readframe');\n"
     + "f.classList.add('on');\n"
@@ -128,6 +153,9 @@ try {
     if (/^pane-\d+$/.test(String(label))) { paneHandle = h; break; }
   }
   if (!paneHandle) throw new Error('the pane webview is not among the window handles');
+  if (immersive && !await sc(`return window.__TAURI__.core.invoke('road_fullscreen',
+      { generation:0, enabled:false }).then(() => false, () => true);`))
+    throw new Error('an app pane changed the shell fullscreen state');
   await sc(`const d = document.createElement('div');
     d.id = '__pose_probe';
     d.style.cssText = 'position:fixed;inset:0;background:#FF00FF;z-index:2147483647';
@@ -137,8 +165,10 @@ try {
   capture(probe);
 
   const isolate = OUT.replace(/\.png$/, '-isolated.png');
-  const iso = spawnSync('magick', [probe, '-fuzz', '12%', '-fill', 'white', '-opaque', '#FF00FF',
-    '-fill', 'black', '+opaque', 'white', isolate], { encoding: 'utf8' });
+  // Remove everything except the marker BEFORE making it white. Otherwise
+  // actual white road-sign lettering survives the mask and inflates the box.
+  const iso = spawnSync('magick', [probe, '-fuzz', '12%', '-fill', 'black', '+opaque', '#FF00FF',
+    '-fill', 'white', '-opaque', '#FF00FF', isolate], { encoding: 'utf8' });
   if (iso.status !== 0) throw new Error(`isolate failed: ${iso.stderr}`);
   const t = spawnSync('magick', [isolate, '-trim', '-format', '%wx%h%X%Y', 'info:'],
     { encoding: 'utf8' });
@@ -169,6 +199,18 @@ try {
                      : 'MISMATCH — the pane is not where it was asked to be',
   }, null, 2));
   if (!verdict) process.exitCode = 1;
+  if (immersive) {
+    await wd('POST', `/session/${session}/window`, {handle:mainHandle});
+    await click('#leave'); await sleep(400);
+    await click('#services');
+    await waitFor("return document.getElementById('service-panel').open;",
+      'the services sign did not open diagnostics');
+    await click('#close-services');
+    await click('#exit'); await sleep(1800);
+    const left = await sc("return Promise.all([window.__apply('fullscreen'),window.__apply('status')]).then(([f,s]) => f.ok && !f.result.fullscreen && s.ok && !s.result.present);");
+    if (!left) throw new Error('the exit sign did not leave fullscreen and close the pane');
+    console.log('Fullscreen sign, road-only view, entrance, pane denial, services, and exit: held');
+  }
 } catch (e) {
   console.error(`FAILED: ${e.message}`);
   process.exitCode = 1;

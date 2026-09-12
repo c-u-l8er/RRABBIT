@@ -207,6 +207,12 @@
           "markdownDescription": "Enables the road_demote command without any pre-configured scope."
         },
         {
+          "description": "Enables the road_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-fullscreen",
+          "markdownDescription": "Enables the road_fullscreen command without any pre-configured scope."
+        },
+        {
           "description": "Enables the road_manifest command without any pre-configured scope.",
           "type": "string",
           "const": "allow-road-manifest",
@@ -271,6 +277,12 @@
           "type": "string",
           "const": "deny-road-demote",
           "markdownDescription": "Denies the road_demote command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-fullscreen",
+          "markdownDescription": "Denies the road_fullscreen command without any pre-configured scope."
         },
         {
           "description": "Denies the road_manifest command without any pre-configured scope.",

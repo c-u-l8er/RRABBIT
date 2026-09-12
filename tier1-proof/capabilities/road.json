@@ -6,6 +6,7 @@
   ],
   "permissions": [
     "allow-road-place",
+    "allow-road-fullscreen",
     "allow-road-promote",
     "allow-road-demote",
     "allow-road-status",

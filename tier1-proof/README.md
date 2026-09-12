@@ -3,6 +3,35 @@
 **One road, one pane, one transition** — and then **two apps across that boundary**.
 `../docs/ROAD_SHELL.md` §12 and §12.4a.
 
+**Road-only pass, 2026-09-12.** The default interface fills the client area with
+the road and signs. Full screen (or F11 while the road has keyboard focus) uses
+native window fullscreen; the Exit lane sign leaves fullscreen and returns to
+the entrance. Entrance advances to the app signs. Notes, Leave window, document
+handoff, accepted-result continuation, fullscreen and Services are roadside
+controls. Services opens the diagnostic panel on demand; JSON and authority-test
+buttons are absent from the normal view. Display changes leave a live pane first.
+The fullscreen command is restricted to the road's host-derived principal and
+its webview capability; panes receive no display-control grant.
+
+**Super (CD) is not integrated.** Its separate `super/cockpit` frontend still owns
+its own host and command surface. This is the standalone Notes/Digest host, not
+an embedded Super cockpit or a manager of arbitrary installed desktop apps.
+Entrance/exit here navigate this single lane and fullscreen state; multi-lane
+ramps and the complete m2 camera/cockpit remain unimplemented.
+
+```bash
+PROOF_FULLSCREEN=1 node tools/pose-screenshot.mjs /tmp/road-fullscreen.png
+```
+
+That optional desktop probe exercises fullscreen, the road-only layout,
+entrance, sign entry, native pane geometry, denial of pane display control,
+Services and exit. It saves both the road and live-window screenshots.
+Measured on Linux/XWayland on 2026-09-12: the complete fullscreen probe passed
+at a 2560 × 1440 logical viewport, 2× scale. The pane occupied
+3686 × 1786 device pixels at (718, 432), exactly the requested rectangle.
+The live battery passed 29 checks, static ACL 24, and registry unit tests 4.
+This targeted pass did not rerun the sabotage sweep or measure macOS.
+
 **Visual correction 2026-09-12.** The horizontal test strip has been replaced
 with a forward-facing perspective road, opposing published app signs on the same
 depth, bounded scroll travel, and clickable/keyboard-accessible signs. Entering

@@ -107,6 +107,21 @@ fn refuse<T>(r: principal::Refusal) -> Result<T, String> {
 
 /* ── the road's own ops ──────────────────────────────────────────────────── */
 
+#[tauri::command]
+fn road_fullscreen(
+    webview: tauri::Webview,
+    bindings: State<Bindings>,
+    generation: u64,
+    enabled: Option<bool>,
+) -> Result<Value, String> {
+    bindings.authorize(&webview, generation, "fullscreen").map_err(|r| r.to_string())?;
+    let window = webview.window();
+    if let Some(enabled) = enabled {
+        window.set_fullscreen(enabled).map_err(|e| e.to_string())?;
+    }
+    Ok(json!({ "fullscreen": window.is_fullscreen().map_err(|e| e.to_string())? }))
+}
+
 /// Placement. The ALLOWED half of assertion 9 — this must succeed, or 9b
 /// proves only that nothing works.
 #[tauri::command]
@@ -544,6 +559,7 @@ fn main() {
         .manage(Coordinator::default())
         .invoke_handler(tauri::generate_handler![
             road_place,
+            road_fullscreen,
             road_promote,
             road_demote,
             road_status,

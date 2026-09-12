@@ -15,6 +15,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "road_place",
+            "road_fullscreen",
             "road_promote",
             "road_demote",
             "road_status",
