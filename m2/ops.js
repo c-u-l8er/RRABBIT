@@ -123,6 +123,7 @@ export const TABLE = {
 
 const performers = new Map()
 const preconditions = new Map()
+let epoch = 0
 
 export function register(name, { perform, pre = null } = {}) {
   if (!Object.hasOwn(TABLE, name)) throw new Error(`OP_UNKNOWN:${name}`)
@@ -131,11 +132,13 @@ export function register(name, { perform, pre = null } = {}) {
 }
 
 export function reset() {
+  epoch++
   performers.clear()
   preconditions.clear()
   entries.length = 0
   counts.applied = 0
   counts.refused = 0
+  counts.cut = 0
   counts.byOp = {}
   counts.byActor = {}
 }
@@ -165,12 +168,18 @@ function bad(why, detail) {
   return { ok: false, why, detail: detail ?? null }
 }
 
+const pending = (value) => value != null && typeof value.then === 'function'
+
 // Apply one op. The ONLY way the world changes through this vocabulary.
 //
 // `by` says which actor sent it -- a human's pointer, a replay, a program, an
 // agent. It is recorded and it is NEVER consulted: the moment the seam branches on
 // who is calling, the claim that every consumer drives the same code path is false
 // by construction. It exists so the log can be read, not so the behaviour can differ.
+// Synchronous performers return a result immediately. Async performers or
+// preconditions return a Promise of that SAME result shape. Await host-backed
+// calls; successful completion alone writes the log. Independent calls are not
+// globally queued; replay supplies ordering for a sequence.
 export function apply(op, { by = 'unknown', record: shouldRecord = true } = {}) {
   if (!op || typeof op !== 'object') return bad('OP_MALFORMED', 'not an object')
   const name = op.op
@@ -184,6 +193,38 @@ export function apply(op, { by = 'unknown', record: shouldRecord = true } = {}) 
   const perform = performers.get(name)
   if (!perform) return bad('OP_NOT_REGISTERED', name)
 
+  const startedIn = epoch
+  // A pending operation belongs to the world it started in. Reset cannot undo
+  // a host effect, but a late reply must not write into the next world's log.
+  const current = () => startedIn === epoch
+  const resetResult = () => ({ ok: false, why: 'OP_RESET', detail: name })
+  const failed = (why, detail) => current() ? bad(why, detail) : resetResult()
+  const complete = (result) => {
+    if (!current()) return resetResult()
+    if (result && result.ok === false) return bad(result.why ?? 'OP_REFUSED', result.detail ?? null)
+    counts.applied++
+    counts.byOp[name] = (counts.byOp[name] ?? 0) + 1
+    counts.byActor[by] = (counts.byActor[by] ?? 0) + 1
+    if (shouldRecord) record(op, by)
+    return { ok: true, op: name, result: result ?? null }
+  }
+  const effect = () => {
+    if (!current()) return resetResult()
+    try {
+      const result = perform(op)
+      // Preserve the immediate result for existing synchronous performers.
+      // Host-backed performers settle before success is counted or recorded.
+      return pending(result)
+        ? Promise.resolve(result).then(complete, e => failed('OP_THREW', String(e?.message ?? e)))
+        : complete(result)
+    } catch (e) { return failed('OP_THREW', String(e?.message ?? e)) }
+  }
+  const checked = (okPre) => {
+    if (!current()) return resetResult()
+    if (okPre !== true) return bad(typeof okPre === 'string' ? okPre : 'OP_PRECONDITION_FALSE', name)
+    return effect()
+  }
+
   // PRECONDITION BEFORE EFFECT, always, and total: a precondition that throws is
   // not a guard (draft §4). A thrown precondition is reported as a refusal rather
   // than propagating, because a program that crashes the shell is a worse outcome
@@ -191,19 +232,14 @@ export function apply(op, { by = 'unknown', record: shouldRecord = true } = {}) 
   const pre = preconditions.get(name)
   if (pre) {
     let okPre
-    try { okPre = pre(op) } catch (e) { return bad('OP_PRECONDITION_THREW', String(e?.message ?? e)) }
-    if (okPre !== true) return bad(typeof okPre === 'string' ? okPre : 'OP_PRECONDITION_FALSE', name)
+    try {
+      okPre = pre(op)
+      return pending(okPre)
+        ? Promise.resolve(okPre).then(checked, e => failed('OP_PRECONDITION_THREW', String(e?.message ?? e)))
+        : checked(okPre)
+    } catch (e) { return failed('OP_PRECONDITION_THREW', String(e?.message ?? e)) }
   }
-
-  let result
-  try { result = perform(op) } catch (e) { return bad('OP_THREW', String(e?.message ?? e)) }
-  if (result && result.ok === false) return bad(result.why ?? 'OP_REFUSED', result.detail ?? null)
-
-  counts.applied++
-  counts.byOp[name] = (counts.byOp[name] ?? 0) + 1
-  counts.byActor[by] = (counts.byActor[by] ?? 0) + 1
-  if (shouldRecord) record(op, by)
-  return { ok: true, op: name, result: result ?? null }
+  return effect()
 }
 
 // The log, and the PLAN derived from it. Two different things, and the draft
@@ -223,28 +259,57 @@ export const opCounts = () => ({ ...counts, byOp: { ...counts.byOp }, byActor: {
 // watched one.
 export function replay(steps, { by = 'replay', onStep = null, stopOnRefusal = true } = {}) {
   const out = []
-  for (let i = 0; i < steps.length; i++) {
-    const r = apply(steps[i], { by, record: false })
+  const startedIn = epoch
+  const done = () => ({ steps: out, ok: startedIn === epoch && out.every(s => s.ok), ran: out.length,
+    ...(startedIn === epoch ? {} : { why: 'OP_RESET' }) })
+  const accept = (i, r) => {
     out.push({ i, op: steps[i].op, ...r })
     onStep?.(i, steps[i], r)
-    if (!r.ok && stopOnRefusal) break
+    return currentReplay() && (r.ok || !stopOnRefusal)
   }
-  return { steps: out, ok: out.every((s) => s.ok), ran: out.length }
+  const currentReplay = () => startedIn === epoch
+  const next = (from) => {
+    for (let i = from; i < steps.length; i++) {
+      if (!currentReplay()) {
+        out.push({ i, op: steps[i].op, ok: false, why: 'OP_RESET' })
+        break
+      }
+      const r = apply(steps[i], { by, record: false })
+      if (pending(r)) return Promise.resolve(r).then(r => accept(i, r) ? next(i + 1) : done())
+      if (!accept(i, r)) break
+    }
+    return done()
+  }
+  return next(0)
 }
 
 // Check a plan WITHOUT performing it. The draft's §2 split -- roads before
 // anything moves -- expressed against the seam instead of by hand in `checkStep`.
 // A route whose third step names a deleted road never takes the first.
 export function precheck(steps) {
-  for (let i = 0; i < steps.length; i++) {
-    const s = steps[i]
-    if (!s || typeof s !== 'object' || !Object.hasOwn(TABLE, s.op)) return { ok: false, i, why: 'OP_UNKNOWN' }
-    for (const a of TABLE[s.op].args) if (s[a] == null) return { ok: false, i, why: 'OP_MISSING_ARG', detail: a }
-    const pre = preconditions.get(s.op)
-    if (!pre) continue
-    let okPre
-    try { okPre = pre(s) } catch { return { ok: false, i, why: 'OP_PRECONDITION_THREW' } }
-    if (okPre !== true) return { ok: false, i, why: typeof okPre === 'string' ? okPre : 'OP_PRECONDITION_FALSE' }
+  const startedIn = epoch
+  const checkResult = (i, result) => startedIn !== epoch
+    ? { ok: false, i, why: 'OP_RESET' }
+    : result === true ? null
+      : { ok: false, i, why: typeof result === 'string' ? result : 'OP_PRECONDITION_FALSE' }
+  const next = (from) => {
+    for (let i = from; i < steps.length; i++) {
+      const s = steps[i]
+      if (!s || typeof s !== 'object' || !Object.hasOwn(TABLE, s.op)) return { ok: false, i, why: 'OP_UNKNOWN' }
+      for (const a of TABLE[s.op].args) if (s[a] == null) return { ok: false, i, why: 'OP_MISSING_ARG', detail: a }
+      const pre = preconditions.get(s.op)
+      if (!pre) continue
+      let okPre
+      try {
+        okPre = pre(s)
+        if (pending(okPre)) return Promise.resolve(okPre).then(
+          r => checkResult(i, r) ?? next(i + 1),
+          () => ({ ok: false, i, why: startedIn === epoch ? 'OP_PRECONDITION_THREW' : 'OP_RESET' }))
+      } catch { return { ok: false, i, why: 'OP_PRECONDITION_THREW' } }
+      const refused = checkResult(i, okPre)
+      if (refused) return refused
+    }
+    return { ok: true, i: -1 }
   }
-  return { ok: true, i: -1 }
+  return next(0)
 }

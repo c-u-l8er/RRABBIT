@@ -12,9 +12,9 @@ name: tier1-proof
 
 on:
   push:
-    paths: ['tier1-proof/**', '.github/workflows/tier1-proof.yml']
+    paths: ['tier1-proof/**', 'm2/ops.js', 'test/ops*.mjs', '.github/workflows/tier1-proof.yml']
   pull_request:
-    paths: ['tier1-proof/**', '.github/workflows/tier1-proof.yml']
+    paths: ['tier1-proof/**', 'm2/ops.js', 'test/ops*.mjs', '.github/workflows/tier1-proof.yml']
   workflow_dispatch:
 
 defaults:
@@ -40,12 +40,16 @@ jobs:
       - run: cargo test --release
       - name: verifier reporting regression tests
         run: node --test tools/verification-result.test.mjs
+      - name: synchronous and asynchronous road seam
+        run: node ../test/ops.mjs && node ../test/ops-async.mjs
       - name: the static ACL gate
         run: node tools/check-acl.mjs
       - name: the live battery
         run: xvfb-run -a node tools/proof-battery.mjs
       - name: the handoff battery
         run: xvfb-run -a node tools/handoff-battery.mjs
+      - name: the actual road seam against the native host
+        run: xvfb-run -a node tools/road-seam-battery.mjs
       - name: the geometry contract
         run: xvfb-run -a node tools/geometry-probe.mjs
       - name: a real renderer death

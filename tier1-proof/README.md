@@ -37,6 +37,7 @@ cargo build --release && cargo test --release   # the registry invariants, no re
 node tools/check-acl.mjs           # the static gate: three lists agree, no capability names a window
 node tools/proof-battery.mjs       # the round trip, containment, the authority boundary
 node tools/handoff-battery.mjs     # two apps, one live pane: routing, acceptance, eviction
+node tools/road-seam-battery.mjs   # the actual m2 seam: native read/unread and recorded plans
 node tools/geometry-probe.mjs      # the portable geometry contract — also the macOS gate
 node tools/renderer-crash.mjs      # SIGKILL the pane's renderer; read what the host makes of it
 node tools/pose-screenshot.mjs     # WHERE the pane is, in pixels (needs a display + ImageMagick)
@@ -79,6 +80,16 @@ refusal is defended at three layers, and the sabotage that falsifies it has to d
 three.
 
 ## What this is not
+
+**Road seam integration, 2026-09-12:** the native test executes the actual `m2/ops.js`
+implementation with `read`/`unread` performers backed by this host. Async effects settle
+before success is recorded, host refusals stay refusals, and replay waits and stops
+on failure. A recorded plan omitting `unread` works because the adapter's `read`
+supersedes the old pane under `N=1`, matching the existing paper semantics.
+The existing synchronous API is preserved; callers registering async performers must
+await results. Reset fences late completions from the new log and stops old replay;
+it does not undo a host effect already in flight. This verifies the shared operation
+path, not a finished camera/read-pose integration or new vocabulary ruling.
 
 - **Not the road.** No three.js, no dashes on a curve, no LOD atlas. The road here is DOM,
   because what is under test is the **transition** and the **authority boundary**, not the

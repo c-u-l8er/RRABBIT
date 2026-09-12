@@ -976,6 +976,31 @@ dismantle all three** — the grant table, the instance capability, and the decl
 `pane_offer`. A sabotage needing three edits is evidence the layers are not one layer written
 three times.
 
+### 12.4b The actual road seam crosses the native boundary — 2026-09-12
+
+The harness's own table was not evidence about `m2/ops.js`: the actual road seam
+treated a Promise as immediate success, recorded it before host acceptance, and
+replayed subsequent steps before the host replied. `test/ops-async.mjs` exercises
+that failure against the previous implementation (nine tests fail there).
+
+`apply`, `replay`, and `precheck` now preserve their synchronous result for existing
+performers and return a Promise of that same result when work is asynchronous.
+Only successful completion reaches the log. Host refusal codes survive; rejected
+performers become `OP_THREW`. Replay waits for each step and stops on refusal.
+Reset fences late completion from the next world's log and stops old replay, but
+cannot undo a host effect already started. Independent calls must be sequenced by
+their caller; this is not a global task scheduler.
+
+`tier1-proof/tools/road-seam-battery.mjs` executes the actual module against Tauri
+with a small read/unread adapter. It measures native placement, revocation, stale
+identity refusal, successful-only recording, program use, and replay of the recorded
+plan. Because that plan omits unread, read supersedes an existing pane before
+promotion, preserving both the paper semantics and N=1. No op names are added.
+
+**Remaining integration:** published app signs in the three.js scene, camera arrival
+to native read-rectangle mapping, and the user-facing enter/exit flow. The adapter
+is a proof of the shared seam, not a claim those visual interactions are built.
+
 ### 12.5 What would falsify the whole approach
 
 **A consumer that needs a special case at the seam.** That is `OP_VOCABULARY_DRAFT.md` §9's

@@ -50,7 +50,9 @@ const capability = {
 
 const stages = [];
 const revisionBefore = (run('git', ['rev-parse', 'HEAD']).stdout || '').trim();
-const dirtyBefore = (run('git', ['status', '--porcelain', '--', '.']).stdout || '').trim();
+// The native adapter now executes ../m2/ops.js, so provenance covers the whole
+// repository, not just tier1-proof/.
+const dirtyBefore = (run('git', ['status', '--porcelain', '--', '..']).stdout || '').trim();
 const stage = (name, proves, fn) => {
   console.log(`  running  ${name}`);
   const t0 = Date.now();
@@ -85,6 +87,14 @@ stage('verifier unit tests', 'failures, skips, process exits and incomplete swee
     : { status: 'failed', why: `${r.stdout || ''}\n${r.stderr || ''}`.slice(-1000) };
 });
 
+stage('road seam unit tests', 'synchronous compatibility and asynchronous host completion', () => {
+  const original = run('node', ['../test/ops.mjs']);
+  const asynchronous = run('node', ['../test/ops-async.mjs']);
+  return successfulProcess(original) && successfulProcess(asynchronous)
+    ? { status: 'held', result: 'sync and async road seam tests passed' }
+    : { status: 'failed', why: 'road seam regression; see command logs' };
+});
+
 stage('registry unit tests', 'the whoami/revocation invariants, deterministically', () => {
   const r = run('cargo', ['test', '--release']);
   const m = /test result: ok\. (\d+) passed/.exec(r.stdout || '');
@@ -105,6 +115,12 @@ stage('handoff battery', 'two apps, one live pane: routing, acceptance, eviction
   if (!capability['tauri-driver'] || !capability.WebKitWebDriver || !display)
     return { status: 'skip', why: 'needs tauri-driver, WebKitWebDriver and a display' };
   return fromCounts(run('node', ['tools/handoff-battery.mjs']));
+});
+
+stage('native road seam', 'actual m2 apply/read/unread and recorded plans cross the host boundary', () => {
+  if (!capability['tauri-driver'] || !capability.WebKitWebDriver || !display)
+    return { status: 'skip', why: 'needs tauri-driver, WebKitWebDriver and a display' };
+  return fromCounts(run('node', ['tools/road-seam-battery.mjs']));
 });
 
 stage('geometry contract', 'road 1000x653, pane at the requested rect', () => {
@@ -144,7 +160,7 @@ stage('sabotage sweep', 'every law has a falsifier that can be written', () => {
 
 /* ── the receipt ──────────────────────────────────────────────────────── */
 const commit = (run('git', ['rev-parse', '--short', 'HEAD']).stdout || '').trim();
-const dirty = dirtyBefore || (run('git', ['status', '--porcelain', '--', '.']).stdout || '').trim()
+const dirty = dirtyBefore || (run('git', ['status', '--porcelain', '--', '..']).stdout || '').trim()
   || (revisionBefore !== (run('git', ['rev-parse', 'HEAD']).stdout || '').trim()
     ? 'revision changed during verification' : '');
 const skipped = stages.filter((s) => s.status === 'skip');
