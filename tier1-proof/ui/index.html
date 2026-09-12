@@ -3,42 +3,48 @@
 <title>Tier 1 proof — the road</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin:0; font:13px/1.5 ui-sans-serif,system-ui,sans-serif; background:#0b0d13; color:#c9d3e4; }
+  body { margin:0; overflow:hidden; font:13px/1.5 ui-sans-serif,system-ui,sans-serif; background:#0b0d13; color:#c9d3e4; }
   header { padding:10px 14px; border-bottom:1px solid #1c2130; }
   h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.02em; }
   .sub { color:#6b7689; font-size:11px; margin-top:2px; }
-  #road { position:relative; height:300px; margin:14px; border:1px solid #1c2130;
-          border-radius:6px; background:
-            repeating-linear-gradient(90deg,#11131f 0 60px,#141726 60px 120px); overflow:hidden; }
-  #centre { position:absolute; left:0; right:0; top:150px; height:2px; background:#c8912f; }
-  #signwrap { position:absolute; left:24px; top:18px; display:flex; gap:10px; }
-  #readframe { position:absolute; left:300px; top:20px; width:520px; height:260px;
-               border:1px dashed #35507a; border-radius:4px; display:none; }
+  #road { position:relative; height:clamp(320px,65vh,650px); margin:14px;
+          border:1px solid #1c2130; background:#03040a; overflow:hidden; }
+  #perspective { position:absolute; inset:0; width:100%; height:100%; }
+  #signwrap { position:absolute; inset:0; pointer-events:none; }
+  #signwrap canvas { position:absolute; transform-origin:center; pointer-events:auto;
+    cursor:pointer; border:2px solid #2de2e6; box-shadow:0 0 0 4px #101923; }
+  #signwrap canvas:focus { outline:3px solid #f2c14e; }
+  #readframe { position:absolute; left:50%; top:58px; transform:translateX(-50%);
+               width:min(620px,80%); height:calc(100% - 108px);
+               outline:2px solid #2de2e6; display:none; background:#0b0d13; }
   #readframe.on { display:block; }
+  #road.reading #perspective { opacity:.22; }
+  #drivehint { position:absolute; bottom:10px; left:0; right:0; text-align:center;
+    color:#f2c14e; font:11px ui-monospace,monospace; pointer-events:none; }
   .bar { padding:0 14px 10px; display:flex; gap:6px; flex-wrap:wrap; }
   button { font:12px ui-sans-serif,system-ui,sans-serif; background:#171b28; color:#c9d3e4;
            border:1px solid #2a3145; border-radius:4px; padding:5px 9px; cursor:pointer; }
   button:hover { background:#1e2434; }
   pre { margin:0 14px 14px; padding:10px; background:#0f1219; border:1px solid #1c2130;
         border-radius:6px; font:11px/1.45 ui-monospace,monospace; color:#8fa0bb;
-        white-space:pre-wrap; max-height:230px; overflow:auto; }
+        white-space:pre-wrap; max-height:max(22px,calc(35vh - 180px)); overflow:auto; }
 </style>
 
 <header>
-  <h1>Tier 1 proof — the road</h1>
-  <div class="sub">DOM, not three.js. What is under test is the transition and the authority
-    boundary, not the rendering. ROAD_SHELL.md §12.</div>
+  <h1>T&R · ComputeDriven road</h1>
+  <div class="sub">Standalone Tier 1 · scroll to travel · select a roadside window to enter · leave to return</div>
 </header>
 
 <div id="road">
-  <div id="centre"></div>
+  <canvas id="perspective" aria-label="Road extending ahead, with windows on either side"></canvas>
   <div id="signwrap"></div>
   <div id="readframe"></div>
+  <div id="drivehint">↑ ENTER THE LANE · WINDOWS LEFT & RIGHT · EXIT AHEAD ↑</div>
 </div>
 
 <div class="bar">
-  <button id="enter">read — promote to live</button>
-  <button id="leave">leave — demote to sign</button>
+  <button id="enter">Enter Notes</button>
+  <button id="leave">Leave window · return to road</button>
   <button id="try-place">allowed op (place)</button>
   <button id="try-intent">privileged op</button>
   <button id="try-intent-as-cockpit">privileged op, claiming by: 'cockpit'</button>
@@ -103,10 +109,74 @@ function drawSigns(catalogue) {
   for (const pkg of catalogue.packages) {
     const c = document.createElement('canvas');
     c.width = 240; c.height = 132; c.id = `sign-${pkg.id}`;
+    c.tabIndex = 0;
+    c.setAttribute('role', 'button');
+    c.setAttribute('aria-label', `Enter ${pkg.id}`);
+    c.onclick = async () => { const r = await promote(pkg.id); show(r.ok ? r.result : r); };
+    c.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); c.click(); } };
     wrap.appendChild(c);
     SIGN_PRIMITIVES += drawSign(c, pkg.sign);
   }
+  paintRoad();
 }
+
+/* A single forward-facing projection places the tarmac, dash addresses,
+   sign supports and window centres. Like m2/world.js, opposing windows use
+   the SAME dash; travel changes depth, never swaps x and z. This lightweight
+   standalone renderer does not import the compositor or replace m2. */
+let travel = 0;
+function paintRoad() {
+  const road = document.getElementById('road');
+  const canvas = document.getElementById('perspective');
+  const w = road.clientWidth, h = road.clientHeight, dpr = devicePixelRatio;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d'); g.scale(dpr, dpr);
+  const focal = Math.min(w * .72, 650), horizon = h * .30;
+  const project = (x, y, z) => ({ x:w/2 + focal*x/z, y:horizon + focal*(170-y)/z });
+  const polygon = (points, fill) => {
+    g.beginPath(); points.forEach((p, i) => i ? g.lineTo(p.x,p.y) : g.moveTo(p.x,p.y));
+    g.closePath(); g.fillStyle=fill; g.fill();
+  };
+  const ground = (x1,x2,z1,z2,color) => polygon([
+    project(x1,0,z1),project(x2,0,z1),project(x2,0,z2),project(x1,0,z2)],color);
+  ground(-160,160,120,6000,'#191b23');
+  ground(-163,-160,120,6000,'#5f5740'); ground(160,163,120,6000,'#5f5740');
+  for(let i=0;i<34;i++) {
+    const z=200+i*180-travel;
+    if(z>130) ground(-3,3,z,z+96,'#f2c14e');
+  }
+  // The exit is ahead on the lane, never a crosswise strip through the windows.
+  const exit=project(0,185,1900-travel);
+  g.fillStyle='#163b30'; g.strokeStyle='#b9d8cc';
+  g.fillRect(exit.x-65,exit.y-22,130,34); g.strokeRect(exit.x-65,exit.y-22,130,34);
+  g.fillStyle='#d9eee5'; g.textAlign='center'; g.font='12px ui-monospace,monospace';
+  g.fillText('EXIT · AHEAD ↑',exit.x,exit.y);
+  for(const [i,c] of [...document.querySelectorAll('#signwrap canvas')].entries()) {
+    const side=i%2 ? 1:-1, z=720+Math.floor(i/2)*360-travel;
+    const p=project(side*310,190,z), foot=project(side*310,0,z), scale=focal/z;
+    g.strokeStyle='#a98430'; g.lineWidth=Math.max(2,6*scale);
+    g.beginPath();g.moveTo(p.x,p.y+66*scale);g.lineTo(foot.x,foot.y);g.stroke();
+    c.style.left=`${p.x}px`;c.style.top=`${p.y}px`;
+    c.style.transform=`translate(-50%,-50%) scale(${scale}) perspective(${z}px) rotateY(${-side*.42}rad)`;
+    c.dataset.side=String(side); c.dataset.depth=String(z);
+    g.fillStyle='#f2c14e';g.font='11px ui-monospace,monospace';
+    g.fillText(`${side<0 ? '↖' : '↗'} ENTER ${CATALOGUE.packages[i].id.toUpperCase()}`,p.x,p.y-80*scale);
+  }
+  g.fillStyle='#f2c14e'; g.font='bold 15px ui-monospace,monospace';
+  g.fillText('T&R  ·  COMPUTEDRIVEN',w/2,28);
+}
+document.getElementById('road').addEventListener('wheel', (e) => {
+  if(document.getElementById('readframe').classList.contains('on')) return;
+  e.preventDefault(); travel=Math.max(0,Math.min(240,travel+e.deltaY*.35));paintRoad();
+}, {passive:false});
+let resizeTimer;
+window.addEventListener('resize', () => {
+  paintRoad(); clearTimeout(resizeTimer);
+  // Native panes cannot follow CSS transforms. Leave on resize rather than
+  // displaying a live pane against a frame that has moved underneath it.
+  if(document.getElementById('readframe').classList.contains('on'))
+    resizeTimer=setTimeout(async () => { await demote();show('Returned to the road after resizing. Enter the window to resume.'); },100);
+});
 
 function drawSign(c, sign) {
   const g = c.getContext('2d');
@@ -148,12 +218,14 @@ function readRect() {
 let CAPTURED_GENERATION = null;
 
 async function promote(pkg, task) {
+  const wasReading = document.getElementById('readframe').classList.contains('on');
   document.getElementById('readframe').classList.add('on');
   const r = await apply('promote', { rect: readRect(), package: pkg, task: task ?? null });
   if (r.ok) {
+    document.getElementById('road').classList.add('reading');
     CAPTURED_GENERATION = r.result.pane.generation;
     document.getElementById('signwrap').style.display = 'none';
-  } else {
+  } else if (!wasReading) {
     document.getElementById('readframe').classList.remove('on');
   }
   return r;
@@ -161,6 +233,8 @@ async function promote(pkg, task) {
 
 async function demote() {
   const r = await apply('demote');
+  if (!r.ok) return r;
+  document.getElementById('road').classList.remove('reading');
   document.getElementById('readframe').classList.remove('on');
   document.getElementById('signwrap').style.display = '';
   drawSigns(CATALOGUE);

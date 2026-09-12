@@ -3,6 +3,17 @@
 **One road, one pane, one transition** — and then **two apps across that boundary**.
 `../docs/ROAD_SHELL.md` §12 and §12.4a.
 
+**Visual correction 2026-09-12.** The horizontal test strip has been replaced
+with a forward-facing perspective road, opposing published app signs on the same
+depth, bounded scroll travel, and clickable/keyboard-accessible signs. Entering
+opens a centered, axis-aligned native pane. Leaving restores the signs. Resizing
+returns to the road so a native pane cannot remain at obsolete CSS coordinates.
+This standalone canvas/DOM renderer follows T&R's road direction and opposed
+window convention; it is not the m2 compositor, animated camera approach, full
+cockpit, or a working exit-ramp implementation. The exit sign is a visual marker.
+The screenshot probe now checks opposing sign alignment and enters through the
+Notes sign, saving both the road and read pose.
+
 ```
 published sign  →  read pose  →  LIVE pane  →  leave read pose  →  published sign
                                      │
@@ -17,8 +28,11 @@ The sweep now restores with fresh timestamps, propagates failures, and runs the
 handoff battery against the restored executable. Cite the dated receipt for the
 tested revision and counts; this header is not a substitute for a complete run.
 
-Geometry is an **acceptance gate**, not a note — road 1000 × 653, pane 522 × 262 at
-the requested rect — and so is **containment**: across 73 samples taken from the
+Geometry is an **acceptance gate**, not a note. The original measurement was
+road 1000 × 653, pane 522 × 262; the responsive visual correction measured a
+1000 × 700 road viewport and 620 × 347 pane at (190, 131), with zero pixel offset
+at 2× display scale. The probes derive the expected rect from the current frame.
+So is **containment**: in the original run, across 73 samples taken from the
 pane's creation through its settling, it is never visible or interactive outside
 that rectangle. The host holds it contained ~2.7 s, then reveals it in one step.
 
